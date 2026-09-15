@@ -82,6 +82,14 @@ func TestServerEndToEnd(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// 2b. count_tokens requires auth too
+	resp, _ = http.Post(ts.URL+"/v1/messages/count_tokens", "application/json",
+		strings.NewReader(`{"model":"test-model","messages":[]}`))
+	if resp.StatusCode != 401 {
+		t.Fatalf("count_tokens want 401, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
 	// 3. good key → stream
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"test-model","stream":true,"messages":[]}`))
@@ -193,7 +201,7 @@ func TestAdminListEndpointsNeverReturnNullArrays(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	for _, path := range []string{"providers", "keys", "requests?limit=10", "summary?hours=1&bucket=hour"} {
+	for _, path := range []string{"providers", "keys", "requests?limit=10", "summary?hours=1&bucket=hour", "breakdown?by=model"} {
 		req, _ := http.NewRequest("GET", ts.URL+"/admin/api/"+path, nil)
 		req.SetBasicAuth("", "secretpw")
 		resp, err := http.DefaultClient.Do(req)
@@ -202,10 +210,38 @@ func TestAdminListEndpointsNeverReturnNullArrays(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		for _, field := range []string{`"models":null`, `"accounts":null`, `"keys":null`, `"requests":null`, `"series":null`} {
+		for _, field := range []string{`"models":null`, `"accounts":null`, `"keys":null`, `"requests":null`, `"series":null`, `"breakdown":null`} {
 			if bytes.Contains(body, []byte(field)) {
 				t.Errorf("%s: %s leaked into response", path, field)
 			}
 		}
+	}
+}
+
+// An unset/empty admin password must fail closed — subtle.ConstantTimeCompare
+// on two empty slices returns 1, which would open the admin API to anyone.
+func TestEmptyAdminPasswordFailsClosed(t *testing.T) {
+	srv := New(nil, nil, nil, "", "", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/admin/api/summary", nil)
+	req.SetBasicAuth("", "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("summary want 401, got %d", resp.StatusCode)
+	}
+
+	resp, err = http.Post(ts.URL+"/admin/api/login", "application/json", strings.NewReader(`{"password":""}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("login want 401, got %d", resp.StatusCode)
 	}
 }

@@ -318,7 +318,7 @@ func (s *Store) BreakdownBy(col string, d time.Duration) ([]Breakdown, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Breakdown
+	out := make([]Breakdown, 0)
 	for rows.Next() {
 		var b Breakdown
 		if err := rows.Scan(&b.Name, &b.Requests, &b.Errors, &b.TokIn, &b.TokOut, &b.CacheRd, &b.Cost); err == nil {

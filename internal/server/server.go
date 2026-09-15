@@ -48,7 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.wrap(s.Proxy.ServeChat))
 	mux.HandleFunc("POST /v1/messages", s.wrap(s.Proxy.ServeMessages))
-	mux.HandleFunc("POST /v1/messages/count_tokens", s.wrapCountTokens)
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.wrap(s.wrapCountTokens))
 	mux.HandleFunc("GET /v1/models", s.wrap(s.handleModels))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -140,12 +140,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", 400)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(s.adminPass)) != 1 {
+	if s.adminPass == "" || subtle.ConstantTimeCompare([]byte(req.Password), []byte(s.adminPass)) != 1 {
 		http.Error(w, "unauthorized", 401)
 		return
 	}
 	tok := make([]byte, 24)
-	rand.Read(tok)
+	if _, err := rand.Read(tok); err != nil {
+		http.Error(w, "entropy failure", 500)
+		return
+	}
 	token := hex.EncodeToString(tok)
 	s.adminMu.Lock()
 	s.sessions[token] = time.Now().Add(7 * 24 * time.Hour)
@@ -166,13 +169,17 @@ func (s *Server) adminAuthed(r *http.Request) bool {
 	if c, err := r.Cookie("ar_admin"); err == nil {
 		s.adminMu.Lock()
 		exp, ok := s.sessions[c.Value]
+		if ok && !time.Now().Before(exp) {
+			delete(s.sessions, c.Value)
+			ok = false
+		}
 		s.adminMu.Unlock()
-		if ok && time.Now().Before(exp) {
+		if ok {
 			return true
 		}
 	}
 	_, pw, ok := r.BasicAuth()
-	return ok && subtle.ConstantTimeCompare([]byte(pw), []byte(s.adminPass)) == 1
+	return ok && s.adminPass != "" && subtle.ConstantTimeCompare([]byte(pw), []byte(s.adminPass)) == 1
 }
 
 func (s *Server) wrapAdmin(h http.HandlerFunc) http.HandlerFunc {
