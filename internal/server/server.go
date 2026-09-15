@@ -231,7 +231,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(map[string]any{"breakdown": rows})
 	case path == "keys" && r.Method == "GET":
-		var out []map[string]any
+		out := make([]map[string]any, 0, len(s.Proxy.Reg.Config().Keys))
 		for _, k := range s.Proxy.Reg.Config().Keys {
 			out = append(out, map[string]any{
 				"name": k.Name, "key_suffix": suffix(k.Key), "allow": k.Allow, "rpm": k.RPM,
@@ -239,11 +239,11 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(map[string]any{"keys": out})
 	case path == "providers" && r.Method == "GET":
-		var out []map[string]any
+		out := make([]map[string]any, 0, len(s.Proxy.Reg.Config().Providers))
 		for _, p := range s.Proxy.Reg.Config().Providers {
 			out = append(out, map[string]any{
 				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
-				"models": p.Models, "dispatch_interval_ms": p.DispatchIntervalMS,
+				"models": nonNil(p.Models), "dispatch_interval_ms": p.DispatchIntervalMS,
 				"auth_type": p.Auth.Type,
 				"accounts":  oauthAccountStates(p),
 			})
@@ -261,7 +261,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		for _, p := range cfg.Providers {
 			provs = append(provs, map[string]any{
 				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
-				"models": p.Models, "auth_type": p.Auth.Type,
+				"models": nonNil(p.Models), "auth_type": p.Auth.Type,
 				"num_keys":    len(p.Auth.Keys), "num_accounts": len(p.Auth.OAuth),
 				"session":     p.Session,
 				"dispatch_interval_ms": p.DispatchIntervalMS,
@@ -285,8 +285,15 @@ func suffix(k string) string {
 	return k
 }
 
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
 func oauthAccountStates(p *config.Provider) []map[string]any {
-	var out []map[string]any
+	out := make([]map[string]any, 0, len(p.Auth.OAuth))
 	for _, a := range p.Auth.OAuth {
 		out = append(out, map[string]any{
 			"name": a.Name, "kind": a.Kind, "disabled": a.Disabled,

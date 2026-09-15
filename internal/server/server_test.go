@@ -164,3 +164,48 @@ func TestServerEndToEnd(t *testing.T) {
 	}
 	t.Fatal("records never landed in store")
 }
+
+// Nil Go slices marshal to JSON null; the dashboard does .map/.length on these
+// arrays, so a null here blanks the whole tab (providers crash, 2026-09-16).
+func TestAdminListEndpointsNeverReturnNullArrays(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			// no Models, no OAuth accounts — both fields would be nil
+			{Name: "empty", BaseURL: "http://127.0.0.1:1", Wire: "openai",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"sk-up"}}},
+		},
+	}
+	cfg.Defaults()
+	cfg.Validate()
+	reg := provider.New(cfg)
+	p := proxy.NewProxy(reg, st, cfg.CostFor)
+	p.Version = "test"
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, "", "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	for _, path := range []string{"providers", "keys", "requests?limit=10", "summary?hours=1&bucket=hour"} {
+		req, _ := http.NewRequest("GET", ts.URL+"/admin/api/"+path, nil)
+		req.SetBasicAuth("", "secretpw")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		for _, field := range []string{`"models":null`, `"accounts":null`, `"keys":null`, `"requests":null`, `"series":null`} {
+			if bytes.Contains(body, []byte(field)) {
+				t.Errorf("%s: %s leaked into response", path, field)
+			}
+		}
+	}
+}

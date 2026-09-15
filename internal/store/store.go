@@ -242,6 +242,9 @@ func (s *Store) SummarySince(d time.Duration, bucket string) (*Summary, error) {
 			sum.Series = append(sum.Series, p)
 		}
 	}
+	if sum.Series == nil {
+		sum.Series = []SeriesPoint{}
+	}
 	return sum, nil
 }
 
@@ -275,7 +278,7 @@ func (s *Store) Recent(limit int) ([]Row, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Row
+	out := make([]Row, 0, limit)
 	for rows.Next() {
 		var r Row
 		var stream int
