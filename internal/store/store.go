@@ -129,7 +129,19 @@ func (s *Store) run() {
 		case <-tick.C:
 			flush()
 		case <-s.done:
-			return
+			// drain everything already accepted, then final flush
+			for {
+				select {
+				case r := <-s.ch:
+					buf = append(buf, r)
+					if len(buf) >= batch {
+						flush()
+					}
+				default:
+					flush()
+					return
+				}
+			}
 		}
 	}
 }

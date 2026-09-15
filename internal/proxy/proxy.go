@@ -632,6 +632,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 		// upstream anthropic → client openai
 		tr := translate.NewAnth2OAIStream(req["model"].(string))
 		eventName := ""
+		done := false
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text()) // trim \r
 			if line == "" {
@@ -654,20 +655,21 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 			if eventName == "message_stop" {
 				for _, chunk := range tr.Event(eventName, ev) {
 					if writeEvent("", chunk) != nil {
-						return usage, 0
+						return usage, sinceT(r, *firstTouch)
 					}
 				}
 				writeDone(w)
+				done = true
 				break
 			}
 			for _, chunk := range tr.Event(eventName, ev) {
 				if writeEvent("", chunk) != nil {
-					return usage, 0
+					return usage, sinceT(r, *firstTouch)
 				}
 			}
 		}
 		// upstream ended without message_stop: emit finish so client isn't left hanging
-		if tr.SawStart() {
+		if tr.SawStart() && !done {
 			for _, chunk := range tr.Event("message_delta", map[string]any{
 				"delta": map[string]any{"stop_reason": "end_turn"},
 				"usage": map[string]any{"output_tokens": usage.Out},

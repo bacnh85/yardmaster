@@ -256,11 +256,23 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(map[string]any{"ok": true})
 	case path == "config" && r.Method == "GET":
 		cfg := s.Proxy.Reg.Config()
-		redacted := map[string]any{
-			"listen": cfg.Listen, "db_path": cfg.DBPath,
-			"providers": cfg.Providers, "routes": cfg.Routes,
+		// redacted view: never serialize AuthConf (keys/tokens) to the client
+		provs := make([]map[string]any, 0, len(cfg.Providers))
+		for _, p := range cfg.Providers {
+			provs = append(provs, map[string]any{
+				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
+				"models": p.Models, "auth_type": p.Auth.Type,
+				"num_keys":    len(p.Auth.Keys), "num_accounts": len(p.Auth.OAuth),
+				"session":     p.Session,
+				"dispatch_interval_ms": p.DispatchIntervalMS,
+				"adaptive_thinking":    p.AdaptiveThinking,
+				"inject_cache_control": p.InjectCacheControl,
+			})
 		}
-		writeJSON(redacted)
+		writeJSON(map[string]any{
+			"listen": cfg.Listen, "db_path": cfg.DBPath,
+			"providers": provs, "routes": cfg.Routes,
+		})
 	default:
 		http.NotFound(w, r)
 	}

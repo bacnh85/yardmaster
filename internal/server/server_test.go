@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"io"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -118,6 +119,19 @@ func TestServerEndToEnd(t *testing.T) {
 		t.Fatalf("admin want 401, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+
+	// 5b. /admin/api/config must not leak provider credentials
+	req, _ = http.NewRequest("GET", ts.URL+"/admin/api/config", nil)
+	req.SetBasicAuth("", "secretpw")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if bytes.Contains(cfgBody, []byte("sk-up")) {
+		t.Fatalf("config leaks upstream key: %s", cfgBody)
+	}
 
 	// with basic auth
 	req, _ = http.NewRequest("GET", ts.URL+"/admin/api/summary?hours=1", nil)

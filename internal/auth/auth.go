@@ -75,23 +75,24 @@ func (ks *KeyStore) Replace(keys []*config.Key) {
 }
 
 // Check validates a key value and its RPM budget. Returns the key config.
+// Full lock (not RLock): limiter creation mutates limiters; concurrent map
+// writes here would crash the process.
 func (ks *KeyStore) Check(value string) (*config.Key, bool) {
-	ks.mu.RLock()
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
 	k, ok := ks.keys[value]
-	var lim *rate.Limiter
-	if ok && k.RPM > 0 {
-		lim = ks.limiters[value]
+	if !ok {
+		return nil, false
+	}
+	if k.RPM > 0 {
+		lim := ks.limiters[value]
 		if lim == nil {
 			lim = rate.NewLimiter(rate.Limit(float64(k.RPM)/60.0), k.RPM)
 			ks.limiters[value] = lim
 		}
-	}
-	ks.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if lim != nil && !lim.Allow() {
-		return nil, false
+		if !lim.Allow() {
+			return nil, false
+		}
 	}
 	return k, true
 }

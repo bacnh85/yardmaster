@@ -20,10 +20,10 @@ import (
 )
 
 // sseBody reads an SSE response into (firstDataTime over start, all data lines).
-func readSSE(t *testing.T, resp *http.Response) (ttft time.Duration, lines []string) {
+func readSSE(t *testing.T, body io.Reader) (ttft time.Duration, lines []string) {
 	t.Helper()
 	start := time.Now()
-	sc := bufio.NewScanner(resp.Body)
+	sc := bufio.NewScanner(body)
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.HasPrefix(line, "data:") {
@@ -120,7 +120,7 @@ func TestFailoverOn429(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status: %d", resp.StatusCode)
 	}
-	ttft, lines := readSSE(t, resp)
+	ttft, lines := readSSE(t, resp.Body)
 	_ = ttft
 	if len(lines) < 2 || lines[len(lines)-1] != "[DONE]" {
 		t.Fatalf("lines: %v", lines)
@@ -334,7 +334,7 @@ func TestAnthropicClientToOpenAIUpstream(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
 		t.Fatalf("content-type: %s", ct)
 	}
-	ttft, lines := readSSE(t, resp)
+	ttft, lines := readSSE(t, resp.Body)
 	if ttft <= 0 || len(lines) < 3 {
 		t.Fatalf("lines: %v", lines)
 	}
@@ -397,7 +397,8 @@ func TestOpenAIClientToAnthropicUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	_, lines := readSSE(t, resp)
+	raw, _ := io.ReadAll(resp.Body)
+	_, lines := readSSE(t, bytes.NewReader(raw))
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{`"content":"hola"`, `"finish_reason":"stop"`, `"cache_read_tokens":30`} {
 		if !strings.Contains(joined, want) {
@@ -406,6 +407,13 @@ func TestOpenAIClientToAnthropicUpstream(t *testing.T) {
 	}
 	if lines[len(lines)-1] != "[DONE]" {
 		t.Fatalf("last line: %q", lines[len(lines)-1])
+	}
+	// regression: exactly one finish_reason chunk and one [DONE] per stream
+	if n := strings.Count(joined, `"finish_reason":"`); n != 1 {
+		t.Fatalf("finish_reason emitted %d times (want 1): %s", n, joined)
+	}
+	if n := strings.Count(joined, `"stop_reason"`); n > 0 {
+		t.Fatalf("anthropic stop_reason leaked into openai stream: %s", joined)
 	}
 }
 

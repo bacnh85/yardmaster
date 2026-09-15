@@ -628,8 +628,15 @@ func AnthropicRespToOpenAI(am map[string]any) map[string]any {
 func OpenAIRespToAnthropic(om map[string]any) map[string]any {
 	var content []any
 	var reasoning string
-	ch0 := asMap((asSlice(om["choices"]))[0])
-	msg := asMap(ch0["message"])
+	finish := ""
+	var msg map[string]any
+	if chList := asSlice(om["choices"]); len(chList) > 0 {
+		ch0 := asMap(chList[0])
+		if ch0 != nil {
+			finish = asString(ch0["finish_reason"])
+			msg = asMap(ch0["message"])
+		}
+	}
 	if msg != nil {
 		if t := asString(msg["content"]); t != "" {
 			content = append(content, map[string]any{"type": "text", "text": t})
@@ -660,7 +667,7 @@ func OpenAIRespToAnthropic(om map[string]any) map[string]any {
 	return map[string]any{
 		"id": om["id"], "type": "message", "role": "assistant", "model": om["model"],
 		"content":      content,
-		"stop_reason":  StopOAIToAnth(asString(ch0["finish_reason"])),
+		"stop_reason":  StopOAIToAnth(finish),
 		"stop_sequence": nil,
 		"usage":        usage,
 	}

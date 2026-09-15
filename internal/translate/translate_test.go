@@ -243,3 +243,20 @@ func TestErrorEnvelopes(t *testing.T) {
 		t.Fatal("plain wrap anthropic")
 	}
 }
+
+// Regression: empty/missing choices must not panic (Azure content-filter shape).
+func TestOpenAIRespToAnthropicEmptyChoices(t *testing.T) {
+	for _, fixture := range []string{
+		`{"id":"x","object":"chat.completion","model":"m","choices":[]}`,
+		`{"id":"x","object":"chat.completion","model":"m"}`,
+	} {
+		am := OpenAIRespToAnthropic(mustJSON(t, fixture))
+		if am["type"] != "message" {
+			t.Fatalf("bad envelope: %v", am)
+		}
+		content := am["content"].([]any)
+		if len(content) != 1 || content[0].(map[string]any)["type"] != "text" {
+			t.Fatalf("expected empty text block: %v", content)
+		}
+	}
+}
