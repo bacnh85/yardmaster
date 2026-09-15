@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -179,6 +180,8 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 	var ttft time.Duration
 	forwarded := false
 	lastErr := ""
+	var lastStatus int
+	var lastErrBody []byte
 
 	for attempt, tgt := range targets {
 		if attempt > 0 {
@@ -204,7 +207,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 		}
 
 		upModel := provider.UpstreamModel(tgt.Provider, model)
-		httpReq, err := p.buildUpstream(r.Context(), tgt, clientWire, upModel, req, body, strictJSON)
+		httpReq, err := p.buildUpstream(r.Context(), tgt, clientWire, upModel, req, body, strictJSON, r.Header.Get("x-opencode-session"))
 		if err != nil {
 			lastErr = err.Error()
 			continue
@@ -220,23 +223,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			continue
 		}
 
-		// retryable upstream status → next target (nothing forwarded yet)
-		if retryableStatus(resp.StatusCode) {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
-			lastErr = fmt.Sprintf("%s: http %d", tgt.Provider.Name, resp.StatusCode)
-			continue
-		}
-
-		// terminal client error (bad request etc.) → pass through, no failover
+		// retryable/failing upstream status → next target (nothing forwarded yet).
+		// Broad policy on purpose: coding agents send valid requests, and provider-
+		// specific 400/401/403s (unknown model id, bad key) should fall through the
+		// chain. The last upstream error is forwarded if nothing serves the request.
 		if resp.StatusCode >= 400 {
-			p.forwardError(w, r, clientWire, tgt.Provider.Wire, resp)
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
-			rec.Status = resp.StatusCode
-			rec.Provider = tgt.Provider.Name
-			rec.Attempts = attempt + 1
-			rec.Err = fmt.Sprintf("upstream http %d", resp.StatusCode)
-			return
+			lastStatus, lastErrBody, lastErr = resp.StatusCode, b, fmt.Sprintf("%s: http %d", tgt.Provider.Name, resp.StatusCode)
+			continue
 		}
 
 		// success — stream or translate
@@ -263,6 +258,22 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 
 	if !forwarded {
 		if rec.Status == 0 {
+			if lastStatus > 0 {
+				// every target failed — surface the last real upstream error
+				rec.Status = lastStatus
+				rec.Err = lastErr
+				rec.Provider = strings.SplitN(lastErr, ":", 2)[0]
+				var out []byte
+				if clientWire == WireAnthropic {
+					out = translate.ErrToAnthropic(lastErrBody, lastStatus)
+				} else {
+					out = translate.ErrToOpenAI(lastErrBody, lastStatus)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(lastStatus)
+				w.Write(out)
+				return
+			}
 			rec.Status = 502
 			rec.Err = lastErr
 			p.writeError(w, clientWire, 502, "all providers failed: "+lastErr)
@@ -298,7 +309,7 @@ func retryableStatus(code int) bool {
 
 // buildUpstream constructs the upstream request. For openai upstreams the
 // client body may need translation; for anthropic upstreams likewise.
-func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientWire, upModel string, req map[string]any, rawBody []byte, strictJSON bool) (*http.Request, error) {
+func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientWire, upModel string, req map[string]any, rawBody []byte, strictJSON bool, clientSession string) (*http.Request, error) {
 	pv := tgt.Provider
 	url := strings.TrimRight(pv.BaseURL, "/")
 	var bodyOut []byte
@@ -375,14 +386,40 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	for k, v := range pv.ExtraHeaders {
 		httpReq.Header.Set(k, v)
 	}
+	if pv.Session == "opencode" {
+		sid := clientSession
+		if sid == "" {
+			sid = p.opencodeSession(pv.Name + ":" + tgt.APIKey)
+		}
+		httpReq.Header.Set("x-opencode-session", sid)
+		httpReq.Header.Set("x-opencode-client", "agent-router")
+	}
 	// helpful attribution headers
 	httpReq.Header.Set("User-Agent", "agent-router/"+p.Version)
 	return httpReq, nil
 }
 
+// opencodeSession returns a stable uuid per provider+key so upstream routing
+// sticks (opencode requires the header; clients that send their own win).
+
 func oauthToken(tgt *provider.Target) string {
 	// Phase 4 hook: OAuth token providers plug in here.
 	return ""
+}
+
+var opencodeSessions sync.Map
+
+func (p *Proxy) opencodeSession(k string) string {
+	if v, ok := opencodeSessions.Load(k); ok {
+		return v.(string)
+	}
+	b := make([]byte, 16)
+	cryptorand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	v := fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	actual, _ := opencodeSessions.LoadOrStore(k, v)
+	return actual.(string)
 }
 
 func setAuth(h *http.Request, wire, key string) {
@@ -440,13 +477,11 @@ func (b *cancelBody) Close() error {
 // forward writes the upstream response to the client. Returns usage + ttft.
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, stream bool, activeID string) (Usage, time.Duration) {
 	defer resp.Body.Close()
-	var ttft time.Duration
-	firstByte := true
+	var firstTouch time.Time
 	touch := func() {
-		if firstByte {
-			firstByte = false
-			ttft = time.Since(startTime(r))
-			p.Active.TTFT(activeID, float64(ttft.Milliseconds()))
+		if firstTouch.IsZero() {
+			firstTouch = time.Now()
+			p.Active.TTFT(activeID, float64(firstTouch.Sub(startTime(r)).Milliseconds()))
 		}
 	}
 
@@ -464,7 +499,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, clientWire strin
 					touch()
 					tee.Write(buf[:n])
 					if _, werr := w.Write(buf[:n]); werr != nil {
-						return tee.Usage().Estimated(), ttft // client gone → ctx cancels upstream
+						return tee.Usage().Estimated(), sinceT(r, firstTouch) // client gone → ctx cancels upstream
 					}
 					if flusher != nil {
 						flusher.Flush()
@@ -474,23 +509,23 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, clientWire strin
 					break
 				}
 			}
-			return tee.Usage().Estimated(), ttft
+			return tee.Usage().Estimated(), sinceT(r, firstTouch)
 		}
 		b, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return Usage{Estimate: true}, ttft
+			return Usage{Estimate: true}, sinceT(r, firstTouch)
 		}
 		touch()
 		tee.Write(b)
 		w.Write(b)
-		return tee.Usage(), ttft
+		return tee.Usage(), sinceT(r, firstTouch)
 	}
 
 	// wire translation path
 	if stream {
-		return p.forwardTranslateStream(w, r, clientWire, tgt, resp, req, upModel, touch)
+		return p.forwardTranslateStream(w, r, clientWire, tgt, resp, req, upModel, touch, &firstTouch)
 	}
-	return p.forwardTranslateFull(w, clientWire, tgt, resp, req, upModel, touch)
+	return p.forwardTranslateFull(w, r, clientWire, tgt, resp, req, upModel, touch, &firstTouch)
 }
 
 func startTime(r *http.Request) time.Time {
@@ -502,6 +537,13 @@ func startTime(r *http.Request) time.Time {
 	return time.Now()
 }
 
+func sinceT(r *http.Request, t time.Time) time.Duration {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Sub(startTime(r))
+}
+
 const startCtxKey ctxKey = 3
 
 // WithStartTime records when the request entered the server.
@@ -510,7 +552,7 @@ func WithStartTime(ctx context.Context, t time.Time) context.Context {
 }
 
 // forwardTranslateStream: upstream streams in provider wire, client expects the other wire.
-func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, touch func()) (Usage, time.Duration) {
+func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, touch func(), firstTouch *time.Time) (Usage, time.Duration) {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -653,12 +695,12 @@ func writeDone(w http.ResponseWriter) {
 }
 
 // forwardTranslateFull handles non-streaming translation.
-func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, touch func()) (Usage, time.Duration) {
+func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, touch func(), firstTouch *time.Time) (Usage, time.Duration) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	touch()
 	if err != nil {
 		p.writeError(w, clientWire, 502, "upstream read: "+err.Error())
-		return Usage{Estimate: true}, 0
+		return Usage{Estimate: true}, sinceT(r, *firstTouch)
 	}
 	if resp.StatusCode >= 400 {
 		p.forwardError(w, nil, clientWire, tgt.Provider.Wire, resp)

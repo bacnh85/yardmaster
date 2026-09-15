@@ -166,7 +166,10 @@ func (r *Registry) Models() []string {
 	for _, rt := range r.cfg.Routes {
 		if !seen[rt.Match] && rt.Match != "*" {
 			seen[rt.Match] = true
-			out = append(out, strings.TrimSuffix(rt.Match, "*"))
+			alias := strings.TrimSuffix(strings.TrimSuffix(rt.Match, "*"), "-")
+			if alias != "" {
+				out = append(out, alias)
+			}
 		}
 	}
 	for _, p := range r.cfg.Providers {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -157,6 +158,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminAuthed(r *http.Request) bool {
+	// AR_ALLOW_ANON_ADMIN=1: demo/screenshot mode — dashboard open without login.
+	// Never enable on a routed interface.
+	if os.Getenv("AR_ALLOW_ANON_ADMIN") == "1" {
+		return true
+	}
 	if c, err := r.Cookie("ar_admin"); err == nil {
 		s.adminMu.Lock()
 		exp, ok := s.sessions[c.Value]

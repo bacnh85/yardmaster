@@ -133,34 +133,66 @@ func TestFailoverOn429(t *testing.T) {
 	}
 }
 
-func TestTerminalErrorNoFailover(t *testing.T) {
-	var calls2 atomic.Int32
+func TestProviderErrorFailsOverAndLastErrorSurfaces(t *testing.T) {
+	var calls1, calls2, calls3 atomic.Int32
 	up1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls1.Add(1)
 		w.WriteHeader(400)
-		w.Write([]byte(`{"error":{"message":"bad request"}}`))
+		w.Write([]byte(`{"error":{"message":"unsupported_model","code":"unsupported_model"}}`))
 	}))
 	defer up1.Close()
 	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls2.Add(1)
-		w.WriteHeader(200)
+		w.WriteHeader(200) // serves fine
+		w.Write([]byte(`{"id":"x","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{}}`))
 	}))
 	defer up2.Close()
+	up3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls3.Add(1)
+		w.WriteHeader(400)
+		w.Write([]byte(`{"error":{"message":"bad"}}`))
+	}))
+	defer up3.Close()
 
 	cfg := &config.Config{Providers: []*config.Provider{
 		{Name: "a", BaseURL: up1.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k"}}},
 		{Name: "b", BaseURL: up2.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k"}}},
+		{Name: "c", BaseURL: up3.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k"}}},
 	}}
 	p := NewProxy(provider.New(cfg), nil, nil)
 	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
 	defer ts.Close()
 
-	resp, _ := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m"}`))
-	defer resp.Body.Close()
-	if resp.StatusCode != 400 {
-		t.Fatalf("want 400 passthrough, got %d", resp.StatusCode)
+	// provider a 400s → b serves → client 200
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m"}`))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if calls2.Load() != 0 {
-		t.Fatal("should not failover on 400")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "ok") {
+		t.Fatalf("want 200 from failover, got %d %s", resp.StatusCode, body)
+	}
+	if calls1.Load() != 1 || calls2.Load() != 1 || calls3.Load() != 0 {
+		t.Fatalf("calls: a=%d b=%d c=%d", calls1.Load(), calls2.Load(), calls3.Load())
+	}
+
+	// all fail → client gets the LAST upstream error status + body
+	cfg2 := &config.Config{Providers: []*config.Provider{
+		{Name: "a", BaseURL: up1.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k"}}},
+		{Name: "c", BaseURL: up3.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k"}}},
+	}}
+	p2 := NewProxy(provider.New(cfg2), nil, nil)
+	ts2 := httptest.NewServer(http.HandlerFunc(p2.ServeChat))
+	defer ts2.Close()
+	resp2, err := http.Post(ts2.URL, "application/json", strings.NewReader(`{"model":"m"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != 400 || !strings.Contains(string(body2), "bad") {
+		t.Fatalf("want last upstream error forwarded, got %d %s", resp2.StatusCode, body2)
 	}
 }
 

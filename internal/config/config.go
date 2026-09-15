@@ -25,6 +25,7 @@ type Provider struct {
 	Name               string            `yaml:"name"`
 	BaseURL            string            `yaml:"base_url"`
 	Wire               string            `yaml:"wire"` // "openai" | "anthropic"
+	Session            string            `yaml:"session"`            // "opencode" adds x-opencode-session/client headers
 	Auth               AuthConf          `yaml:"auth"`
 	Models             []string          `yaml:"models"`    // upstream models this provider serves; empty = any
 	ModelMap           map[string]string `yaml:"model_map"` // requested model -> upstream model id
