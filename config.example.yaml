@@ -1,0 +1,76 @@
+# agent-router config — copy to config.yaml and fill in your keys.
+listen: ":8787"
+db_path: "agent-router.db"
+admin_password: "change-me"        # dashboard + admin API
+
+providers:
+  # --- DeepSeek (OpenAI wire; models: deepseek-flash = V4.1 Flash, deepseek-v4-pro) ---
+  - name: deepseek
+    base_url: https://api.deepseek.com
+    wire: openai
+    auth: { type: static, keys: ["sk-..."] }
+    models: [deepseek-flash, deepseek-v4-pro]
+
+  # --- Z.ai GLM Coding Plan (Anthropic wire; maximizes subscription usage) ---
+  # - cache_control injection → cache reads ~0.1x input
+  # - fast mode + adaptive thinking (ZCode parity)
+  # - 1s dispatch spacing → avoids 429 code 1302 rate limit
+  - name: zai
+    base_url: https://api.z.ai/api/anthropic
+    wire: anthropic
+    auth: { type: static, keys: ["..."] }
+    models: [glm-5.3, glm-5.3-flash, glm-5.2]
+    dispatch_interval_ms: 1000
+    adaptive_thinking: true
+    inject_cache_control: true
+    extra_headers: { anthropic-beta: "fast-mode-2026-02-01" }
+    body_overrides: { speed: fast }
+
+  # --- OpenRouter (OpenAI wire, model ids like "deepseek/deepseek-chat") ---
+  - name: openrouter
+    base_url: https://openrouter.ai/api/v1
+    wire: openai
+    auth: { type: static, keys: ["sk-or-..."] }
+    models: [deepseek/deepseek-chat, deepseek/deepseek-r1]
+
+  # --- OpenCode Zen (per-family wires: GPT/Grok -> responses, Claude -> anthropic) ---
+  - name: zen-claude
+    base_url: https://opencode.ai/zen/v1
+    wire: anthropic
+    auth: { type: static, keys: ["..."] }
+    models: [claude-sonnet-5, claude-haiku-4.5]
+
+  # --- Command Code Provider API (both wires) ---
+  - name: cmdcode
+    base_url: https://api.commandcode.ai/provider/v1
+    wire: openai
+    auth: { type: static, keys: ["..."] }
+    models: [claude-sonnet-5, minimax-m3]
+
+  # --- BigModel (CN) GLM Coding Plan, same method as zai ---
+  # - name: bigmodel
+  #   base_url: https://open.bigmodel.cn/api/anthropic
+  #   wire: anthropic
+  #   auth: { type: static, keys: ["..."] }
+  #   models: [glm-5.3]
+  #   dispatch_interval_ms: 1000
+  #   adaptive_thinking: true
+  #   inject_cache_control: true
+
+routes:
+  - match: "glm-*"
+    chain: [zai]
+  - match: "deepseek*"
+    chain: [deepseek, openrouter]
+  - match: "claude-*"
+    chain: [zen-claude, cmdcode]
+
+# keys CLI agents authenticate with (agent-router key add NAME generates one)
+keys:
+  - key: "ar-REPLACE_ME"
+    name: pi-laptop
+    allow: ["*"]
+
+# optional per-model cost overrides ($/Mtok); built-in defaults cover common models
+costs:
+  deepseek-flash: { input: 0.30, output: 1.20, cache_read: 0.03 }
