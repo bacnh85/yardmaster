@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { get, login } from "./api";
 import { Toaster } from "./components";
+import { TABS, tabFromHash, type Tab } from "./route";
 import {
   IconActivity, IconChart, IconGauge, IconList, IconKey, IconServer, IconSettings,
   IconSun, IconMoon,
@@ -13,8 +14,6 @@ import { EndpointsTab } from "./tabs/EndpointsTab";
 import { ProvidersTab } from "./tabs/ProvidersTab";
 import { SettingsTab } from "./tabs/SettingsTab";
 
-type Tab = "live" | "usage" | "latency" | "requests" | "endpoints" | "providers" | "settings";
-const TABS: Tab[] = ["live", "usage", "latency", "requests", "endpoints", "providers", "settings"];
 // read once at module init: the pw-login flow clears the hash before tabs mount
 const BOOT = new URLSearchParams(location.hash.replace(/^#\/?/, ""));
 
@@ -37,17 +36,11 @@ const NAV: { group: string; tabs: { id: Tab; label: string; icon: React.ReactNod
 ];
 
 // #/tab in the hash keeps the tab across refresh/back; legacy #tab=... and #pw=... still honored
-const tabFromHash = (): Tab => {
-  const h = location.hash.replace(/^#\/?/, "");
-  const t0 = h.split("?")[0];
-  const t = (TABS as string[]).includes(t0) ? t0 : new URLSearchParams(h).get("tab") || "";
-  if (t === "keys") return "endpoints"; // legacy deep links
-  return (TABS as string[]).includes(t) ? (t as Tab) : "live";
-};
+const tabFromLocation = (): Tab => tabFromHash(location.hash);
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
-  const [tab, setTab] = useState<Tab>(tabFromHash);
+  const [tab, setTab] = useState<Tab>(tabFromLocation);
   const [theme, setTheme] = useState<string>(() => document.documentElement.dataset.theme || "light");
   const [version, setVersion] = useState("");
 
@@ -65,7 +58,7 @@ export default function App() {
 
   // two-way tab <-> URL hash
   useEffect(() => {
-    const onHash = () => setTab(tabFromHash());
+    const onHash = () => setTab(tabFromLocation());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -90,7 +83,7 @@ export default function App() {
           <div key={g.group} className="nav-group-wrap">
             <div className="nav-group">{g.group}</div>
             {g.tabs.map((t) => (
-              <button key={t.id} role="tab" aria-selected={tab === t.id} className="nav-item"
+              <button key={t.id} role="tab" aria-selected={tab === t.id} className="nav-item" aria-label={t.label}
                 onClick={() => selectTab(t.id)}>
                 {t.icon}<span>{t.label}</span>
               </button>

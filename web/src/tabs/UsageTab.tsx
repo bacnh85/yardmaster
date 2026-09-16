@@ -19,8 +19,15 @@ export function UsageTab() {
   const [byProvider, setByProvider] = useState<BreakdownRow[]>([]);
 
   useEffect(() => {
-    get(`breakdown?by=model&hours=${hours}`).then((r: { breakdown: BreakdownRow[] }) => setByModel(r.breakdown)).catch(() => {});
-    get(`breakdown?by=provider&hours=${hours}`).then((r: { breakdown: BreakdownRow[] }) => setByProvider(r.breakdown)).catch(() => {});
+    // dead-flag: a slow response for the old range must not overwrite the new
+    let dead = false;
+    get(`breakdown?by=model&hours=${hours}`)
+      .then((r: { breakdown: BreakdownRow[] }) => { if (!dead) setByModel(r.breakdown); })
+      .catch(() => { if (!dead) setByModel([]); });
+    get(`breakdown?by=provider&hours=${hours}`)
+      .then((r: { breakdown: BreakdownRow[] }) => { if (!dead) setByProvider(r.breakdown); })
+      .catch(() => { if (!dead) setByProvider([]); });
+    return () => { dead = true; };
   }, [hours]);
 
   return (
