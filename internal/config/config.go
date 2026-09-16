@@ -213,3 +213,17 @@ func GenKey() string {
 	}
 	return "ar-" + hex.EncodeToString(b)
 }
+
+// Save writes the config back as YAML (atomic replace). Dashboard edits
+// rewrite the file; comments in hand-written YAML are not preserved.
+func (c *Config) Save(path string) error {
+	b, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}

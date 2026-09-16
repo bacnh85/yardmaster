@@ -1,24 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  get, login, fmtDur, fmtMs, fmtN, fmtTime, fmtUSD,
-  BreakdownRow, KeyRow, LivePayload, ProviderRow, ReqRow, Summary,
+  get, post, put, del, login, fmtDur, fmtMs, fmtN, fmtTime, fmtUSD,
+  BreakdownRow, KeyCreated, KeyRow, LivePayload, ProviderRow, ReqRow, Summary,
 } from "./api";
 import { TimeChart } from "./Chart";
 
-type Tab = "live" | "usage" | "latency" | "requests" | "keys" | "providers" | "settings";
-const TABS: Tab[] = ["live", "usage", "latency", "requests", "keys", "providers", "settings"];
+type Tab = "live" | "usage" | "latency" | "requests" | "endpoints" | "providers" | "settings";
+const TABS: Tab[] = ["live", "usage", "latency", "requests", "endpoints", "providers", "settings"];
+// read once at module init: the pw-login flow clears the hash before tabs mount
+const BOOT = new URLSearchParams(location.hash.slice(1));
+const NAV: { group: string; tabs: Tab[] }[] = [
+  { group: "Proxy", tabs: ["live", "usage", "latency", "requests"] },
+  { group: "Access", tabs: ["endpoints", "providers"] },
+  { group: "System", tabs: ["settings"] },
+];
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [tab, setTab] = useState<Tab>(() => {
-    const t = new URLSearchParams(location.hash.slice(1)).get("tab") as Tab | null;
+    const t = BOOT.get("tab") as Tab | null;
+    if ((t as string) === "keys") return "endpoints"; // legacy deep links
     return t && TABS.includes(t) ? t : "live";
   });
 
   // deep link: #pw=<password>&tab=<tab> (hash stays client-side; also enables
   // headless captures). pw is consumed and cleared from the hash after login.
   useEffect(() => {
-    const h = new URLSearchParams(location.hash.slice(1));
+    const h = BOOT;
     const pw = h.get("pw");
     if (pw) {
       history.replaceState(null, "", location.pathname);
@@ -32,29 +40,31 @@ export default function App() {
   if (!authed) return <Login onOk={() => setAuthed(true)} />;
 
   return (
-    <>
-      <header className="hdr">
-        <h1>agent-router</h1>
-        <div className="spacer" />
-        <span className="faint">v0.1.0</span>
-      </header>
-      <nav className="tabs" role="tablist">
-        {TABS.map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className="tab" onClick={() => setTab(t)}>
-            {t}
-          </button>
+    <div className="shell">
+      <nav className="side" aria-label="main navigation">
+        <div className="brand">agent-router</div>
+        {NAV.map((g) => (
+          <div key={g.group} className="nav-group-wrap">
+            <div className="nav-group">{g.group}</div>
+            {g.tabs.map((t) => (
+              <button key={t} role="tab" aria-selected={tab === t} className="nav-item" onClick={() => setTab(t)}>
+                {t}
+              </button>
+            ))}
+          </div>
         ))}
+        <div className="ver faint">v0.1.0</div>
       </nav>
       <main>
         {tab === "live" && <LiveTab />}
         {tab === "usage" && <UsageTab />}
         {tab === "latency" && <LatencyTab />}
         {tab === "requests" && <RequestsTab />}
-        {tab === "keys" && <KeysTab />}
+        {tab === "endpoints" && <EndpointsTab />}
         {tab === "providers" && <ProvidersTab />}
         {tab === "settings" && <SettingsTab />}
       </main>
-    </>
+    </div>
   );
 }
 
@@ -82,7 +92,7 @@ function LiveTab() {
   const [connected, setConnected] = useState(false);
   useEffect(() => {
     // shot=1: single snapshot via fetch (for headless captures) instead of SSE
-    if (new URLSearchParams(location.hash.slice(1)).get("shot")) {
+    if (BOOT.get("shot")) {
       get("summary?hours=1").then((s: { inflight: number; total: number }) =>
         setLive({ active: [], inflight: s.inflight, total: s.total })).then(() => setConnected(true));
       return;
@@ -300,43 +310,232 @@ function StatusBadge({ status }: { status: number }) {
   return <span className={`badge ${cls}`}>{status}</span>;
 }
 
-/* ---- Keys ---- */
+/* ---- Endpoints (inbound API + keys) ---- */
 
-function KeysTab() {
+const ENDPOINTS: [string, string, string][] = [
+  ["POST", "/v1/chat/completions", "OpenAI wire (streaming supported)"],
+  ["POST", "/v1/messages", "Anthropic wire (streaming supported)"],
+  ["POST", "/v1/messages/count_tokens", "Anthropic token count"],
+  ["GET", "/v1/models", "models routable by your key"],
+  ["GET", "/healthz", "liveness (no auth)"],
+];
+
+function EndpointsTab() {
   const [keys, setKeys] = useState<KeyRow[]>([]);
-  useEffect(() => { get("keys").then((r: { keys: KeyRow[] }) => setKeys(r.keys)); }, []);
+  const [name, setName] = useState("");
+  const [allow, setAllow] = useState("*");
+  const [created, setCreated] = useState<KeyCreated | null>(null);
+  const [err, setErr] = useState("");
+  const [copied, setCopied] = useState("");
+  const load = useCallback(() => { get("keys").then((r: { keys: KeyRow[] }) => setKeys(r.keys)); }, []);
+  useEffect(load, [load]);
+
+  const base = location.origin;
+  const copy = (text: string, what: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(what);
+      setTimeout(() => setCopied(""), 1500);
+    });
+  };
+  const addKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr("");
+    try {
+      const allowList = allow.split(",").map((s) => s.trim()).filter(Boolean);
+      const r = (await post("keys", { name: name.trim(), allow: allowList })) as KeyCreated;
+      setCreated(r);
+      setName("");
+      load();
+    } catch (e2) {
+      setErr(String(e2 instanceof Error ? e2.message : e2));
+    }
+  };
+  const revoke = async (n: string) => {
+    if (!confirm(`Revoke key "${n}"? Clients using it stop working immediately.`)) return;
+    try { await del(`keys/${n}`); load(); } catch (e2) { alert(String(e2)); }
+  };
+
   return (
-    <div className="card" style={{ padding: 0 }}>
-      <table>
-        <thead><tr><th>name</th><th>key</th><th>allowed models</th><th className="n">rpm limit</th></tr></thead>
-        <tbody>
-          {keys.map((k) => (
-            <tr key={k.name}>
-              <td>{k.name}</td>
-              <td className="mono">{k.key_suffix}</td>
-              <td className="mono">{k.allow.join(", ")}</td>
-              <td className="n">{k.rpm > 0 ? fmtN(k.rpm) : "–"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {keys.length === 0 && <div className="empty">no keys configured</div>}
+    <div style={{ display: "grid", gap: 12 }}>
+      <div className="card">
+        <h3>Inbound endpoints</h3>
+        <div className="key-reveal" style={{ marginBottom: 12 }}>
+          <span className="mono">{base}/v1</span>
+          <button className="btn sm" onClick={() => copy(base + "/v1", "base")}>{copied === "base" ? "copied" : "copy"}</button>
+        </div>
+        <table>
+          <thead><tr><th>method</th><th>path</th><th>notes</th></tr></thead>
+          <tbody>
+            {ENDPOINTS.map(([m, p, note]) => (
+              <tr key={p}><td className="mono">{m}</td><td className="mono">{p}</td><td className="muted">{note}</td></tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="faint" style={{ marginTop: 8 }}>
+          authenticate with <span className="mono">Authorization: Bearer &lt;key&gt;</span> or <span className="mono">x-api-key: &lt;key&gt;</span>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>API keys</h3>
+        {created && (
+          <div className="key-reveal" style={{ marginBottom: 12 }}>
+            <span>
+              new key (shown once): <span className="mono">{created.key}</span>
+            </span>
+            <button className="btn sm" onClick={() => copy(created.key, "key")}>{copied === "key" ? "copied" : "copy"}</button>
+          </div>
+        )}
+        <form className="add-key" onSubmit={addKey}>
+          <input placeholder="key name" value={name} required onChange={(e) => setName(e.target.value)} aria-label="key name" />
+          <input placeholder="allowed models, e.g. glm-* or *" value={allow} onChange={(e) => setAllow(e.target.value)} aria-label="allowed models" />
+          <button className="btn primary" type="submit" disabled={!name.trim()}>Add key</button>
+        </form>
+        {err && <div className="error" style={{ color: "var(--danger)", fontSize: 13, marginTop: 8 }}>{err}</div>}
+        {keys.length === 0 ? <div className="empty">no keys configured</div> : (
+          <table style={{ marginTop: 12 }}>
+            <thead><tr><th>name</th><th>key</th><th>allowed models</th><th className="n">rpm limit</th><th></th></tr></thead>
+            <tbody>
+              {keys.map((k) => (
+                <tr key={k.name}>
+                  <td>{k.name}</td>
+                  <td className="mono">{k.key_suffix}</td>
+                  <td className="mono">{k.allow.join(", ")}</td>
+                  <td className="n">{k.rpm > 0 ? fmtN(k.rpm) : "–"}</td>
+                  <td><button className="btn sm danger" onClick={() => revoke(k.name)}>revoke</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
 
 /* ---- Providers ---- */
 
+interface ProviderForm {
+  name: string; wire: string; base_url: string; models: string;
+  keys: string; dispatch_interval_ms: number;
+  adaptive_thinking: boolean; inject_cache_control: boolean;
+}
+
+const EMPTY_FORM: ProviderForm = {
+  name: "", wire: "openai", base_url: "", models: "", keys: "",
+  dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
+};
+
 function ProvidersTab() {
   const [provs, setProvs] = useState<ProviderRow[]>([]);
-  useEffect(() => { get("providers").then((r: { providers: ProviderRow[] }) => setProvs(r.providers)); }, []);
+  const [form, setForm] = useState<ProviderForm | null>(null);
+  const [editName, setEditName] = useState(""); // non-empty = editing this provider
+  const [err, setErr] = useState("");
+  const load = useCallback(() => { get("providers").then((r: { providers: ProviderRow[] }) => setProvs(r.providers)); }, []);
+  useEffect(load, [load]);
+
+  const openAdd = () => { setEditName(""); setForm({ ...EMPTY_FORM }); setErr(""); };
+  const openEdit = (p: ProviderRow) => {
+    setEditName(p.name);
+    setForm({
+      name: p.name, wire: p.wire, base_url: p.base_url, models: p.models.join(", "),
+      keys: "", // blank = keep existing keys (server keeps them when omitted)
+      dispatch_interval_ms: p.dispatch_interval_ms,
+      adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
+    });
+    setErr("");
+  };
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form) return;
+    setErr("");
+    const body = {
+      name: form.name.trim(), wire: form.wire, base_url: form.base_url.trim(),
+      models: form.models.split(",").map((s) => s.trim()).filter(Boolean),
+      ...(form.keys.trim() ? { keys: form.keys.split("\n").map((s) => s.trim()).filter(Boolean) } : {}),
+      dispatch_interval_ms: form.dispatch_interval_ms || 0,
+      adaptive_thinking: form.adaptive_thinking,
+      inject_cache_control: form.inject_cache_control,
+    };
+    try {
+      if (editName) await put(`providers/${editName}`, body);
+      else await post("providers", body);
+      setForm(null);
+      load();
+    } catch (e2) {
+      setErr(String(e2 instanceof Error ? e2.message : e2));
+    }
+  };
+  const remove = async (p: ProviderRow) => {
+    if (!confirm(`Remove provider "${p.name}"? Routes pointing only at it are removed too.`)) return;
+    try { await del(`providers/${p.name}`); load(); } catch (e2) { alert(String(e2)); }
+  };
+  const set = (k: keyof ProviderForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
+    setForm((f) => f && { ...f, [k]: e.target.type === "checkbox" ? (e.target as HTMLInputElement).checked : e.target.value });
+
   return (
     <div style={{ display: "grid", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <h3 style={{ margin: 0, flex: 1 }}>Upstream providers</h3>
+        <button className="btn primary" onClick={openAdd}>Add provider</button>
+      </div>
+
+      {form && (
+        <form className="card" onSubmit={save} aria-label={editName ? "edit provider" : "add provider"}>
+          <h3>{editName ? `Edit provider: ${editName}` : "Add provider"}</h3>
+          <div className="form-grid">
+            <div className="field">
+              <label htmlFor="pf-name">name</label>
+              <input id="pf-name" value={form.name} required disabled={!!editName} onChange={set("name")} placeholder="my-provider" />
+            </div>
+            <div className="field">
+              <label htmlFor="pf-wire">wire</label>
+              <select id="pf-wire" value={form.wire} onChange={set("wire")}>
+                <option value="openai">openai</option>
+                <option value="anthropic">anthropic</option>
+              </select>
+            </div>
+            <div className="field full">
+              <label htmlFor="pf-url">base URL</label>
+              <input id="pf-url" value={form.base_url} required onChange={set("base_url")} placeholder="https://api.example.com/v1" />
+            </div>
+            <div className="field full">
+              <label htmlFor="pf-models">models (comma-separated, empty = any)</label>
+              <input id="pf-models" value={form.models} onChange={set("models")} placeholder="model-a, model-b" />
+            </div>
+            <div className="field full">
+              <label htmlFor="pf-keys">API keys, one per line {editName && <span className="muted">(leave blank to keep existing)</span>}</label>
+              <textarea id="pf-keys" rows={2} value={form.keys} onChange={set("keys")} placeholder="sk-…" />
+            </div>
+            <div className="field">
+              <label htmlFor="pf-dispatch">dispatch spacing (ms, 0 = off)</label>
+              <input id="pf-dispatch" type="number" min={0} value={form.dispatch_interval_ms} onChange={set("dispatch_interval_ms")} />
+            </div>
+            <div className="field">
+              <label>options</label>
+              <label className="checkbox"><input type="checkbox" checked={form.adaptive_thinking} onChange={set("adaptive_thinking")} /> adaptive thinking</label>
+              <label className="checkbox"><input type="checkbox" checked={form.inject_cache_control} onChange={set("inject_cache_control")} /> inject cache control</label>
+            </div>
+          </div>
+          {err && <div className="error" style={{ color: "var(--danger)", fontSize: 13, marginTop: 8 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <button className="btn primary" type="submit">{editName ? "Save changes" : "Add provider"}</button>
+            <button className="btn" type="button" onClick={() => setForm(null)}>Cancel</button>
+          </div>
+        </form>
+      )}
+
       {provs.map((p) => (
         <div className="card" key={p.name}>
-          <h3>{p.name} <span className="badge muted" style={{ marginLeft: 8 }}>{p.wire}</span>
-            {p.auth_type === "oauth" && <span className="badge ok" style={{ marginLeft: 4 }}>oauth</span>}</h3>
-          <div className="mono faint" style={{ marginBottom: 8 }}>{p.base_url}</div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <h3 style={{ flex: 1, marginBottom: 0 }}>
+              {p.name} <span className="badge muted" style={{ marginLeft: 8 }}>{p.wire}</span>
+              {p.auth_type === "oauth" && <span className="badge ok" style={{ marginLeft: 4 }}>oauth</span>}
+            </h3>
+            <button className="btn sm" onClick={() => openEdit(p)}>edit</button>
+            <button className="btn sm danger" onClick={() => remove(p)}>remove</button>
+          </div>
+          <div className="mono faint" style={{ margin: "8px 0" }}>{p.base_url}</div>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13 }}>
             <span><span className="muted">models:</span> {p.models.length > 0 ? p.models.join(", ") : "any"}</span>
             {p.dispatch_interval_ms > 0 && (
@@ -351,7 +550,7 @@ function ProvidersTab() {
           </div>
         </div>
       ))}
-      {provs.length === 0 && <div className="empty">no providers configured</div>}
+      {provs.length === 0 && !form && <div className="empty">no providers configured — add one above</div>}
     </div>
   );
 }
@@ -384,7 +583,7 @@ function SettingsTab() {
         <pre className="mono" style={{ background: "var(--surface2)", padding: 12, borderRadius: "var(--radius-sm)", overflowX: "auto", fontSize: 12 }}>
 {JSON.stringify(cfg, null, 2)}
         </pre>
-        <div className="faint">keys are redacted. edit config.yaml on disk, then Reload. SIGHUP also reloads.</div>
+        <div className="faint">keys are redacted. edit config.yaml on disk, then Reload. SIGHUP also reloads. dashboard edits (keys, providers) rewrite config.yaml — comments in it are not preserved.</div>
       </div>
     </div>
   );

@@ -1,8 +1,19 @@
-const j = (r: Response) => {
+const j = async (r: Response) => {
   if (r.status === 401) throw new Error("unauthorized");
-  if (!r.ok) throw new Error(`http ${r.status}`);
+  if (!r.ok) throw new Error((await r.text()) || `http ${r.status}`);
   return r.json();
 };
+
+const send = (method: string) => (path: string, body?: unknown) =>
+  fetch(`/admin/api/${path}`, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }).then(j);
+
+export const post = send("POST");
+export const put = send("PUT");
+export const del = send("DELETE");
 
 export async function login(password: string) {
   const r = await fetch("/admin/api/login", {
@@ -35,12 +46,15 @@ export interface KeyRow { name: string; key_suffix: string; allow: string[]; rpm
 export interface ProviderRow {
   name: string; wire: string; base_url: string; models: string[];
   dispatch_interval_ms: number; auth_type: string;
+  adaptive_thinking: boolean; inject_cache_control: boolean;
   accounts: { name: string; kind: string; disabled: boolean; expires_at: number }[];
 }
 export interface LivePayload {
   active: { id: string; model: string; provider: string; key: string; stream: boolean; start: number; ttft_ms: number }[];
   inflight: number; total: number;
 }
+
+export interface KeyCreated { ok: boolean; key: string }
 
 export const fmtN = (n: number | null | undefined) =>
   n == null ? "–" : n.toLocaleString("en-US", { maximumFractionDigits: 0 });

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -252,12 +253,146 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
 				"models": nonNil(p.Models), "dispatch_interval_ms": p.DispatchIntervalMS,
 				"auth_type": p.Auth.Type,
+				"adaptive_thinking": p.AdaptiveThinking, "inject_cache_control": p.InjectCacheControl,
 				"accounts":  oauthAccountStates(p),
 			})
 		}
 		writeJSON(map[string]any{"providers": out})
 	case path == "live" && r.Method == "GET":
 		s.serveLive(w, r)
+	case path == "keys" && r.Method == "POST":
+		var req struct {
+			Name  string   `json:"name"`
+			Allow []string `json:"allow"`
+			RPM   int      `json:"rpm"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil || req.Name == "" {
+			http.Error(w, "name required", 400)
+			return
+		}
+		raw := config.GenKey()
+		if !s.mutate(w, func(c *config.Config) error {
+			for _, k := range c.Keys {
+				if k.Name == req.Name {
+					return fmt.Errorf("key %q already exists", req.Name)
+				}
+			}
+			allow := req.Allow
+			if len(allow) == 0 {
+				allow = []string{"*"}
+			}
+			c.Keys = append(c.Keys, &config.Key{Key: raw, Name: req.Name, Allow: allow, RPM: req.RPM})
+			return nil
+		}) {
+			return
+		}
+		// the raw key is shown exactly once, in this response
+		writeJSON(map[string]any{"ok": true, "key": raw})
+	case strings.HasPrefix(path, "keys/") && r.Method == "DELETE":
+		name := strings.TrimPrefix(path, "keys/")
+		if !s.mutate(w, func(c *config.Config) error {
+			for i, k := range c.Keys {
+				if k.Name == name {
+					c.Keys = append(c.Keys[:i], c.Keys[i+1:]...)
+					return nil
+				}
+			}
+			return fmt.Errorf("no key named %q", name)
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
+	case path == "providers" && r.Method == "POST":
+		var f providerForm
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&f); err != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		p, err := f.provider()
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			for _, x := range c.Providers {
+				if x.Name == p.Name {
+					return fmt.Errorf("provider %q already exists", p.Name)
+				}
+			}
+			c.Providers = append(c.Providers, p)
+			return nil
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
+	case strings.HasPrefix(path, "providers/") && r.Method == "PUT":
+		name := strings.TrimPrefix(path, "providers/")
+		var f providerForm
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&f); err != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		p, err := f.provider()
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		p.Name = name
+		if !s.mutate(w, func(c *config.Config) error {
+			for i, x := range c.Providers {
+				if x.Name == name {
+					// the form covers a subset; preserve advanced fields it can't express
+					if f.Keys == nil {
+						p.Auth.Keys = x.Auth.Keys
+					}
+					p.Auth.OAuth = x.Auth.OAuth
+					p.Session = x.Session
+					p.ModelMap = x.ModelMap
+					p.ExtraHeaders = x.ExtraHeaders
+					p.BodyOverrides = x.BodyOverrides
+					p.HeadersTimeoutS = x.HeadersTimeoutS
+					c.Providers[i] = p
+					return nil
+				}
+			}
+			return fmt.Errorf("no provider named %q", name)
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
+	case strings.HasPrefix(path, "providers/") && r.Method == "DELETE":
+		name := strings.TrimPrefix(path, "providers/")
+		if !s.mutate(w, func(c *config.Config) error {
+			kept := c.Providers[:0]
+			for _, x := range c.Providers {
+				if x.Name != name {
+					kept = append(kept, x)
+				}
+			}
+			if len(kept) == len(c.Providers) {
+				return fmt.Errorf("no provider named %q", name)
+			}
+			c.Providers = kept
+			// scrub routes that pointed at the removed provider
+			routes := c.Routes[:0]
+			for _, rt := range c.Routes {
+				chain := rt.Chain[:0]
+				for _, n := range rt.Chain {
+					if n != name {
+						chain = append(chain, n)
+					}
+				}
+				if len(chain) > 0 {
+					rt.Chain = chain
+					routes = append(routes, rt)
+				}
+			}
+			c.Routes = routes
+			return nil
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
 	case path == "reload" && r.Method == "POST":
 		s.Reload()
 		writeJSON(map[string]any{"ok": true})
@@ -269,8 +404,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			provs = append(provs, map[string]any{
 				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
 				"models": nonNil(p.Models), "auth_type": p.Auth.Type,
-				"num_keys":    len(p.Auth.Keys), "num_accounts": len(p.Auth.OAuth),
-				"session":     p.Session,
+				"num_keys": len(p.Auth.Keys), "num_accounts": len(p.Auth.OAuth),
+				"session":              p.Session,
 				"dispatch_interval_ms": p.DispatchIntervalMS,
 				"adaptive_thinking":    p.AdaptiveThinking,
 				"inject_cache_control": p.InjectCacheControl,
@@ -297,6 +432,66 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// mutate persists a config change: fresh copy from disk -> fn -> save -> reload.
+// Returns false (and writes the HTTP error) on any failure.
+func (s *Server) mutate(w http.ResponseWriter, fn func(*config.Config) error) bool {
+	if s.ConfigPath == "" {
+		http.Error(w, "started without a config file; edits disabled", 400)
+		return false
+	}
+	cfg, err := config.Load(s.ConfigPath)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return false
+	}
+	if err := fn(cfg); err != nil {
+		http.Error(w, err.Error(), 400)
+		return false
+	}
+	if err := cfg.Validate(); err != nil {
+		http.Error(w, err.Error(), 400)
+		return false
+	}
+	if err := cfg.Save(s.ConfigPath); err != nil {
+		http.Error(w, err.Error(), 500)
+		return false
+	}
+	s.Reload()
+	return true
+}
+
+// providerForm is the dashboard-editable subset of a provider.
+type providerForm struct {
+	Name               string   `json:"name"`
+	Wire               string   `json:"wire"`
+	BaseURL            string   `json:"base_url"`
+	Models             []string `json:"models"`
+	Keys               []string `json:"keys"`
+	DispatchIntervalMS int      `json:"dispatch_interval_ms"`
+	AdaptiveThinking   bool     `json:"adaptive_thinking"`
+	InjectCacheControl bool     `json:"inject_cache_control"`
+}
+
+func (f providerForm) provider() (*config.Provider, error) {
+	if f.Wire != "openai" && f.Wire != "anthropic" {
+		return nil, fmt.Errorf("wire must be openai or anthropic")
+	}
+	u, err := url.Parse(f.BaseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("base_url must be an http(s) URL")
+	}
+	return &config.Provider{
+		Name:               f.Name,
+		Wire:               f.Wire,
+		BaseURL:            f.BaseURL,
+		Auth:               config.AuthConf{Type: "static", Keys: f.Keys},
+		Models:             f.Models,
+		DispatchIntervalMS: f.DispatchIntervalMS,
+		AdaptiveThinking:   f.AdaptiveThinking,
+		InjectCacheControl: f.InjectCacheControl,
+	}, nil
 }
 
 func oauthAccountStates(p *config.Provider) []map[string]any {

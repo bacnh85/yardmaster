@@ -2,11 +2,12 @@ package server
 
 import (
 	"bytes"
-	"io"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,8 @@ import (
 	"agent-router/internal/provider"
 	"agent-router/internal/proxy"
 	"agent-router/internal/store"
+
+	"gopkg.in/yaml.v3"
 )
 
 func oaiChunk(delta map[string]any, finish any) map[string]any {
@@ -243,5 +246,134 @@ func TestEmptyAdminPasswordFailsClosed(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 401 {
 		t.Fatalf("login want 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestConfigCrudEndpoints(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		b, _ := json.Marshal(oaiChunk(map[string]any{"content": "hi"}, nil))
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", b)
+		w.(http.Flusher).Flush()
+	}))
+	defer up.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "mock", BaseURL: up.URL, Wire: "openai", Models: []string{"test-model"},
+				Auth: config.AuthConf{Type: "static", Keys: []string{"sk-up"}},
+				Session: "opencode", ExtraHeaders: map[string]string{"x-a": "b"}},
+		},
+	}
+	b, _ := yaml.Marshal(cfg)
+	if err := os.WriteFile(cfgPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg.Defaults()
+	cfg.Validate()
+	p := proxy.NewProxy(provider.New(cfg), st, cfg.CostFor)
+	p.Version = "test"
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, cfgPath, "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	admin := func(method, path string, body io.Reader) (int, []byte) {
+		req, _ := http.NewRequest(method, ts.URL+"/admin/api/"+path, body)
+		req.SetBasicAuth("", "secretpw")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+	chat := func(model, key string) int {
+		req, _ := http.NewRequest("POST", ts.URL+"/v1/chat/completions",
+			strings.NewReader(`{"model":"`+model+`","stream":true,"messages":[]}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// keys: add -> usable immediately; delete -> rejected at once
+	code, body := admin("POST", "keys", strings.NewReader(`{"name":"k2"}`))
+	if code != 200 {
+		t.Fatalf("add key: %d %s", code, body)
+	}
+	var added struct{ Key string }
+	json.Unmarshal(body, &added)
+	if !strings.HasPrefix(added.Key, "ar-") {
+		t.Fatalf("generated key: %q", added.Key)
+	}
+	if code := chat("test-model", added.Key); code != 200 {
+		t.Fatalf("new key rejected: %d", code)
+	}
+	if code, _ := admin("DELETE", "keys/pi", nil); code != 200 {
+		t.Fatalf("delete key: %d", code)
+	}
+	if code := chat("test-model", "ar-agent"); code != 401 {
+		t.Fatalf("deleted key still works: %d", code)
+	}
+
+	// providers: add -> routable via models list; validate; delete
+	// edit preserves advanced fields the form can't express
+	if code, b := admin("PUT", "providers/mock", strings.NewReader(
+		`{"wire":"openai","base_url":"`+up.URL+`","models":["test-model"],"keys":["sk-up"]}`)); code != 200 {
+		t.Fatalf("edit provider: %d %s", code, b)
+	}
+	b2, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, keep := range []string{"session: opencode", "x-a: b"} {
+		if !bytes.Contains(b2, []byte(keep)) {
+			t.Fatalf("edit lost %q:\n%s", keep, b2)
+		}
+	}
+	form := `{"name":"mock2","wire":"openai","base_url":"` + up.URL + `","models":["m2"],"keys":["sk-up"]}`
+	if code, b := admin("POST", "providers", strings.NewReader(form)); code != 200 {
+		t.Fatalf("add provider: %d %s", code, b)
+	}
+	if code := chat("m2", added.Key); code != 200 {
+		t.Fatalf("new provider not routable: %d", code)
+	}
+	if code, b := admin("PUT", "providers/mock2", strings.NewReader(`{"wire":"grpc","base_url":"`+up.URL+`"}`)); code != 400 {
+		t.Fatalf("bad wire accepted: %d %s", code, b)
+	}
+	if code, b := admin("POST", "providers", strings.NewReader(form)); code != 400 {
+		t.Fatalf("duplicate provider accepted: %d %s", code, b)
+	}
+	if code, _ := admin("DELETE", "providers/mock2", nil); code != 200 {
+		t.Fatalf("delete provider: %d", code)
+	}
+	if code := chat("m2", added.Key); code == 200 {
+		t.Fatal("provider still routable after delete")
+	}
+
+	// file on disk reflects the mutations
+	b, err = os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"mock2", "name: pi", "ar-agent"} {
+		if bytes.Contains(b, []byte(bad)) {
+			t.Fatalf("config file still contains %q:\n%s", bad, b)
+		}
+	}
+	if !bytes.Contains(b, []byte("name: mock")) {
+		t.Fatalf("mock provider missing from file:\n%s", b)
 	}
 }
