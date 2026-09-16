@@ -3,7 +3,7 @@
 :root, :root[data-theme="light"] {
   color-scheme: light;
   --bg: #FAFAF9; --surface: #FFFFFF; --surface2: #F5F5F4;
-  --ink: #1C1917; --muted: #57534E; --faint: #78716C; --line: #E7E5E4;
+  --ink: #1C1917; --muted: #57534E; --faint: #57534E; --line: #E7E5E4;
   --accent: #115E59; --accent-hover: #0D4A46; --accent-soft: #CCFBF1;
   --ok: #134E4A; --warn: #92400E; --warn-soft: #FEF3C7; --danger: #7F1D1D; --danger-soft: #FEE2E2;
   --chart1: #115E59; --chart2: #A8A29E; --chart-fill: rgba(17, 94, 89, 0.08);
@@ -169,6 +169,7 @@ table.kv td { border-bottom: 1px solid var(--line); padding: 6px 0; }
 }
 .badge.ok { background: var(--accent-soft); color: var(--accent); }
 .badge.muted { background: var(--surface2); color: var(--muted); }
+:root[data-theme="dark"] .badge.muted { color: var(--ink); }
 .badge.warn { background: var(--warn-soft); color: var(--warn); }
 .badge.danger { background: var(--danger-soft); color: var(--danger); }
 
