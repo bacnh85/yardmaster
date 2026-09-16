@@ -4,8 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>agent-router</title>
-  <script type="module" crossorigin src="/assets/index-Bj-SoReM.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-CW-_wmHM.css">
+  <script>
+    // set theme before first paint to avoid a flash of the wrong palette
+    (function () {
+      var t = localStorage.getItem("ar-theme");
+      if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
+  <script type="module" crossorigin src="/assets/index-CIrGx8lF.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-DnMN_BRE.css">
 </head>
 <body>
   <div id="root"></div>

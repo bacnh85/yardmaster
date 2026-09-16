@@ -201,6 +201,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(v)
 	}
 	switch {
+	case path == "version" && r.Method == "GET":
+		writeJSON(map[string]any{"version": s.Version})
 	case path == "summary" && r.Method == "GET":
 		hours, _ := strconv.Atoi(q.Get("hours"))
 		if hours <= 0 {

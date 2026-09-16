@@ -23,6 +23,12 @@ export function TimeChart({
     }
     const build = () => {
       if (!el.current) return null;
+      // chart colors follow the active theme via CSS custom properties
+      const cs = getComputedStyle(el.current);
+      const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
+      const c1 = v("--chart1", "#115E59"), c2 = v("--chart2", "#A8A29E");
+      const axis = v("--axis", "#78716C"), grid = v("--grid", "#E7E5E4");
+      const fill = v("--chart-fill", "rgba(17,94,89,0.08)");
       const xs = data.map((d) => d.ts / 1000);
       const charts = series.map((s) => data.map((d) => d[s.key] as number));
       const compact = (v: number) =>
@@ -34,17 +40,17 @@ export function TimeChart({
         height,
         scales: { x: { time: true } },
         axes: [
-          { stroke: "#78716C", grid: { stroke: "#E7E5E4", width: 0.5 } },
-          { stroke: "#78716C", grid: { stroke: "#E7E5E4", width: 0.5 }, side: 1,
+          { stroke: axis, grid: { stroke: grid, width: 0.5 } },
+          { stroke: axis, grid: { stroke: grid, width: 0.5 }, side: 1,
             values: (u: uPlot, vals: number[]) => vals.map(compact) },
         ],
         series: [
           {},
           ...series.map((s, i) => ({
             label: s.label,
-            stroke: i === 0 ? "#115E59" : "#78716C",
+            stroke: i === 0 ? c1 : c2,
             width: 1.5,
-            fill: i === 0 ? "rgba(17,94,89,0.08)" : undefined,
+            fill: i === 0 ? fill : undefined,
             spanGaps: true,
             points: { show: data.length < 30 },
           })),
