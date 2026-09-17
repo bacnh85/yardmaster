@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fmtN } from "./api";
+import { copyText } from "./clipboard";
 import { IconX } from "./icons";
 
 /* ---- loading / error / empty ---- */
@@ -136,10 +137,10 @@ export function CopyBtn({ text, what }: { text: string; what: string }) {
   const [done, setDone] = useState(false);
   return (
     <button className="btn sm" onClick={() => {
-      navigator.clipboard.writeText(text).then(() => {
+      copyText(text).then(() => {
         setDone(true);
         setTimeout(() => setDone(false), 1500);
-      });
+      }).catch(() => toast(`could not copy ${what}`, "err"));
     }}>
       {done ? "copied" : `copy ${what}`}
     </button>

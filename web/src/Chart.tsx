@@ -10,7 +10,7 @@ export function TimeChart({
 }: {
   data: Summary["series"];
   height?: number;
-  series: { key: "requests" | "tok_in" | "tok_out" | "cost" | "errors"; label: string; scale?: "left" | "right" }[];
+  series: { key: "requests" | "tok_in" | "tok_out" | "cost" | "errors"; label: string }[];
 }) {
   const el = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
@@ -60,21 +60,18 @@ export function TimeChart({
       return new uPlot(opts, [xs, ...charts], el.current);
     };
     plot.current?.destroy();
-    // build after layout settles (fonts/grid), then track resizes
+    plot.current = build();
+    // track resizes
     let ro: ResizeObserver | null = null;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (!el.current) return;
-      plot.current = build();
-      ro = new ResizeObserver(() => {
-        if (!el.current || !plot.current) return;
-        const w = el.current.clientWidth;
-        if (w > 0 && Math.abs(w - plot.current.width) > 2) {
-          plot.current.destroy();
-          plot.current = build();
-        }
-      });
-      ro.observe(el.current);
-    }));
+    ro = new ResizeObserver(() => {
+      if (!el.current || !plot.current) return;
+      const w = el.current.clientWidth;
+      if (w > 0 && Math.abs(w - plot.current.width) > 2) {
+        plot.current.destroy();
+        plot.current = build();
+      }
+    });
+    ro.observe(el.current);
     return () => { ro?.disconnect(); plot.current?.destroy(); plot.current = null; };
   }, [data, height, JSON.stringify(series)]);
 

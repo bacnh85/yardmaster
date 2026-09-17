@@ -74,31 +74,33 @@ function BreakTable({ rows }: { rows: BreakdownRow[] }) {
   const { sorted, th } = useSorted(rows, "requests");
   if (rows.length === 0) return <Empty>no data in range</Empty>;
   return (
-    <table>
-      <thead><tr>
-        {th("name", "name")}
-        {th("requests", "reqs", true)}
-        {th("errors", "errors", true)}
-        {th("tok_in", "tok in", true)}
-        {th("tok_out", "tok out", true)}
-        {th("cache_read", "cache rd", true)}
-        {th("cost", "cost", true)}
-        {th("ttft_p50_ms", "ttft p50", true)}
-      </tr></thead>
-      <tbody>
-        {sorted.map((r) => (
-          <tr key={r.name}>
-            <td>{r.name}</td>
-            <td className="n">{fmtN(r.requests)}</td>
-            <td className="n">{r.errors > 0 ? <span className="err">{fmtN(r.errors)}</span> : 0}</td>
-            <td className="n">{fmtN(r.tok_in)}</td>
-            <td className="n">{fmtN(r.tok_out)}</td>
-            <td className="n">{fmtN(r.cache_read)}</td>
-            <td className="n">{fmtUSD(r.cost)}</td>
-            <td className="n">{fmtMs(r.ttft_p50_ms)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="table-wrap">
+      <table>
+        <thead><tr>
+          {th("name", "name")}
+          {th("requests", "reqs", true)}
+          {th("errors", "errors", true)}
+          {th("tok_in", "tok in", true)}
+          {th("tok_out", "tok out", true)}
+          {th("cache_read", "cache rd", true)}
+          {th("cost", "cost", true)}
+          {th("ttft_p50_ms", "ttft p50", true)}
+        </tr></thead>
+        <tbody>
+          {sorted.map((r) => (
+            <tr key={r.name}>
+              <td>{r.name}</td>
+              <td className="n">{fmtN(r.requests)}</td>
+              <td className="n">{r.errors > 0 ? <span className="err">{fmtN(r.errors)}</span> : 0}</td>
+              <td className="n">{fmtN(r.tok_in)}</td>
+              <td className="n">{fmtN(r.tok_out)}</td>
+              <td className="n">{fmtN(r.cache_read)}</td>
+              <td className="n">{fmtUSD(r.cost)}</td>
+              <td className="n">{fmtMs(r.ttft_p50_ms)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

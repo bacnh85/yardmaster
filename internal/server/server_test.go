@@ -219,6 +219,22 @@ func TestAdminListEndpointsNeverReturnNullArrays(t *testing.T) {
 			}
 		}
 	}
+
+	// /v1/models has the same nil-slice hazard: an empty registry (only the
+	// Models-less provider above) must emit {"data":[]} — OpenAI SDKs call
+	// resp.data.map and crash on null.
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer ar-agent")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body []byte
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if bytes.Contains(body, []byte(`"data":null`)) {
+		t.Errorf("/v1/models: \"data\":null leaked into response: %s", body)
+	}
 }
 
 // An unset/empty admin password must fail closed — subtle.ConstantTimeCompare
@@ -326,6 +342,20 @@ func TestConfigCrudEndpoints(t *testing.T) {
 	}
 	if code := chat("test-model", "ar-agent"); code != 401 {
 		t.Fatalf("deleted key still works: %d", code)
+	}
+
+	// regression: names with URL metacharacters must round-trip. Create accepts
+	// any non-empty name; the dashboard encodes the name in the DELETE path —
+	// if it ever sends a raw '?', the server truncates the name, delete returns
+	// 400 "no key named", and the key is stuck in config.
+	if code, b := admin("POST", "keys", strings.NewReader(`{"name":"a?b"}`)); code != 200 {
+		t.Fatalf("add key a?b: %d %s", code, b)
+	}
+	if code, b := admin("DELETE", "keys/a%3Fb", nil); code != 200 {
+		t.Fatalf("delete key a?b (encoded): %d %s", code, b)
+	}
+	if code, _ := admin("DELETE", "keys/a%3Fb", nil); code != 400 {
+		t.Fatalf("key a?b should already be gone, got: %d", code)
 	}
 
 	// providers: add -> routable via models list; validate; delete

@@ -119,7 +119,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		Object string `json:"object"`
 		Owned  string `json:"owned_by"`
 	}
-	var data []model
+	data := make([]model, 0) // never nil — empty registry must marshal as [], not null
 	seen := map[string]bool{}
 	for _, m := range s.Proxy.Reg.Models() {
 		if !seen[m] {

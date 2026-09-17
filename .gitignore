@@ -1,4 +1,7 @@
 config.yaml
+.env.local
+.env*.local
+*.swp
 *.db
 *.db-wal
 *.db-shm

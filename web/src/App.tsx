@@ -68,6 +68,13 @@ export default function App() {
   };
 
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
+  // persist on explicit toggle only — a theme= hash link (headless captures) boots
+  // with its dataset theme but must not clobber the visitor's saved choice
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    try { localStorage.setItem("ar-theme", next); } catch { /* private mode etc. — session theme still works */ }
+  };
   useEffect(() => {
     get("version").then((v: { version: string }) => setVersion(v.version)).catch(() => {});
   }, []);
@@ -92,7 +99,7 @@ export default function App() {
         ))}
         <div className="side-foot">
           <button className="icon-btn" aria-label="toggle theme" title="toggle theme"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+            onClick={toggleTheme}>
             {theme === "dark" ? <IconSun /> : <IconMoon />}
           </button>
           <div className="ver faint">{version ? `v${version}` : ""}</div>

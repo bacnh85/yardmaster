@@ -65,7 +65,7 @@ export function ProvidersTab() {
   const remove = async (p: ProviderRow) => {
     setRemoving(null);
     try {
-      await del(`providers/${p.name}`);
+      await del(`providers/${encodeURIComponent(p.name)}`);
       reload();
       toast(`provider "${p.name}" removed`);
     } catch (e2) {
