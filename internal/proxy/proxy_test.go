@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"agent-router/internal/config"
-	"agent-router/internal/provider"
+	"github.com/bacnh85/yardmaster/internal/config"
+	"github.com/bacnh85/yardmaster/internal/provider"
 )
 
 // sseBody reads an SSE response into (firstDataTime over start, all data lines).

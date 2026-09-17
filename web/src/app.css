@@ -20,7 +20,7 @@
   --bg: #1C1917; --surface: #292524; --surface2: #3A3533;
   --ink: #FAFAF9; --muted: #D6D3D1; --faint: #D6D3D1; --line: #44403C;
   --accent: #5EEAD4; --accent-hover: #99F6E4; --accent-soft: #17332F;
-  --ok: #5EEAD4; --warn: #FCD34D; --warn-soft: rgba(146, 64, 14, 0.28); --danger: #FECACA; --danger-soft: #2E1517;
+  --ok: #5EEAD4; --warn: #FCD34D; --warn-soft: #462D1E; --danger: #FECACA; --danger-soft: #2E1517;
   --chart1: #2DD4BF; --chart2: #A8A29E; --chart-fill: rgba(45, 212, 191, 0.10);
   --grid: #3A3533; --axis: #A8A29E;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.35);

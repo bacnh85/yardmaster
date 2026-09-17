@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"agent-router/internal/config"
+	"github.com/bacnh85/yardmaster/internal/config"
 )
 
 // Limiter spaces dispatch STARTS at least `interval` apart. Streams themselves

@@ -47,7 +47,7 @@ export interface ProviderRow {
   name: string; wire: string; base_url: string; models: string[];
   dispatch_interval_ms: number; auth_type: string;
   adaptive_thinking: boolean; inject_cache_control: boolean;
-  accounts: { name: string; kind: string; disabled: boolean; expires_at: number }[];
+  accounts: { name: string; kind: string; disabled: boolean; expires_at: number; state?: string; last_error?: string }[];
 }
 export interface LivePayload {
   active: { id: string; model: string; provider: string; key: string; stream: boolean; start: number; ttft_ms: number }[];

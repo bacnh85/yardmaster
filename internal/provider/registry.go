@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"agent-router/internal/auth"
-	"agent-router/internal/config"
+	"github.com/bacnh85/yardmaster/internal/auth"
+	"github.com/bacnh85/yardmaster/internal/config"
 )
 
 // Target is one concrete dispatch destination: a provider with a specific key.

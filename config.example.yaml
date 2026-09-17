@@ -1,6 +1,6 @@
-# agent-router config — copy to config.yaml and fill in your keys.
+# yardmaster config — copy to config.yaml and fill in your keys.
 listen: ":8787"
-db_path: "agent-router.db"
+db_path: "yardmaster.db"
 admin_password: "change-me"        # dashboard + admin API
 
 providers:
@@ -57,6 +57,26 @@ providers:
   #   adaptive_thinking: true
   #   inject_cache_control: true
 
+  # --- Claude Code subscription (OAuth; import: yardmaster oauth import claude-code) ---
+  # - name: claude-sub
+  #   base_url: https://api.anthropic.com
+  #   wire: anthropic
+  #   auth:
+  #     type: oauth
+  #     oauth_accounts:
+  #       - { name: claude-main, kind: claude-code, refresh_token: "..." }
+  #   models: [claude-sonnet-5, claude-opus-5]
+
+  # --- Codex/ChatGPT subscription (OAuth; import: yardmaster oauth import codex) ---
+  # - name: codex-sub
+  #   base_url: https://chatgpt.com/backend-api/codex
+  #   wire: responses          # translated to openai/anthropic clients automatically
+  #   auth:
+  #     type: oauth
+  #     oauth_accounts:
+  #       - { name: codex-main, kind: codex, refresh_token: "...", account_id: "..." }
+  #   models: [gpt-5.5]
+
 routes:
   - match: "glm-*"
     chain: [zai]
@@ -64,8 +84,10 @@ routes:
     chain: [deepseek, openrouter]
   - match: "claude-*"
     chain: [zen-claude, cmdcode]
+  # - match: "claude-*"
+  #   chain: [claude-sub, zen-claude, cmdcode]   # subscription first, then API keys
 
-# keys CLI agents authenticate with (agent-router key add NAME generates one)
+# keys CLI agents authenticate with (yardmaster key add NAME generates one)
 keys:
   - key: "ar-REPLACE_ME"
     name: pi-laptop

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"agent-router/internal/config"
+	"github.com/bacnh85/yardmaster/internal/config"
 )
 
 // Regression: concurrent Check() on a fresh RPM key used to race on the

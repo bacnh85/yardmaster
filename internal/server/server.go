@@ -17,12 +17,12 @@ import (
 	"sync"
 	"time"
 
-	"agent-router/internal/auth"
-	"agent-router/internal/config"
-	"agent-router/internal/proxy"
-	"agent-router/internal/store"
-	"agent-router/internal/translate"
-	"agent-router/web"
+	"github.com/bacnh85/yardmaster/internal/auth"
+	"github.com/bacnh85/yardmaster/internal/config"
+	"github.com/bacnh85/yardmaster/internal/proxy"
+	"github.com/bacnh85/yardmaster/internal/store"
+	"github.com/bacnh85/yardmaster/internal/translate"
+	"github.com/bacnh85/yardmaster/web"
 )
 
 type Server struct {
@@ -124,7 +124,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	for _, m := range s.Proxy.Reg.Models() {
 		if !seen[m] {
 			seen[m] = true
-			data = append(data, model{ID: m, Object: "model", Owned: "agent-router"})
+			data = append(data, model{ID: m, Object: "model", Owned: "yardmaster"})
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -254,9 +254,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			out = append(out, map[string]any{
 				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
 				"models": nonNil(p.Models), "dispatch_interval_ms": p.DispatchIntervalMS,
-				"auth_type": p.Auth.Type,
+				"auth_type":         p.Auth.Type,
 				"adaptive_thinking": p.AdaptiveThinking, "inject_cache_control": p.InjectCacheControl,
-				"accounts":  oauthAccountStates(p),
+				"accounts": oauthAccountStates(p, s.Proxy.Pool),
 			})
 		}
 		writeJSON(map[string]any{"providers": out})
@@ -341,13 +341,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		p.Name = name
 		if !s.mutate(w, func(c *config.Config) error {
-			for i, x := range c.Providers {
-				if x.Name == name {
-					// the form covers a subset; preserve advanced fields it can't express
-					if f.Keys == nil {
-						p.Auth.Keys = x.Auth.Keys
-					}
-					p.Auth.OAuth = x.Auth.OAuth
+				for i, x := range c.Providers {
+					if x.Name == name {
+						// the form covers a subset; preserve advanced fields it can't express
+						if f.Keys == nil {
+							p.Auth.Keys = x.Auth.Keys
+						}
+						p.Auth.Type = x.Auth.Type // form is static-only; never downgrade oauth
+						p.Auth.OAuth = x.Auth.OAuth
 					p.Session = x.Session
 					p.ModelMap = x.ModelMap
 					p.ExtraHeaders = x.ExtraHeaders
@@ -477,8 +478,8 @@ type providerForm struct {
 }
 
 func (f providerForm) provider() (*config.Provider, error) {
-	if f.Wire != "openai" && f.Wire != "anthropic" {
-		return nil, fmt.Errorf("wire must be openai or anthropic")
+	if f.Wire != "openai" && f.Wire != "anthropic" && f.Wire != "responses" {
+		return nil, fmt.Errorf("wire must be openai, anthropic, or responses")
 	}
 	u, err := url.Parse(f.BaseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -496,12 +497,25 @@ func (f providerForm) provider() (*config.Provider, error) {
 	}, nil
 }
 
-func oauthAccountStates(p *config.Provider) []map[string]any {
+func oauthAccountStates(p *config.Provider, pool *auth.OAuthPool) []map[string]any {
+	states := pool.States(p.Name)
 	out := make([]map[string]any, 0, len(p.Auth.OAuth))
 	for _, a := range p.Auth.OAuth {
+		st := states[a.Name] // zero value when the pool has no live state
+		state := "seed"      // configured but never refreshed/used
+		switch {
+		case a.Disabled:
+			state = "disabled"
+		case st.Cooling:
+			state = "cooldown"
+		case st.Fresh:
+			state = "ok"
+		case st.LastError != "":
+			state = "error"
+		}
 		out = append(out, map[string]any{
 			"name": a.Name, "kind": a.Kind, "disabled": a.Disabled,
-			"expires_at": a.ExpiresAt,
+			"expires_at": a.ExpiresAt, "state": state, "last_error": st.LastError,
 		})
 	}
 	return out
@@ -542,6 +556,7 @@ func (s *Server) Reload() {
 	}
 	s.Proxy.Reg.Reload(cfg)
 	s.Keys.Replace(cfg.Keys)
+	s.Proxy.Pool.RegisterConfig(cfg)
 	fmt.Printf("config reloaded (%d providers, %d keys)\n", len(cfg.Providers), len(cfg.Keys))
 }
 

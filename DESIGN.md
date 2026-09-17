@@ -1,7 +1,7 @@
-# DESIGN.md — agent-router dashboard
+# DESIGN.md — yardmaster dashboard
 
 ```yaml
-name: agent-router-dashboard
+name: yardmaster-dashboard
 type: web
 colors:
   bg: "#FAFAF9"          # page

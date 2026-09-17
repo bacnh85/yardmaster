@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"agent-router/internal/config"
-	"agent-router/internal/provider"
-	"agent-router/internal/proxy"
+	"github.com/bacnh85/yardmaster/internal/config"
+	"github.com/bacnh85/yardmaster/internal/provider"
+	"github.com/bacnh85/yardmaster/internal/proxy"
 )
 
 type Options struct {

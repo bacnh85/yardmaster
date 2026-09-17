@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"agent-router/internal/auth"
-	"agent-router/internal/config"
-	"agent-router/internal/provider"
-	"agent-router/internal/proxy"
-	"agent-router/internal/store"
+	"github.com/bacnh85/yardmaster/internal/auth"
+	"github.com/bacnh85/yardmaster/internal/config"
+	"github.com/bacnh85/yardmaster/internal/provider"
+	"github.com/bacnh85/yardmaster/internal/proxy"
+	"github.com/bacnh85/yardmaster/internal/store"
 
 	"gopkg.in/yaml.v3"
 )
@@ -405,5 +405,81 @@ func TestConfigCrudEndpoints(t *testing.T) {
 	}
 	if !bytes.Contains(b, []byte("name: mock")) {
 		t.Fatalf("mock provider missing from file:\n%s", b)
+	}
+}
+
+// Regression: editing an oauth provider from the dashboard must not downgrade
+// it to static auth — the edit form cannot express auth.type at all.
+func TestProviderPutPreservesOAuth(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "claude-sub", BaseURL: "https://api.anthropic.com", Wire: "anthropic",
+				Auth: config.AuthConf{Type: "oauth", OAuth: []*config.OAuthAcct{
+					{Name: "claude-main", Kind: "claude-code", RefreshTok: "rt-x"},
+				}}},
+		},
+	}
+	b, _ := yaml.Marshal(cfg)
+	if err := os.WriteFile(cfgPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p := proxy.NewProxy(provider.New(cfg), st, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, cfgPath, "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	admin := func(method, path string, body io.Reader) (int, []byte) {
+		req, _ := http.NewRequest(method, ts.URL+"/admin/api/"+path, body)
+		req.SetBasicAuth("", "secretpw")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+
+	// form edit: wire/models/toggles only — no auth fields in the payload
+	code, body := admin("PUT", "providers/claude-sub", strings.NewReader(
+		`{"name":"claude-sub","wire":"anthropic","base_url":"https://api.anthropic.com","models":["claude-sonnet-5"],"dispatch_interval_ms":0,"adaptive_thinking":false,"inject_cache_control":false}`))
+	if code != 200 {
+		t.Fatalf("PUT provider: %d %s", code, body)
+	}
+
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.Providers[0]
+	if got.Auth.Type != "oauth" {
+		t.Fatalf("PUT downgraded auth.type to %q", got.Auth.Type)
+	}
+	if len(got.Auth.OAuth) != 1 || got.Auth.OAuth[0].Name != "claude-main" {
+		t.Fatalf("oauth accounts lost: %+v", got.Auth.OAuth)
+	}
+
+	// admin view agrees
+	code, body = admin("GET", "providers", nil)
+	if code != 200 {
+		t.Fatalf("GET providers: %d", code)
+	}
+	if !strings.Contains(string(body), `"auth_type":"oauth"`) {
+		t.Fatalf("admin providers lost oauth type: %s", body)
+	}
+	if !strings.Contains(string(body), `"name":"claude-main"`) {
+		t.Fatalf("admin providers lost account: %s", body)
 	}
 }

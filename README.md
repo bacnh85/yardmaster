@@ -1,4 +1,4 @@
-# agent-router
+# yardmaster
 
 Self-hosted LLM proxy for CLI coding agents. One API URL + key for all your
 agents; one config entry per upstream provider. Go, single static binary,
@@ -13,7 +13,7 @@ routing, honest stats, and isolated auth adapters.
 - **Streaming-first**: byte-exact SSE passthrough when wires match; flush per
   chunk; client disconnect cancels the upstream call. Bench: **TTFT overhead
   p95 ≤ 1 ms** at 200–500 concurrent streams × 300 tok/s, zero stalls
-  (`agent-router bench`).
+  (`yardmaster bench`).
 - **Wire surface**: `POST /v1/chat/completions` (OpenAI) and `POST /v1/messages`
   (Anthropic) in; OpenAI or Anthropic wire per upstream. Full translation
   (tool calls, thinking/reasoning, usage) between the two.
@@ -34,9 +34,9 @@ routing, honest stats, and isolated auth adapters.
 
 ```bash
 cp config.example.yaml config.yaml   # fill in provider keys
-go build -o agent-router ./cmd/agent-router
-./agent-router run -c config.yaml    # http://127.0.0.1:8787
-./agent-router key add my-laptop     # prints a key snippet for config.yaml
+go build -o yardmaster ./cmd/yardmaster
+./yardmaster run -c config.yaml    # http://127.0.0.1:8787
+./yardmaster key add my-laptop     # prints a key snippet for config.yaml
 ```
 
 Dashboard: `http://127.0.0.1:8787/` (admin password from config).
@@ -68,6 +68,65 @@ keys:
   - { key: "ar-...", name: pi-laptop, allow: ["*"], rpm: 0 }
 ```
 
+## OAuth subscription upstreams (Phase 4)
+
+Providers backed by a **CLI subscription login** instead of an API key. Import
+the CLI's local credentials, then paste the printed YAML into a provider's
+`auth:` block:
+
+```bash
+yardmaster oauth import claude-code   # ~/.claude/.credentials.json → kind: claude-code
+yardmaster oauth import codex         # ~/.codex/auth.json             → kind: codex
+yardmaster oauth import opencode      # opencode auth store            → kind: opencode
+```
+
+```yaml
+providers:
+  - name: claude-sub
+    base_url: https://api.anthropic.com        # OAuth bearer on the anthropic wire
+    wire: anthropic
+    auth:
+      type: oauth
+      oauth_accounts:
+        - name: claude-main
+          kind: claude-code
+          refresh_token: ...
+    models: [claude-sonnet-5, claude-opus-5]
+
+  - name: codex-sub
+    base_url: https://chatgpt.com/backend-api/codex   # responses wire + account-id header
+    wire: responses                                   # translated to openai/anthropic clients
+    auth:
+      type: oauth
+      oauth_accounts:
+        - name: codex-main
+          kind: codex
+          refresh_token: ...
+          account_id: ...
+    models: [gpt-5.5]
+
+routes:
+  - match: "claude-*"
+    chain: [claude-sub, zen-claude, cmdcode]   # subscription first, API-key fallback
+```
+
+How it works:
+
+- **Pool**: tokens refresh single-flight per account, pre-refreshed before
+  expiry, and rotated refresh tokens persist to SQLite (`oauth_tokens`, chmod
+  600 DB). Config `access_token`/`expires_at` are only seeds.
+- **Cooldown & rotation**: upstream 429/403 quota errors cool an account down
+  (exponential, max 10 min); the failover loop skips cooled accounts and tries
+  the next account/provider. 401 forces a re-refresh.
+- **Adapters are config, not code**: `kind` picks baked-in endpoints/client-ids
+  for `claude-code` and `codex`; any other account sets `token_endpoint` +
+  `client_id` directly (opencode's endpoints aren't publicly documented yet).
+- Dashboard → Providers shows each account's state (seed / ok / cooldown /
+  error).
+
+> ToS note: wrapping CLI subscriptions violates some providers' terms. Internal
+> use only.
+
 ## Per-CLI setup (all against `http://127.0.0.1:8787`, key `ar-...`)
 
 | CLI | Config |
@@ -80,7 +139,7 @@ keys:
 
 ## Benchmarks
 
-`agent-router bench -conns 500` — synthetic SSE upstream, N concurrent
+`yardmaster bench -conns 500` — synthetic SSE upstream, N concurrent
 streams, measures proxied-vs-direct TTFT:
 
 ```
@@ -98,14 +157,16 @@ tok/s × 3 concurrent streams; glm-5.3-flash ≈36–41 tok/s (thinking included
 
 ## Status
 
-- Phases 0–3 done (core, translation, stats, dashboard). Phase 4 (OAuth
-  account pools — Claude Code / Codex / opencode OAuth) designed, not built.
-- Deferred: `/v1/responses` serving, Gemini-native wire.
+- Phases 0–4 done (core, translation, stats, dashboard, OAuth subscription
+  pools: claude-code + codex adapters, responses-wire translation, account
+  cooldown/rotation).
+- Deferred: `/v1/responses` serving (client side), Gemini-native wire,
+  opencode OAuth endpoints (set `token_endpoint`+`client_id` when documented).
 
 ## Layout
 
 ```
-cmd/agent-router/    run | key add | bench
+cmd/yardmaster/    run | key add | bench
 internal/config/     YAML config + validation + cost table
 internal/translate/  openai<->anthropic requests/SSE
 internal/provider/   registry + model routing
@@ -114,5 +175,5 @@ internal/proxy/      streaming pipeline, failover, usage tee
 internal/store/      SQLite request log + aggregates
 internal/server/     endpoints, admin API, dashboard
 web/                 React + uPlot dashboard (embedded via go:embed)
-bench/               perf harness (also `agent-router bench`)
+bench/               perf harness (also `yardmaster bench`)
 ```

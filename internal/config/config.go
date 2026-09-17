@@ -1,4 +1,4 @@
-// Package config loads and validates the agent-router YAML config.
+// Package config loads and validates the yardmaster YAML config.
 package config
 
 import (
@@ -24,15 +24,15 @@ type Config struct {
 type Provider struct {
 	Name               string            `yaml:"name"`
 	BaseURL            string            `yaml:"base_url"`
-	Wire               string            `yaml:"wire"` // "openai" | "anthropic"
-	Session            string            `yaml:"session"`            // "opencode" adds x-opencode-session/client headers
+	Wire               string            `yaml:"wire"`    // "openai" | "anthropic"
+	Session            string            `yaml:"session"` // "opencode" adds x-opencode-session/client headers
 	Auth               AuthConf          `yaml:"auth"`
-	Models             []string          `yaml:"models"`    // upstream models this provider serves; empty = any
-	ModelMap           map[string]string `yaml:"model_map"` // requested model -> upstream model id
+	Models             []string          `yaml:"models"`               // upstream models this provider serves; empty = any
+	ModelMap           map[string]string `yaml:"model_map"`            // requested model -> upstream model id
 	DispatchIntervalMS int               `yaml:"dispatch_interval_ms"` // per-key min interval between request starts; 0 = unthrottled
 	ExtraHeaders       map[string]string `yaml:"extra_headers"`
 	BodyOverrides      map[string]any    `yaml:"body_overrides"`
-	AdaptiveThinking   bool              `yaml:"adaptive_thinking"` // zai-style thinking:{type:adaptive}+output_config.effort
+	AdaptiveThinking   bool              `yaml:"adaptive_thinking"`    // zai-style thinking:{type:adaptive}+output_config.effort
 	InjectCacheControl bool              `yaml:"inject_cache_control"` // add ephemeral markers when translating to anthropic wire
 	HeadersTimeoutS    int               `yaml:"headers_timeout_s"`    // max wait for upstream response headers (default 300)
 }
@@ -44,12 +44,15 @@ type AuthConf struct {
 }
 
 type OAuthAcct struct {
-	Name        string `yaml:"name"`
-	Kind        string `yaml:"kind"` // claude-code | codex | opencode
-	RefreshTok  string `yaml:"refresh_token"`
-	AccessTok   string `yaml:"access_token"`
-	ExpiresAt   int64  `yaml:"expires_at"` // unix seconds
-	Disabled    bool   `yaml:"disabled"`
+	Name          string `yaml:"name"`
+	Kind          string `yaml:"kind"` // claude-code | codex | opencode | custom
+	RefreshTok    string `yaml:"refresh_token"`
+	AccessTok     string `yaml:"access_token"`
+	ExpiresAt     int64  `yaml:"expires_at"`     // unix seconds
+	AccountID     string `yaml:"account_id"`     // codex: chatgpt-account-id header
+	TokenEndpoint string `yaml:"token_endpoint"` // overrides the kind default
+	ClientID      string `yaml:"client_id"`      // overrides the kind default
+	Disabled      bool   `yaml:"disabled"`
 }
 
 type Route struct {
@@ -64,6 +67,21 @@ type Key struct {
 	RPM   int      `yaml:"rpm"`   // inbound requests-per-minute limit; 0 = unlimited
 }
 
+// AuthKindDefaults returns the baked-in OAuth token endpoint + client_id for
+// known account kinds. ok=false for kinds without verified public defaults
+// (e.g. "opencode") — those must set token_endpoint + client_id in config.
+func AuthKindDefaults(kind string) (endpoint, clientID string, ok bool) {
+	switch kind {
+	case "claude-code":
+		return "https://platform.claude.com/v1/oauth/token",
+			"9d1c250a-e61b-44d9-88ed-5944d1962f5e", true
+	case "codex":
+		return "https://auth.openai.com/oauth/token",
+			"app_EMoamEEZ73f0CkXaXp7hrann", true
+	}
+	return "", "", false
+}
+
 // Cost is USD per 1M tokens.
 type Cost struct {
 	Input      float64 `yaml:"input"`
@@ -75,20 +93,20 @@ type Cost struct {
 // DefaultCosts are rough published-rate estimates ($/Mtok); config `costs` overrides.
 // ponytail: coarse estimates on purpose — override per model in config for exact billing.
 var DefaultCosts = map[string]*Cost{
-	"deepseek":            {Input: 0.30, Output: 1.20, CacheRead: 0.03},
-	"deepseek-flash":      {Input: 0.30, Output: 1.20, CacheRead: 0.03},
-	"deepseek-v4-pro":     {Input: 0.60, Output: 2.20, CacheRead: 0.06},
-	"glm-5.3":             {Input: 1.00, Output: 3.20, CacheRead: 0.10},
-	"glm-5.3-flash":       {Input: 0.30, Output: 1.00, CacheRead: 0.03},
-	"glm-5.2":             {Input: 0.60, Output: 2.20, CacheRead: 0.06},
-	"claude-sonnet-5":     {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
-	"claude-opus-5":       {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},
-	"claude-haiku-4.5":    {Input: 1.00, Output: 5.00, CacheRead: 0.10},
-	"gpt-5.5":             {Input: 1.25, Output: 10.00, CacheRead: 0.12},
-	"kimi-k3":             {Input: 0.60, Output: 2.50, CacheRead: 0.06},
-	"minimax-m3":          {Input: 0.30, Output: 1.20, CacheRead: 0.03},
-	"qwen3.7-max":         {Input: 0.60, Output: 2.40, CacheRead: 0.06},
-	"grok-4.5":            {Input: 3.00, Output: 15.00, CacheRead: 0.30},
+	"deepseek":         {Input: 0.30, Output: 1.20, CacheRead: 0.03},
+	"deepseek-flash":   {Input: 0.30, Output: 1.20, CacheRead: 0.03},
+	"deepseek-v4-pro":  {Input: 0.60, Output: 2.20, CacheRead: 0.06},
+	"glm-5.3":          {Input: 1.00, Output: 3.20, CacheRead: 0.10},
+	"glm-5.3-flash":    {Input: 0.30, Output: 1.00, CacheRead: 0.03},
+	"glm-5.2":          {Input: 0.60, Output: 2.20, CacheRead: 0.06},
+	"claude-sonnet-5":  {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
+	"claude-opus-5":    {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},
+	"claude-haiku-4.5": {Input: 1.00, Output: 5.00, CacheRead: 0.10},
+	"gpt-5.5":          {Input: 1.25, Output: 10.00, CacheRead: 0.12},
+	"kimi-k3":          {Input: 0.60, Output: 2.50, CacheRead: 0.06},
+	"minimax-m3":       {Input: 0.30, Output: 1.20, CacheRead: 0.03},
+	"qwen3.7-max":      {Input: 0.60, Output: 2.40, CacheRead: 0.06},
+	"grok-4.5":         {Input: 3.00, Output: 15.00, CacheRead: 0.30},
 }
 
 func Load(path string) (*Config, error) {
@@ -112,7 +130,7 @@ func (c *Config) Defaults() {
 		c.Listen = ":8787"
 	}
 	if c.DBPath == "" {
-		c.DBPath = "agent-router.db"
+		c.DBPath = "yardmaster.db"
 	}
 	if c.AdminPassword == "" {
 		c.AdminPassword = "admin"
@@ -132,8 +150,8 @@ func (c *Config) Validate() error {
 		if p.BaseURL == "" {
 			return fmt.Errorf("provider %s: missing base_url", p.Name)
 		}
-		if p.Wire != "openai" && p.Wire != "anthropic" {
-			return fmt.Errorf("provider %s: wire must be openai|anthropic", p.Name)
+		if p.Wire != "openai" && p.Wire != "anthropic" && p.Wire != "responses" {
+			return fmt.Errorf("provider %s: wire must be openai|anthropic|responses", p.Name)
 		}
 		if p.Auth.Type == "" {
 			p.Auth.Type = "static"
@@ -143,6 +161,29 @@ func (c *Config) Validate() error {
 		}
 		if p.HeadersTimeoutS == 0 {
 			p.HeadersTimeoutS = 300
+		}
+		if p.Wire == "responses" && p.Auth.Type == "" {
+			p.Auth.Type = "static"
+		}
+		for i, a := range p.Auth.OAuth {
+			if a.Name == "" {
+				return fmt.Errorf("provider %s: oauth account %d missing name", p.Name, i)
+			}
+			if a.RefreshTok == "" && a.AccessTok == "" {
+				return fmt.Errorf("provider %s: account %s needs refresh_token (or access_token as seed)", p.Name, a.Name)
+			}
+			if a.TokenEndpoint == "" || a.ClientID == "" {
+				ep, cid, ok := AuthKindDefaults(a.Kind)
+				if !ok {
+					return fmt.Errorf("provider %s: account %s: unknown kind %q — set token_endpoint + client_id, or use kind claude-code|codex", p.Name, a.Name, a.Kind)
+				}
+				if a.TokenEndpoint == "" {
+					a.TokenEndpoint = ep
+				}
+				if a.ClientID == "" {
+					a.ClientID = cid
+				}
+			}
 		}
 	}
 	pnames := names

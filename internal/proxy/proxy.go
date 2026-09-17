@@ -20,23 +20,26 @@ import (
 	"sync/atomic"
 	"time"
 
-	"agent-router/internal/config"
-	"agent-router/internal/provider"
-	"agent-router/internal/store"
-	"agent-router/internal/translate"
+	"github.com/bacnh85/yardmaster/internal/auth"
+	"github.com/bacnh85/yardmaster/internal/config"
+	"github.com/bacnh85/yardmaster/internal/provider"
+	"github.com/bacnh85/yardmaster/internal/store"
+	"github.com/bacnh85/yardmaster/internal/translate"
 )
 
 const (
 	WireOpenAI    = "openai"
 	WireAnthropic = "anthropic"
+	WireResponses = "responses" // OpenAI Responses API (Codex backend)
 )
 
 type Proxy struct {
-	Reg      *provider.Registry
-	Client   *http.Client
-	Store    *store.Store
-	Version  string
-	Cost     func(model string) config.Cost
+	Reg     *provider.Registry
+	Client  *http.Client
+	Store   *store.Store
+	Version string
+	Cost    func(model string) config.Cost
+	Pool    *auth.OAuthPool
 
 	Active   Active
 	inflight atomic.Int64
@@ -60,13 +63,13 @@ func NewProxy(reg *provider.Registry, st *store.Store, costFn func(string) confi
 // ---- active request registry (live dashboard) ----
 
 type ActiveEntry struct {
-	ID      string    `json:"id"`
-	Model   string    `json:"model"`
-	Provider string   `json:"provider"`
-	Key     string    `json:"key"`
-	Stream  bool      `json:"stream"`
-	Start   time.Time `json:"start"`
-	TTFTms  float64   `json:"ttft_ms"`
+	ID       string    `json:"id"`
+	Model    string    `json:"model"`
+	Provider string    `json:"provider"`
+	Key      string    `json:"key"`
+	Stream   bool      `json:"stream"`
+	Start    time.Time `json:"start"`
+	TTFTms   float64   `json:"ttft_ms"`
 }
 
 type Active struct {
@@ -199,7 +202,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 		}
 
 		// dispatch throttle (e.g. Z.ai 1302 protection)
-		if lim := p.Reg.Limiter(tgt.Provider, tgt.APIKey); lim != nil {
+		limKey := tgt.APIKey
+		if tgt.AuthType == "oauth" {
+			limKey = "oauth:" + tgt.AcctName
+			// quota-cooled oauth accounts are skipped, not burned as a failover attempt
+			if p.Pool != nil && p.Pool.Cooling(tgt.Provider.Name, tgt.AcctName) {
+				lastErr = fmt.Sprintf("%s: account %s cooling down", tgt.Provider.Name, tgt.AcctName)
+				continue
+			}
+		}
+		if lim := p.Reg.Limiter(tgt.Provider, limKey); lim != nil {
 			if err := lim.Wait(r.Context()); err != nil {
 				rec.Status = 499
 				return
@@ -231,10 +243,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			lastStatus, lastErrBody, lastErr = resp.StatusCode, b, fmt.Sprintf("%s: http %d", tgt.Provider.Name, resp.StatusCode)
+			if tgt.AuthType == "oauth" && p.Pool != nil {
+				p.Pool.MarkResult(tgt.Provider.Name, tgt.AcctName, resp.StatusCode, string(b))
+			}
 			continue
 		}
 
 		// success — stream or translate
+		if tgt.AuthType == "oauth" && p.Pool != nil {
+			p.Pool.MarkResult(tgt.Provider.Name, tgt.AcctName, 200, "") // reset cooldown ladder
+		}
 		rec.Provider = tgt.Provider.Name
 		rec.Attempts = attempt + 1
 		p.Active.Set(&ActiveEntry{
@@ -339,6 +357,26 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 			// anthropic base URLs may already end in /v1 or /api/anthropic etc:
 			// convention: base_url includes everything up to (not including) the endpoint path.
 		}
+	case pv.Wire == WireResponses:
+		// any client wire -> Responses upstream (Codex backend). Chat wire is
+		// the hub: anthropic clients are normalized first, then chat→responses.
+		chat := req
+		if clientWire == WireAnthropic {
+			if !strictJSON {
+				return nil, errors.New("unparseable anthropic body for translation")
+			}
+			chat = translate.AnthropicReqToOpenAI(req, opts)
+		}
+		if strictJSON {
+			chat["model"] = upModel
+			for k, v := range pv.BodyOverrides {
+				if _, exists := chat[k]; !exists {
+					chat[k] = v
+				}
+			}
+		}
+		bodyOut, _ = json.Marshal(translate.ChatReqToResponses(chat))
+		url += "/responses"
 	case pv.Wire == WireAnthropic:
 		// openai client -> anthropic upstream
 		if !strictJSON {
@@ -375,11 +413,7 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream, application/json")
 	if tgt.AuthType == "oauth" {
-		token := tgt.APIKey
-		if token == "" {
-			token = oauthToken(tgt)
-		}
-		setAuth(httpReq, pv.Wire, token)
+		p.setOAuthAuth(httpReq, tgt, findAcct(pv, tgt.AcctName))
 	} else {
 		setAuth(httpReq, pv.Wire, tgt.APIKey)
 	}
@@ -392,19 +426,70 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 			sid = p.opencodeSession(pv.Name + ":" + tgt.APIKey)
 		}
 		httpReq.Header.Set("x-opencode-session", sid)
-		httpReq.Header.Set("x-opencode-client", "agent-router")
+		httpReq.Header.Set("x-opencode-client", "yardmaster")
 	}
 	// helpful attribution headers
-	httpReq.Header.Set("User-Agent", "agent-router/"+p.Version)
+	httpReq.Header.Set("User-Agent", "github.com/bacnh85/yardmaster/"+p.Version)
 	return httpReq, nil
 }
 
 // opencodeSession returns a stable uuid per provider+key so upstream routing
 // sticks (opencode requires the header; clients that send their own win).
 
-func oauthToken(tgt *provider.Target) string {
-	// Phase 4 hook: OAuth token providers plug in here.
-	return ""
+// findAcct locates an oauth account config inside a provider.
+func findAcct(pv *config.Provider, name string) *config.OAuthAcct {
+	for _, a := range pv.Auth.OAuth {
+		if a.Name == name {
+			return a
+		}
+	}
+	return nil
+}
+
+// setOAuthAuth applies the account kind's auth headers (mimicking the CLI
+// clients these subscriptions belong to). Applied before provider
+// extra_headers so a user override wins.
+func (p *Proxy) setOAuthAuth(h *http.Request, tgt *provider.Target, acct *config.OAuthAcct) {
+	pv := tgt.Provider
+	var token string
+	if p.Pool != nil && tgt.AcctName != "" {
+		t, err := p.Pool.Token(h.Context(), pv.Name, tgt.AcctName)
+		if err != nil {
+			token = "" // buildUpstream callers treat empty as a build failure? no —
+			// fall through with whatever we have; upstream 401s feed MarkResult
+			if acct != nil && acct.AccessTok != "" {
+				token = acct.AccessTok
+			}
+		} else {
+			token = t
+		}
+	}
+	if token == "" {
+		return
+	}
+	kind := ""
+	if acct != nil {
+		kind = acct.Kind
+	}
+	switch kind {
+	case "claude-code":
+		// Claude Code subscription: OAuth bearer on the anthropic wire
+		h.Header.Set("Authorization", "Bearer "+token)
+		h.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		h.Header.Set("x-app", "cli")
+		h.Header.Set("User-Agent", "claude-cli/2.0.0 (external, cli)")
+	case "codex":
+		// Codex/ChatGPT subscription: bearer on the responses wire
+		h.Header.Set("Authorization", "Bearer "+token)
+		if acct != nil && acct.AccountID != "" {
+			h.Header.Set("chatgpt-account-id", acct.AccountID)
+		}
+		h.Header.Set("OpenAI-Beta", "responses=experimental")
+		h.Header.Set("originator", "codex_cli_rs")
+		h.Header.Set("User-Agent", "codex_cli_rs/0.1.0")
+	default:
+		setAuth(h, pv.Wire, token)
+	}
 }
 
 var opencodeSessions sync.Map
@@ -522,11 +607,73 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, clientWire strin
 	}
 
 	// wire translation path
+	if tgt.Provider.Wire == WireResponses {
+		// normalize the Responses wire to openai chat up front: SSE streams are
+		// translated byte-stream-level; non-stream JSON in forwardTranslateFull.
+		if stream {
+			resp.Body = newRespToChatBody(resp.Body, upModel)
+		}
+	}
 	if stream {
 		return p.forwardTranslateStream(w, r, clientWire, tgt, resp, req, upModel, touch, &firstTouch)
 	}
 	return p.forwardTranslateFull(w, r, clientWire, tgt, resp, req, upModel, touch, &firstTouch)
 }
+
+// respToChatBody converts a Responses-API SSE stream into openai
+// chat-completions SSE bytes on the fly (no buffering beyond one event).
+type respToChatBody struct {
+	src       io.ReadCloser
+	sc        *bufio.Scanner
+	rc        *translate.Resp2ChatStream
+	buf       bytes.Buffer
+	eventName string
+	eof       bool
+}
+
+func newRespToChatBody(src io.ReadCloser, model string) *respToChatBody {
+	b := &respToChatBody{src: src, rc: translate.NewResp2ChatStream(model), sc: bufio.NewScanner(src)}
+	b.sc.Buffer(make([]byte, 64*1024), 4<<20)
+	return b
+}
+
+func (b *respToChatBody) Read(p []byte) (int, error) {
+	for b.buf.Len() == 0 {
+		if b.eof {
+			return 0, io.EOF
+		}
+		if !b.sc.Scan() {
+			b.eof = true
+			for _, ch := range b.rc.Done() {
+				b.writeChunk(ch)
+			}
+			b.buf.WriteString("data: [DONE]\n\n")
+			continue
+		}
+		line := strings.TrimSpace(b.sc.Text())
+		switch {
+		case line == "":
+			b.eventName = ""
+		case strings.HasPrefix(line, "event:"):
+			b.eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			var ev map[string]any
+			if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &ev) == nil {
+				for _, ch := range b.rc.Event(b.eventName, ev) {
+					b.writeChunk(ch)
+				}
+			}
+		}
+	}
+	return b.buf.Read(p)
+}
+
+func (b *respToChatBody) writeChunk(ch map[string]any) {
+	d, _ := json.Marshal(ch)
+	b.buf.WriteString("data: " + string(d) + "\n\n")
+}
+
+func (b *respToChatBody) Close() error { return b.src.Close() }
 
 func startTime(r *http.Request) time.Time {
 	if v := r.Context().Value(startCtxKey); v != nil {
@@ -628,6 +775,32 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 				}
 			}
 		}
+	} else if tgt.Provider.Wire == WireResponses {
+		// upstream responses (normalized to openai chat chunks by respToChatBody)
+		for sc.Scan() {
+			line := sc.Bytes()
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
+			}
+			data := strings.TrimSpace(string(line[5:]))
+			if data == "[DONE]" {
+				break
+			}
+			var chunk map[string]any
+			if json.Unmarshal([]byte(data), &chunk) != nil {
+				continue
+			}
+			if u := asUsageMap(chunk["usage"]); u != nil {
+				usage.In = num(u["prompt_tokens"])
+				usage.Out = num(u["completion_tokens"])
+				usage.CacheR = num(u["cache_read_tokens"])
+				usage.CacheW = num(u["cache_write_tokens"])
+			}
+			if writeEvent("", chunk) != nil {
+				return usage, sinceT(r, *firstTouch)
+			}
+		}
+		writeDone(w)
 	} else {
 		// upstream anthropic → client openai
 		tr := translate.NewAnth2OAIStream(req["model"].(string))
@@ -713,12 +886,19 @@ func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, r *http.Request, cli
 		p.writeError(w, clientWire, 502, "upstream returned non-JSON body")
 		return Usage{Estimate: true}, 0
 	}
-	usage := ParseUsageJSON(tgt.Provider.Wire, body)
+	upWire := tgt.Provider.Wire
+	if upWire == WireResponses {
+		// normalize to openai chat completion, then reuse the openai paths
+		m = translate.ResponsesRespToChat(m)
+		body, _ = json.Marshal(m)
+		upWire = WireOpenAI
+	}
+	usage := ParseUsageJSON(upWire, body)
 	var out map[string]any
 	if clientWire == WireAnthropic {
 		out = translate.OpenAIRespToAnthropic(m)
 	} else {
-		out = translate.AnthropicRespToOpenAI(m)
+		out = m
 	}
 	b, _ := json.Marshal(out)
 	w.Header().Set("Content-Type", "application/json")

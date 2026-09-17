@@ -85,7 +85,7 @@ export default function App() {
   return (
     <div className="shell">
       <nav className="side" aria-label="main navigation">
-        <div className="brand">agent-router</div>
+        <div className="brand">yardmaster</div>
         {NAV.map((g) => (
           <div key={g.group} className="nav-group-wrap">
             <div className="nav-group">{g.group}</div>
@@ -129,7 +129,7 @@ function Login({ onOk }: { onOk: () => void }) {
       setBusy(true);
       login(pw).then(onOk).catch(() => { setErr("wrong password"); setBusy(false); });
     }}>
-      <h3>agent-router</h3>
+      <h3>yardmaster</h3>
       <input type="password" placeholder="admin password" value={pw} autoFocus
         onChange={(e) => setPw(e.target.value)} />
       {err && <div className="error">{err}</div>}

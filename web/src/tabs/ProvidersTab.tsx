@@ -18,6 +18,9 @@ const urlValid = (s: string) => {
   try { const u = new URL(s); return u.protocol === "http:" || u.protocol === "https:"; } catch { return false; }
 };
 
+const stateBadge = (state: string) =>
+  state === "ok" ? "badge ok" : state === "cooldown" ? "badge warn" : state === "error" ? "badge danger" : "badge muted";
+
 export function ProvidersTab() {
   const { data, error, loading, reload } = useApi<{ providers: ProviderRow[] }>("providers");
   const provs = data?.providers ?? [];
@@ -97,6 +100,7 @@ export function ProvidersTab() {
               <select id="pf-wire" value={form.wire} onChange={set("wire")}>
                 <option value="openai">openai</option>
                 <option value="anthropic">anthropic</option>
+                <option value="responses">responses</option>
               </select>
             </div>
             <div className="field full">
@@ -151,7 +155,9 @@ export function ProvidersTab() {
             {p.accounts.map((a) => (
               <span key={a.name}>
                 <span className="muted">account:</span> {a.name}
-                {a.disabled ? " (disabled)" : ""}
+                {a.state && <span className={stateBadge(a.state)}>{a.state}</span>}
+                {a.disabled && <span className="badge muted">disabled</span>}
+                {a.last_error && <span title={a.last_error} className="faint">⚠</span>}
               </span>
             ))}
           </div>

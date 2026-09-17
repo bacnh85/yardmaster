@@ -4,6 +4,7 @@ package store
 import (
 	"database/sql"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 
 // Record is one request observation.
 type Record struct {
-	Ts        int64   // unix millis
+	Ts        int64 // unix millis
 	Key       string
 	Model     string
 	Provider  string
@@ -51,6 +52,8 @@ func Open(path string) (*Store, error) {
 	s := &Store{db: db, ch: make(chan *Record, 4096), done: make(chan struct{})}
 	s.wg.Add(1)
 	go s.run()
+	// the DB holds oauth tokens — owner-only perms (best effort for pre-existing files)
+	_ = os.Chmod(path, 0o600)
 	return s, nil
 }
 
@@ -76,6 +79,14 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)`,
 	`CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model)`,
 	`CREATE INDEX IF NOT EXISTS idx_requests_provider ON requests(provider)`,
+	`CREATE TABLE IF NOT EXISTS oauth_tokens (
+		provider TEXT NOT NULL,
+		acct TEXT NOT NULL,
+		access_token TEXT NOT NULL DEFAULT '',
+		refresh_token TEXT NOT NULL DEFAULT '',
+		expires_at INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (provider, acct)
+	)`,
 }
 
 func (s *Store) Submit(r *Record) {
@@ -146,6 +157,33 @@ func (s *Store) run() {
 	}
 }
 
+// ---- oauth token persistence (survives restarts; refresh tokens rotate) ----
+
+// LoadOAuth returns stored tokens for an account; zero values when absent.
+func (s *Store) LoadOAuth(providerName, acct string) (access, refresh string, expiresAt int64) {
+	if s == nil {
+		return "", "", 0
+	}
+	err := s.db.QueryRow(`SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE provider=? AND acct=?`,
+		providerName, acct).Scan(&access, &refresh, &expiresAt)
+	if err != nil {
+		return "", "", 0
+	}
+	return access, refresh, expiresAt
+}
+
+// SaveOAuth persists refreshed tokens (called on the refresh path only — rare).
+func (s *Store) SaveOAuth(providerName, acct, access, refresh string, expiresAt int64) {
+	if s == nil {
+		return
+	}
+	_, _ = s.db.Exec(`INSERT INTO oauth_tokens (provider,acct,access_token,refresh_token,expires_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT(provider,acct) DO UPDATE SET access_token=excluded.access_token,
+		refresh_token=excluded.refresh_token, expires_at=excluded.expires_at`,
+		providerName, acct, access, refresh, expiresAt)
+}
+
 func b2i(b bool) int {
 	if b {
 		return 1
@@ -166,27 +204,27 @@ func (s *Store) Close() error {
 // ---- queries (admin API) ----
 
 type Summary struct {
-	Requests    int64    `json:"requests"`
-	Errors      int64    `json:"errors"`
-	TokIn       int64    `json:"tok_in"`
-	TokOut      int64    `json:"tok_out"`
-	CacheRead   int64    `json:"cache_read"`
-	CacheWrite  int64    `json:"cache_write"`
-	CostUSD     float64  `json:"cost_usd"`
-	TTFTp50     *float64 `json:"ttft_p50_ms"`
-	TTFTp95     *float64 `json:"ttft_p95_ms"`
-	AvgDurMs    float64  `json:"avg_dur_ms"`
-	Bucket      string   `json:"bucket"`
-	Series      []SeriesPoint `json:"series"`
+	Requests   int64         `json:"requests"`
+	Errors     int64         `json:"errors"`
+	TokIn      int64         `json:"tok_in"`
+	TokOut     int64         `json:"tok_out"`
+	CacheRead  int64         `json:"cache_read"`
+	CacheWrite int64         `json:"cache_write"`
+	CostUSD    float64       `json:"cost_usd"`
+	TTFTp50    *float64      `json:"ttft_p50_ms"`
+	TTFTp95    *float64      `json:"ttft_p95_ms"`
+	AvgDurMs   float64       `json:"avg_dur_ms"`
+	Bucket     string        `json:"bucket"`
+	Series     []SeriesPoint `json:"series"`
 }
 
 type SeriesPoint struct {
-	Bucket  int64   `json:"ts"` // unix millis of bucket start
-	Requests int64  `json:"requests"`
-	Errors  int64   `json:"errors"`
-	TokIn   int64   `json:"tok_in"`
-	TokOut  int64   `json:"tok_out"`
-	Cost    float64 `json:"cost"`
+	Bucket   int64   `json:"ts"` // unix millis of bucket start
+	Requests int64   `json:"requests"`
+	Errors   int64   `json:"errors"`
+	TokIn    int64   `json:"tok_in"`
+	TokOut   int64   `json:"tok_out"`
+	Cost     float64 `json:"cost"`
 }
 
 // SummarySince aggregates requests in the last `d`, bucketed for the chart.
@@ -228,7 +266,7 @@ func (s *Store) SummarySince(d time.Duration, bucket string) (*Summary, error) {
 	default:
 		group = "ts/3600000*3600000"
 	}
-	rows, err = s.db.Query(`SELECT ` + group + `, COUNT(*),
+	rows, err = s.db.Query(`SELECT `+group+`, COUNT(*),
 			SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
 			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cost_usd),0)
 		FROM requests WHERE ts >= ? GROUP BY 1 ORDER BY 1`, since)
@@ -293,13 +331,13 @@ func (s *Store) Recent(limit int) ([]Row, error) {
 }
 
 type Breakdown struct {
-	Name     string  `json:"name"`
-	Requests int64   `json:"requests"`
-	Errors   int64   `json:"errors"`
-	TokIn    int64   `json:"tok_in"`
-	TokOut   int64   `json:"tok_out"`
-	CacheRd  int64   `json:"cache_read"`
-	Cost     float64 `json:"cost"`
+	Name     string   `json:"name"`
+	Requests int64    `json:"requests"`
+	Errors   int64    `json:"errors"`
+	TokIn    int64    `json:"tok_in"`
+	TokOut   int64    `json:"tok_out"`
+	CacheRd  int64    `json:"cache_read"`
+	Cost     float64  `json:"cost"`
 	TTFTp50  *float64 `json:"ttft_p50_ms"`
 }
 

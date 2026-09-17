@@ -1,4 +1,4 @@
-module agent-router
+module github.com/bacnh85/yardmaster
 
 go 1.27.1
 
