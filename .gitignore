@@ -12,3 +12,5 @@ web/dist/*
 .agents/plans/
 .zcode/
 .pi/
+.private/
+docs/
