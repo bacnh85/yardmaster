@@ -6,7 +6,7 @@ docs
 *.db
 *.db-wal
 *.db-shm
-.env.local
+.env*
 config.yaml
 web/node_modules
 web/dist

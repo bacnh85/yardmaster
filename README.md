@@ -49,10 +49,12 @@ cp config.example.yaml config.yaml   # fill in provider keys
 docker compose up -d                 # http://127.0.0.1:8787
 ```
 
-`docker-compose.yml` mounts `./config.yaml` (read-only) and `./data/` (SQLite
-DB + WAL) into the container; state lives in `./data`. Pin a release instead
-of `latest` with `image: ghcr.io/bacnh85/yardmaster:0.1.0`. CLI subcommands
-run without the server:
+`docker-compose.yml` mounts `./config.yaml` (read-only) into the container;
+state (SQLite DB + WAL) lives in the `yardmaster-data` named volume, owned by
+the container's uid 1000 — no host chown needed. Backup:
+`docker run --rm -v yardmaster-data:/src -v $PWD:/backup alpine tar czf /backup/yardmaster-data.tgz -C /src .`
+Pin a release instead of `latest` with `image: ghcr.io/bacnh85/yardmaster:0.1.0`.
+CLI subcommands run without the server:
 
 ```bash
 docker compose run --rm --entrypoint yardmaster yardmaster key add my-laptop
