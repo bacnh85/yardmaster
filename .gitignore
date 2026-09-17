@@ -9,5 +9,6 @@ web/node_modules/
 web/dist/*
 !web/dist/index.html
 /yardmaster
+.agents/plans/
 .zcode/
 .pi/

@@ -1,0 +1,12 @@
+# Deploy yardmaster: cp config.example.yaml config.yaml (fill in keys), then:
+#   docker compose up -d
+services:
+  yardmaster:
+    image: ghcr.io/bacnh85/yardmaster:latest
+    container_name: yardmaster
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./config.yaml:/data/config.yaml:ro
+      - ./data:/data
+    restart: unless-stopped

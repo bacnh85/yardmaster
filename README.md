@@ -42,6 +42,26 @@ go build -o yardmaster ./cmd/yardmaster
 Dashboard: `http://127.0.0.1:8787/` (admin password from config).
 Hot reload: edit `config.yaml` → `SIGHUP` or `POST /admin/api/reload`.
 
+## Docker
+
+```bash
+cp config.example.yaml config.yaml   # fill in provider keys
+docker compose up -d                 # http://127.0.0.1:8787
+```
+
+`docker-compose.yml` mounts `./config.yaml` (read-only) and `./data/` (SQLite
+DB + WAL) into the container; state lives in `./data`. Pin a release instead
+of `latest` with `image: ghcr.io/bacnh85/yardmaster:0.1.0`. CLI subcommands
+run without the server:
+
+```bash
+docker compose run --rm --entrypoint yardmaster yardmaster key add my-laptop
+docker compose run --rm --entrypoint yardmaster yardmaster version
+```
+
+Images are published to GHCR (`ghcr.io/bacnh85/yardmaster`) by GitHub Actions
+on every push to `main` and every `v*` tag, for `linux/amd64` + `linux/arm64`.
+
 ## Provider config
 
 ```yaml
