@@ -437,9 +437,17 @@ func TestUsageRecordedThroughStore(t *testing.T) {
 	defer ts.Close()
 	http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m","stream":true}`))
 
-	inflight, total := p.Stats()
-	if total != 1 || inflight != 0 {
-		t.Fatalf("stats: inflight=%d total=%d", inflight, total)
+	// inflight decrement races the client-side response completion; poll for it
+	var inflight, total int64
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		inflight, total = p.Stats()
+		if total == 1 && inflight == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stats: inflight=%d total=%d", inflight, total)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if len(p.Active.List()) != 0 {
 		t.Fatal("active should be empty after finish")
