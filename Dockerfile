@@ -9,11 +9,12 @@ RUN npm run build
 # 2) build binary (pure-Go sqlite -> CGO off)
 FROM golang:1.27-alpine AS build
 WORKDIR /src
+ARG VERSION=dev
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /app/web/dist ./web/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/yardmaster ./cmd/yardmaster
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/yardmaster ./cmd/yardmaster
 
 # 3) runtime
 FROM alpine:3.22

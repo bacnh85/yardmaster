@@ -10,7 +10,7 @@ echo "==> building dashboard (web/)"
 (cd web && npm run build --silent)
 
 echo "==> building yardmaster"
-go build -o "$DEPLOY/bin/yardmaster" ./cmd/yardmaster
+go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o "$DEPLOY/bin/yardmaster" ./cmd/yardmaster
 
 echo "==> installed: $DEPLOY/bin/yardmaster"
 "$DEPLOY/bin/yardmaster" version

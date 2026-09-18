@@ -20,7 +20,8 @@ import (
 	"github.com/bacnh85/yardmaster/internal/store"
 )
 
-const version = "0.1.0"
+// overridable at link time: -ldflags "-X main.version=…" (CI/Dockerfile stamp it)
+var version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
