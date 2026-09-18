@@ -9,7 +9,7 @@ interface ProviderForm {
   adaptive_thinking: boolean; inject_cache_control: boolean;
 }
 
-const EMPTY_FORM: ProviderForm = {
+export const EMPTY_FORM: ProviderForm = {
   name: "", wire: "openai", base_url: "", models: "", keys: "",
   dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
 };
@@ -20,6 +20,22 @@ const urlValid = (s: string) => {
 
 const stateBadge = (state: string) =>
   state === "ok" ? "badge ok" : state === "cooldown" ? "badge warn" : state === "error" ? "badge danger" : "badge muted";
+
+export interface ProviderBody {
+  name: string; wire: string; base_url: string; models: string[];
+  keys?: string[];
+  dispatch_interval_ms: number; adaptive_thinking: boolean; inject_cache_control: boolean;
+}
+
+/** Form → API payload. Pure so tests can pin the types the Go server expects. */
+export const providerBody = (form: ProviderForm): ProviderBody => ({
+  name: form.name.trim(), wire: form.wire, base_url: form.base_url.trim(),
+  models: form.models.split(",").map((s) => s.trim()).filter(Boolean),
+  ...(form.keys.trim() ? { keys: form.keys.split("\n").map((s) => s.trim()).filter(Boolean) } : {}),
+  dispatch_interval_ms: Number(form.dispatch_interval_ms) || 0, // type=number inputs yield strings; Go rejects string→int
+  adaptive_thinking: form.adaptive_thinking,
+  inject_cache_control: form.inject_cache_control,
+});
 
 export function ProvidersTab() {
   const { data, error, loading, reload } = useApi<{ providers: ProviderRow[] }>("providers");
@@ -46,16 +62,9 @@ export function ProvidersTab() {
     if (!form) return;
     setErr("");
     setBusy(true);
-    const body = {
-      name: form.name.trim(), wire: form.wire, base_url: form.base_url.trim(),
-      models: form.models.split(",").map((s) => s.trim()).filter(Boolean),
-      ...(form.keys.trim() ? { keys: form.keys.split("\n").map((s) => s.trim()).filter(Boolean) } : {}),
-      dispatch_interval_ms: form.dispatch_interval_ms || 0,
-      adaptive_thinking: form.adaptive_thinking,
-      inject_cache_control: form.inject_cache_control,
-    };
+    const body = providerBody(form);
     try {
-      if (editName) { await put(`providers/${editName}`, body); toast(`provider "${body.name}" saved`); }
+      if (editName) { await put(`providers/${encodeURIComponent(editName)}`, body); toast(`provider "${body.name}" saved`); }
       else { await post("providers", body); toast(`provider "${body.name}" added`); }
       setForm(null);
       reload();
@@ -157,7 +166,7 @@ export function ProvidersTab() {
                 <span className="muted">account:</span> {a.name}
                 {a.state && <span className={stateBadge(a.state)}>{a.state}</span>}
                 {a.disabled && <span className="badge muted">disabled</span>}
-                {a.last_error && <span title={a.last_error} className="faint">⚠</span>}
+                {a.last_error && <span title={a.last_error} role="img" aria-label={`account error: ${a.last_error}`} className="faint">⚠</span>}
               </span>
             ))}
           </div>

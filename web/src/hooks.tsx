@@ -45,19 +45,17 @@ export function useApi<T>(path: string | null): ApiState<T> {
 export function useSorted<T extends object>(rows: T[], initialKey: keyof T, initialDir: 1 | -1 = -1) {
   const [key, setKey] = useState<keyof T>(initialKey);
   const [dir, setDir] = useState<1 | -1>(initialDir);
+  const sort = (k: keyof T) => (key === k ? setDir((d) => (d === 1 ? -1 : 1)) : (setKey(k), setDir(-1)));
   const sorted = useMemo(() => {
-    const cmp = (a: T, b: T) => {
-      const x = a[key], y = b[key];
-      if (typeof x === "number" && typeof y === "number") return x - y;
-      return String(x).localeCompare(String(y));
-    };
-    return [...rows].sort((a, b) => cmp(a, b) * dir);
+    return [...rows].sort((a, b) => cmpVals(a[key], b[key], dir));
   }, [rows, key, dir]);
   const th = (k: keyof T, label: string, num = false) => (
     <th
       className={num ? "n sortable" : "sortable"}
       aria-sort={key === k ? (dir === 1 ? "ascending" : "descending") : "none"}
-      onClick={() => (key === k ? setDir((d) => (d === 1 ? -1 : 1)) : (setKey(k), setDir(-1)))}
+      tabIndex={0}
+      onClick={() => sort(k)}
+      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), sort(k))}
     >
       {label}
       <span className="sort-ind" aria-hidden>{key === k ? (dir === 1 ? "▲" : "▼") : "↕"}</span>
@@ -65,3 +63,10 @@ export function useSorted<T extends object>(rows: T[], initialKey: keyof T, init
   );
   return { sorted, th };
 }
+
+/** Sort comparator: numbers numeric, strings lexical, null/undefined last regardless of dir. */
+export const cmpVals = (x: unknown, y: unknown, dir: 1 | -1 = 1) => {
+  if (x == null || y == null) return (x == null ? 1 : 0) - (y == null ? 1 : 0);
+  const c = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y));
+  return c * dir;
+};

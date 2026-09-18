@@ -14,9 +14,6 @@ import { EndpointsTab } from "./tabs/EndpointsTab";
 import { ProvidersTab } from "./tabs/ProvidersTab";
 import { SettingsTab } from "./tabs/SettingsTab";
 
-// read once at module init: the pw-login flow clears the hash before tabs mount
-const BOOT = new URLSearchParams(location.hash.replace(/^#\/?/, ""));
-
 const NAV: { group: string; tabs: { id: Tab; label: string; icon: React.ReactNode }[] }[] = [
   {
     group: "Proxy", tabs: [
@@ -47,7 +44,8 @@ export default function App() {
   // deep link: #pw=<password>&tab=<tab> (hash stays client-side; also enables
   // headless captures). pw is consumed and cleared from the hash after login.
   useEffect(() => {
-    const pw = BOOT.get("pw");
+    // read here, not in a module-level binding: nothing long-lived retains the password
+    const pw = new URLSearchParams(location.hash.replace(/^#\/?/, "")).get("pw");
     if (pw) {
       history.replaceState(null, "", location.pathname);
       login(pw).then(() => setAuthed(true)).catch(() => setAuthed(false));
@@ -90,7 +88,7 @@ export default function App() {
           <div key={g.group} className="nav-group-wrap">
             <div className="nav-group">{g.group}</div>
             {g.tabs.map((t) => (
-              <button key={t.id} role="tab" aria-selected={tab === t.id} className="nav-item" aria-label={t.label}
+              <button key={t.id} aria-current={tab === t.id ? "page" : undefined} className="nav-item" aria-label={t.label}
                 onClick={() => selectTab(t.id)}>
                 {t.icon}<span>{t.label}</span>
               </button>

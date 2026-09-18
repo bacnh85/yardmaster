@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fmtN } from "./api";
 import { copyText } from "./clipboard";
 import { IconX } from "./icons";
@@ -57,14 +57,20 @@ export function StatusBadge({ status }: { status: number }) {
 export function Modal({ title, onClose, children, wide }: {
   title: string; onClose: () => void; children: React.ReactNode; wide?: boolean;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    // focus the dialog (unless a child grabbed focus, e.g. autoFocus inputs);
+    // restore focus to the trigger on close. ponytail: no full focus trap — Esc
+    // + overlay click cover it; add a trap if tabbing into the page behind matters.
+    const prev = document.activeElement as HTMLElement | null;
+    if (ref.current && !ref.current.contains(document.activeElement)) ref.current.focus();
     const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
+    return () => { window.removeEventListener("keydown", k); prev?.focus?.(); };
   }, [onClose]);
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`modal ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
+      <div ref={ref} tabIndex={-1} className={`modal ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-head">
           <h3>{title}</h3>
           <button className="icon-btn" onClick={onClose} aria-label="close"><IconX /></button>

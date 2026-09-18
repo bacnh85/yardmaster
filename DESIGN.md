@@ -8,8 +8,8 @@ colors:
   surface: "#FFFFFF"     # cards
   surface2: "#F5F5F4"    # table headers, hovers
   ink: "#1C1917"         # primary text
-  muted: "#57534E"       # secondary text (7.4:1 on bg)
-  faint: "#5D5651"       # timestamps, disabled
+  muted: "#49433F"       # secondary text (APCA Lc 86 on surface2)
+  faint: "#49433F"       # timestamps, disabled
   line: "#E7E5E4"        # borders
   accent: "#115E59"      # teal-800 — links, active tab, primary buttons, chart primary
   accentHover: "#0D4A46" # primary button hover
@@ -45,7 +45,7 @@ One accent (teal) carries brand + chart primary; status colors carry meaning onl
 
 - Header: product name left, live inflight counter + reload right. Sticky.
 - Tab bar under header: Live, Usage, Latency, Requests, Keys, Providers, Settings.
-- Content: max-width 1200px, 24px gutters.
+- Content: max-width 1100px, 24px gutters.
 - Cards: `surface` bg, `sm` elevation, `md` radius, 16px padding. Section titles 16/600.
 
 ## Components

@@ -34,6 +34,7 @@ export function RequestsTab() {
                 {th("provider", "provider")}
                 {th("key", "key")}
                 {th("status", "status")}
+                <th aria-label="error" />
                 {th("ttft_ms", "ttft", true)}
                 {th("dur_ms", "dur", true)}
                 {th("tok_in", "in", true)}
@@ -41,16 +42,19 @@ export function RequestsTab() {
                 {th("cache_read", "cache", true)}
                 {th("cost_usd", "cost", true)}
                 {th("attempts", "tries", true)}
-                <th aria-label="error" />
               </tr></thead>
               <tbody>
                 {sorted.map((r) => (
-                  <tr key={r.id} className="clickable" onClick={() => setDetail(r)}>
+                  <tr key={r.id} className="clickable" tabIndex={0}
+                    aria-label={`request detail: ${r.model}, status ${r.status}`}  /* keep implicit row role — role="button" would break the table pattern */
+                    onClick={() => setDetail(r)}
+                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), setDetail(r))}>
                     <td className="mono">{fmtTime(r.ts)}</td>
                     <td>{r.model}</td>
                     <td>{r.provider}</td>
                     <td>{r.key}</td>
                     <td><StatusBadge status={r.status} /></td>
+                    <td><ErrCell err={r.err} /></td>
                     <td className="n">{fmtMs(r.ttft_ms)}</td>
                     <td className="n">{fmtDur(r.dur_ms)}</td>
                     <td className="n">{fmtN(r.tok_in)}</td>
@@ -58,7 +62,6 @@ export function RequestsTab() {
                     <td className="n">{fmtN(r.cache_read)}</td>
                     <td className="n">{fmtUSD(r.cost_usd)}</td>
                     <td className="n">{r.attempts}</td>
-                    <td><ErrCell err={r.err} /></td>
                   </tr>
                 ))}
               </tbody>

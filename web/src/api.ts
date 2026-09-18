@@ -60,7 +60,8 @@ export const fmtN = (n: number | null | undefined) =>
   n == null ? "–" : n.toLocaleString("en-US", { maximumFractionDigits: 0 });
 export const fmtUSD = (n: number) =>
   n === 0 ? "$0" : n < 0.01 ? "<$0.01" : "$" + n.toFixed(2);
-export const fmtMs = (n: number | null | undefined) => (n == null ? "–" : `${Math.round(n)}ms`);
+export const fmtMs = (n: number | null | undefined) =>
+  n == null ? "–" : n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${Math.round(n)}ms`; // seconds ≥1s: mixed units on adjacent cards read worse
 export const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
 export const fmtDur = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
