@@ -9,6 +9,7 @@ export function LiveTab() {
   const [live, setLive] = useState<LivePayload | null>(null);
   const [connected, setConnected] = useState(false);
   const [everConnected, setEverConnected] = useState(false);
+  const [slowStart, setSlowStart] = useState(false);
   useTick(1000); // keep elapsed cells ticking
 
   useEffect(() => {
@@ -31,12 +32,21 @@ export function LiveTab() {
     es.onerror = () => setConnected(false);
     return () => es.close();
   }, []);
+  // "connecting…" only after a grace period — fast loads must never see a banner
+  useEffect(() => {
+    if (everConnected) return;
+    const t = setTimeout(() => setSlowStart(true), 2500);
+    return () => clearTimeout(t);
+  }, [everConnected]);
 
   return (
     <>
       <PageHead title="Live" desc="Requests currently streaming through the proxy" />
-      {!connected && (everConnected || !BOOT.get("shot")) && (
+      {!connected && everConnected && (
         <div className="reconnecting banner" role="status">connection lost — reconnecting…</div>
+      )}
+      {!connected && !everConnected && slowStart && (
+        <div className="reconnecting banner" role="status">connecting…</div>
       )}
       {!live && connected && <Empty>waiting for data…</Empty>}
       {live && (
