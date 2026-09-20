@@ -78,3 +78,23 @@ export const fmtMs = (n: number | null | undefined) =>
 export const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
 export const fmtDur = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+
+/** Countdown label for an epoch-ms reset timestamp: "3h 57m", "4d", "—". */
+export const fmtResetIn = (resetAtMs: number | null | undefined) => {
+  if (!resetAtMs) return "—";
+  const m = Math.round((resetAtMs - Date.now()) / 60000);
+  if (m <= 0) return "—";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
+  const d = Math.floor(h / 24), rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
+};
+
+export interface QuotaWindow { used: number; cap: number; exceeded?: boolean; reset_at?: number }
+export interface QuotaAccount {
+  label: string; suffix: string;
+  five_hour?: QuotaWindow; weekly?: QuotaWindow;
+  monthly_credits?: number; monthly_total?: number; limited?: boolean; err?: string;
+}
+export interface QuotaGroup { source: string; providers: string[]; accounts: QuotaAccount[]; fetched_at: number }

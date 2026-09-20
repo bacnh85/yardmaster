@@ -319,6 +319,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		writeJSON(map[string]any{"providers": out})
+	case path == "quota" && r.Method == "GET":
+		s.handleQuota(w, r)
 	case path == "live" && r.Method == "GET":
 		s.serveLive(w, r)
 	case path == "keys" && r.Method == "POST":

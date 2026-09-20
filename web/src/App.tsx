@@ -4,10 +4,11 @@ import { Toaster } from "./components";
 import { TABS, tabFromHash, providerDetailFromHash, type Tab } from "./route";
 import {
   IconActivity, IconChart, IconGauge, IconList, IconKey, IconServer, IconSettings,
-  IconSun, IconMoon,
+  IconShield, IconSun, IconMoon,
 } from "./icons";
 import { LiveTab } from "./tabs/LiveTab";
 import { UsageTab } from "./tabs/UsageTab";
+import { QuotaTab } from "./tabs/QuotaTab";
 import { LatencyTab } from "./tabs/LatencyTab";
 import { RequestsTab } from "./tabs/RequestsTab";
 import { EndpointsTab } from "./tabs/EndpointsTab";
@@ -19,6 +20,7 @@ const NAV: { group: string; tabs: { id: Tab; label: string; icon: React.ReactNod
     group: "Proxy", tabs: [
       { id: "live", label: "Live", icon: <IconActivity /> },
       { id: "usage", label: "Usage", icon: <IconChart /> },
+      { id: "quota", label: "Quota", icon: <IconShield /> },
       { id: "latency", label: "Latency", icon: <IconGauge /> },
       { id: "requests", label: "Requests", icon: <IconList /> },
     ],
@@ -119,6 +121,7 @@ export default function App() {
       <main>
         {tab === "live" && <LiveTab />}
         {tab === "usage" && <UsageTab />}
+        {tab === "quota" && <QuotaTab />}
         {tab === "latency" && <LatencyTab />}
         {tab === "requests" && <RequestsTab />}
         {tab === "endpoints" && <EndpointsTab />}

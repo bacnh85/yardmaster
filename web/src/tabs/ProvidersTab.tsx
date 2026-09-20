@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult } from "../api";
-import { useApi } from "../hooks";
+import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult, QuotaGroup } from "../api";
+import { useApi, usePoll } from "../hooks";
 import { Confirm, Empty, ErrorBanner, Modal, PageHead, toast } from "../components";
+import { QuotaTable, isQuotaProvider } from "./QuotaTab";
 import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPlan, CmdPlan } from "../presets";
 
 interface ProviderForm {
@@ -249,7 +250,7 @@ function CustomProviders({ provs, reload }: { provs: ProviderRow[]; reload: () =
             <div className="field full">
               <label htmlFor="pf-url">base URL</label>
               <input id="pf-url" value={form.base_url} required onChange={set("base_url")} placeholder="https://api.example.com/v1" aria-invalid={urlBad} />
-              {urlBad && <div className="field-hint">must be a valid http(s) URL</div>}
+              {urlBad && <div className="field-err">must be a valid http(s) URL</div>}
             </div>
             <div className="field full">
               <label htmlFor="pf-models">models (comma-separated, empty = any)</label>
@@ -395,6 +396,15 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   const [serveWildcard, setServeWildcard] = useState<null | { m: CatalogModel; sub: ProviderRow }>(null);
 
   const catalogSource = group.find((p) => !p.disabled) || group[0];
+
+  // per-account usage windows (quota-capable presets only); shares the server's
+  // 60s cache with the Quota tab
+  const quotaSupported = group.some((p) => isQuotaProvider(p.base_url));
+  const quotaReq = useApi<{ quotas: QuotaGroup[] }>(quotaSupported ? "quota" : null);
+  usePoll(quotaReq.reload, 30000); // keep countdowns as fresh as the Quota tab; noop without a path
+  const quota = quotaSupported
+    ? quotaReq.data?.quotas.find((g) => g.providers.some((n) => group.some((p) => p.name === n)))
+    : undefined;
 
   const fetchCatalog = () => {
     if (!catalogSource) return;
@@ -590,8 +600,8 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
           <form className="form-grid" onSubmit={addConnection} aria-label="add connection" style={{ margin: "12px 0" }}>
             <div className="field">
               <label htmlFor="conn-label">label</label>
-              <input id="conn-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="mail@bacnh.com" />
-              <div className="field-hint">stored as "{r.code} mail@bacnh.com"</div>
+              <input id="conn-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="you@example.com" />
+              <div className="field-hint">stored as "{labelWithCode(r.code, label.trim()) || `${r.code} your-label`}"</div>
             </div>
             <div className="field full">
               <label htmlFor="conn-key">API key</label>
@@ -623,6 +633,22 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
           );
         })}
       </div>
+
+      {quotaSupported && quotaReq.error && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <ErrorBanner msg={quotaReq.error} onRetry={quotaReq.reload} />
+        </div>
+      )}
+
+      {quota && quota.accounts.length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="row spread baseline">
+            <h3>Usage</h3>
+            <span className="faint" title="usage is cached for 60s">fetched {new Date(quota.fetched_at).toLocaleTimeString()}</span>
+          </div>
+          <QuotaTable accounts={quota.accounts} />
+        </div>
+      )}
 
       <div className="card" style={{ marginTop: 16 }}>
         <div className="row spread baseline">
