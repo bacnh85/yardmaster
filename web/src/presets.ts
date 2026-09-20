@@ -15,6 +15,7 @@ export interface RegistryProvider {
   desc: string;
   code: string;      // short code: monogram + connection label prefix (e.g. "OCG")
   prefix: string;    // routing prefix; models exposed to agents as "prefix/model"
+  plans?: boolean;   // catalog supports plan-tier filtering (cmdPlan)
   entries: RegistryEntry[];
 }
 
@@ -43,13 +44,60 @@ export const REGISTRY: RegistryProvider[] = [
     ],
   },
   {
-    id: "cmdcode", title: "Command Code (CC)", code: "CC", prefix: "cmd",
-    desc: "Command Code provider API",
+    id: "cmdcode", title: "Command Code (CC)", code: "CC", prefix: "cmd", plans: true,
+    desc: "Command Code Provider API — 50+ open models on GOAT, Claude/GPT/Gemini on Pro/Max",
     entries: [
-      { name: "cmdcode", wire: "openai", base_url: "https://api.commandcode.ai/provider/v1", family: "chat", familyLabel: "Command Code models" },
+      { name: "cmdcode", wire: "openai", base_url: "https://api.commandcode.ai/provider/v1", family: "chat", familyLabel: "Open models (GOAT+)" },
+      { name: "cmdcode-claude", wire: "anthropic", base_url: "https://api.commandcode.ai/provider/v1", family: "anthropic", familyLabel: "Claude (Pro/Max)" },
     ],
   },
 ];
+
+// Command Code plan tiers, by live catalog id (api.commandcode.ai/provider/v1/models,
+// lowercase; verified 2026-09-20). Ids CommandCode adds later fall to "" —
+// shown only under the "all" filter and never swept by plan expose-alls until
+// filed into the right list here.
+const CC_GOAT = [
+  "z-ai/glm-5.3-flash", "z-ai/glm-5.3-flashx", "zai-org/glm-5.3", "zai-org/glm-5.2",
+  "zai-org/glm-5.2-fast", "zai-org/glm-5.1", "zai-org/glm-5",
+  "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash-vision-exp",
+  "deepseek/deepseek-v4-flash-fast", "deepseek/deepseek-v4.1-flash",
+  "moonshotai/kimi-k3", "moonshotai/kimi-k2.7-code", "moonshotai/kimi-k2.7-code-highspeed",
+  "moonshotai/kimi-k2.6", "moonshotai/kimi-k2.5",
+  "minimaxai/minimax-m3", "minimaxai/minimax-m2.7", "minimaxai/minimax-m2.5",
+  "xiaomi/mimo-v2.5", "xiaomi/mimo-v2.5-pro",
+  "qwen/qwen3.8-omni-flash", "qwen/qwen3.8-max-0902", "qwen/qwen3.8-max", "qwen/qwen3.8-27b",
+  "qwen/qwen3.8-flash", "qwen/qwen3.7-max", "qwen/qwen3.7-plus", "qwen/qwen3.7-flash",
+  "qwen/qwen3.6-max-preview", "qwen/qwen3.6-plus",
+  "meituan/longcat-2.0", "stepfun/step-3.7-flash", "stepfun/step-3.5-flash",
+  "tencent/hy3-paid", "tencent/hy4-preview",
+  "google/gemini-3.8-flash", "google/gemini-3.7-flash",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "thinkingmachines/inkling", "thinkingmachines/inkling-small",
+  "poolside/laguna-s-2.1-free", "inclusionai/ling-3.0-flash-sante:free",
+  "meta/muse-spark-1.2", "meta/muse-spark-1.2-contributor", "meta/muse-spark-1.3", "meta/muse-spark-1.3-contributor",
+  "xai/grok-4.5", "xai/grok-4.6", "gpt-5.6-sol", "gpt-5.6-luna",
+];
+const CC_PRO = [
+  "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
+  "gpt-5.6-terra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
+  "google/gemini-3.6-flash", "google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3.1-flash-lite",
+  "meta/muse-spark-1.1",
+];
+const CC_MAX = [
+  "claude-fable-5", "claude-fable-5-1", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "sakana/fugu-ultra",
+];
+
+export type CmdPlan = "goat" | "pro" | "max" | ""; // "" = new/unclassified
+
+/** Plan tier for a CommandCode catalog id (case-insensitive). */
+export function cmdPlan(id: string): CmdPlan {
+  const k = id.toLowerCase();
+  if (CC_MAX.includes(k)) return "max";
+  if (CC_PRO.includes(k)) return "pro";
+  if (CC_GOAT.includes(k)) return "goat";
+  return "";
+}
 
 /** Find a config provider's registry entry: by preset id, else by exact name (legacy configs). */
 export function registryFor(p: { preset: string; name: string }): RegistryProvider | undefined {

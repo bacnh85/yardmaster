@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_FORM, providerBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels } from "./tabs/ProvidersTab";
-import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm } from "./presets";
+import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan } from "./presets";
 import type { ProviderRow } from "./api";
 
 describe("providerBody", () => {
@@ -88,6 +88,26 @@ describe("registry", () => {
       expect(e.session).toBe("opencode");
     }
     expect(zen.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat", "responses"]);
+    // CommandCode: Claude models serve /messages only → dedicated anthropic entry
+    const cc = REGISTRY.find((r) => r.id === "cmdcode")!;
+    expect(cc.plans).toBe(true);
+    expect(cc.entries).toHaveLength(2);
+    expect(new Set(cc.entries.map((e) => e.base_url)).size).toBe(1);
+    expect(cc.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat"]);
+  });
+
+  it("classifies CommandCode models per plan (live catalog ids)", () => {
+    // vendor-namespaced + mixed-case ids must match case-insensitively
+    expect(cmdPlan("MiniMaxAI/MiniMax-M3")).toBe("goat");
+    expect(cmdPlan("zai-org/GLM-5.3")).toBe("goat");
+    expect(cmdPlan("gpt-5.6-luna")).toBe("goat");
+    expect(cmdPlan("inclusionai/ling-3.0-flash-sante:free")).toBe("goat");
+    expect(cmdPlan("claude-sonnet-5")).toBe("pro");
+    expect(cmdPlan("google/gemini-3.6-flash")).toBe("pro");
+    expect(cmdPlan("meta/muse-spark-1.1")).toBe("pro");
+    expect(cmdPlan("claude-opus-5")).toBe("max");
+    expect(cmdPlan("sakana/fugu-ultra")).toBe("max");
+    expect(cmdPlan("brand-new-model")).toBe(""); // unclassified future id
   });
 
   it("groups config providers by preset, falling back to legacy names", () => {

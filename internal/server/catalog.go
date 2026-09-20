@@ -219,19 +219,24 @@ func (s *Server) catalog(ctx context.Context, name string) ([]ModelMeta, error) 
 			return ce.models, nil
 		}
 	}
-	ids := s.upstreamModelIDs(ctx, pv)
-	if len(ids) == 0 {
-		// copy: enrichCatalog sorts in place, and this slice is the live config
-		// shared with routing and config saves
-		ids = append([]string(nil), pv.Models...) // last resort when /models and models.dev both fail
+	ups := s.upstreamModels(ctx, pv)
+	if len(ups) == 0 {
+		// last resort when /models and models.dev both fail; fresh slice —
+		// enrichCatalog sorts in place and the config Models list is live
+		ups = make([]ModelMeta, 0, len(pv.Models))
+		for _, id := range pv.Models {
+			ups = append(ups, ModelMeta{ID: id})
+		}
 	}
-	enrichCatalog(pv.BaseURL, ids)
+	enrichCatalog(pv.BaseURL, ups)
 	out, _ := catalogCache.Load(pv.BaseURL)
 	return out.(catalogEntry).models, nil
 }
 
-// upstreamModelIDs GETs {base}/models with the first key (tolerates failure).
-func (s *Server) upstreamModelIDs(ctx context.Context, p *config.Provider) []string {
+// upstreamModels GETs {base}/models with the first key (tolerates failure).
+// Carries per-model wire info when the upstream reports it
+// (supported_endpoints, e.g. CommandCode's ["/messages"] → anthropic).
+func (s *Server) upstreamModels(ctx context.Context, p *config.Provider) []ModelMeta {
 	url := strings.TrimRight(p.BaseURL, "/") + "/models"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -251,24 +256,39 @@ func (s *Server) upstreamModelIDs(ctx context.Context, p *config.Provider) []str
 	}
 	var body struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID                 string   `json:"id"`
+			Name               string   `json:"name"`
+			ContextLength      int      `json:"context_length"`
+			SupportedEndpoints []string `json:"supported_endpoints"`
 		} `json:"data"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&body) != nil {
 		return nil
 	}
-	ids := make([]string, 0, len(body.Data))
+	out := make([]ModelMeta, 0, len(body.Data))
 	for _, m := range body.Data {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
+		if m.ID == "" {
+			continue
 		}
+		mm := ModelMeta{ID: m.ID, Name: m.Name, Context: m.ContextLength}
+		if len(m.SupportedEndpoints) > 0 {
+			switch {
+			case len(m.SupportedEndpoints) == 1 && m.SupportedEndpoints[0] == "/messages":
+				mm.Family = "anthropic"
+			case len(m.SupportedEndpoints) == 1 && m.SupportedEndpoints[0] == "/responses":
+				mm.Family = "responses"
+			default:
+				mm.Family = "chat"
+			}
+		}
+		out = append(out, mm)
 	}
-	return ids
+	return out
 }
 
-// enrichCatalog merges models.dev metadata into upstream ids (or fabricates
+// enrichCatalog merges models.dev metadata into upstream metas (or fabricates
 // the id list from models.dev when /models was unavailable) and caches.
-func enrichCatalog(baseURL string, ids []string) {
+func enrichCatalog(baseURL string, ups []ModelMeta) {
 	dev, devFlat := modelsDevSnapshot()
 	var prov modelsDevProvider
 	if dev != nil {
@@ -276,12 +296,12 @@ func enrichCatalog(baseURL string, ids []string) {
 			prov = dev[id]
 		}
 	}
-	if len(ids) == 0 {
+	if len(ups) == 0 {
 		for id := range prov.Models {
-			ids = append(ids, id)
+			ups = append(ups, ModelMeta{ID: id})
 		}
 	}
-	sort.Strings(ids)
+	sort.Slice(ups, func(i, j int) bool { return ups[i].ID < ups[j].ID })
 	// upstream and models.dev disagree on dot/dash notation for the same
 	// model (claude-haiku-4-5 vs claude-haiku-4.5) — join on a canonical key.
 	devByID := make(map[string]modelsDevModel, len(prov.Models))
@@ -291,20 +311,30 @@ func enrichCatalog(baseURL string, ids []string) {
 			devByID[canonModelID(id)] = m
 		}
 	}
-	out := make([]ModelMeta, 0, len(ids))
-	for _, id := range ids {
-		mm := ModelMeta{ID: id}
-		if dm, ok := devByID[canonModelID(id)]; ok {
+	out := make([]ModelMeta, 0, len(ups))
+	for _, up := range ups {
+		mm := ModelMeta{ID: up.ID}
+		if dm, ok := devByID[canonModelID(up.ID)]; ok {
 			applyDev(&mm, dm, true)
-		} else if dm, ok := devFlat[canonModelID(id)]; ok {
-			applyDev(&mm, dm, false)
-			if mm.Input == 0 && mm.Output == 0 {
-				// cross-provider 0/0 "cost" usually means a subscription bundle
-				// (token-plan vendors list cost 0), not a free model — price as
-				// unknown (-1); the UI shows "—" and never "free"
-				mm.Input, mm.Output = -1, -1
-				mm.Free = false
+		} else if dm, ok := devFlat[canonModelID(up.ID)]; ok {
+			applyFlat(&mm, dm)
+		} else if i := strings.LastIndex(up.ID, "/"); i >= 0 {
+			// vendor-namespaced id (zai-org/GLM-5.3): price via the bare id
+			// under any vendor — display metadata only, never family
+			if dm, ok := devFlat[canonModelID(up.ID[i+1:])]; ok {
+				applyFlat(&mm, dm)
 			}
+		}
+		// upstream-reported metadata wins (it's the serving provider);
+		// models.dev fills only what upstream doesn't report
+		if up.Name != "" {
+			mm.Name = up.Name
+		}
+		if up.Context > 0 {
+			mm.Context = up.Context
+		}
+		if up.Family != "" {
+			mm.Family = up.Family // endpoint-reported wire beats the npm guess
 		}
 		out = append(out, mm)
 	}
@@ -315,6 +345,18 @@ func enrichCatalog(baseURL string, ids []string) {
 		ttl = 2 * time.Minute
 	}
 	catalogCache.Store(baseURL, catalogEntry{models: out, until: time.Now().Add(ttl)})
+}
+
+// applyFlat merges a cross-provider models.dev entry: limits/pricing/flags but
+// never family, and 0/0 "cost" usually means a subscription bundle (token-plan
+// vendors list cost 0), not a free model — price as unknown (-1); the UI shows
+// "—" and never "free".
+func applyFlat(mm *ModelMeta, dm modelsDevModel) {
+	applyDev(mm, dm, false)
+	if mm.Input == 0 && mm.Output == 0 {
+		mm.Input, mm.Output = -1, -1
+		mm.Free = false
+	}
 }
 
 func canonModelID(id string) string {

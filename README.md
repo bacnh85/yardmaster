@@ -138,7 +138,7 @@ providers:
 
 routes:
   - match: "claude-*"
-    chain: [claude-sub, zen-claude, cmdcode]   # subscription first, API-key fallback
+    chain: [claude-sub, zen-claude, cmdcode-claude]   # subscription first, API-key fallback
 ```
 
 How it works:

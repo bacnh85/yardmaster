@@ -58,11 +58,18 @@ providers:
   #   models: [gpt-5.5, grok-4.5]
 
   # --- Command Code Provider API (both wires) ---
+  # GOAT plan: open models on the openai wire. Claude models (Pro/Max) need the
+  # anthropic wire — they serve /messages only.
   - name: cmdcode
     base_url: https://api.commandcode.ai/provider/v1
     wire: openai
     auth: { type: static, keys: ["..."] }
-    models: [claude-sonnet-5, minimax-m3]
+    models: [z-ai/glm-5.3-flash, zai-org/glm-5.3, MiniMaxAI/MiniMax-M3, deepseek/deepseek-v4.1-flash]
+  # - name: cmdcode-claude       # Pro/Max plans: Claude on the anthropic wire
+  #   base_url: https://api.commandcode.ai/provider/v1
+  #   wire: anthropic
+  #   auth: { type: static, keys: ["..."] }
+  #   models: [claude-sonnet-5]
 
   # --- BigModel (CN) GLM Coding Plan, same method as zai ---
   # - name: bigmodel
@@ -99,10 +106,10 @@ routes:
     chain: [zai]
   - match: "deepseek*"
     chain: [deepseek, openrouter]
-  - match: "claude-*"
-    chain: [opencode-go-claude, cmdcode]
+  # Claude routing needs an active anthropic-wire provider — cmdcode-claude
+  # (Pro/Max plans) and/or claude-sub. Uncomment one above, then:
   # - match: "claude-*"
-  #   chain: [claude-sub, opencode-go-claude, cmdcode]   # subscription first, then API keys
+  #   chain: [claude-sub, opencode-go-claude, cmdcode-claude]   # subscription first, then API-key fallback
 
 # keys CLI agents authenticate with (yardmaster key add NAME generates one)
 keys:

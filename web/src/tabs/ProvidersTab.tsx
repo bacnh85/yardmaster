@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult } from "../api";
 import { useApi } from "../hooks";
 import { Confirm, Empty, ErrorBanner, Modal, PageHead, toast } from "../components";
-import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily } from "../presets";
+import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPlan, CmdPlan } from "../presets";
 
 interface ProviderForm {
   name: string; wire: string; base_url: string; models: string; prefix: string;
@@ -380,6 +380,17 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   const [catalog, setCatalog] = useState<null | { loading: boolean; err: string; models: CatalogModel[] }>(null);
   const catReq = useRef(0);
   const [familyFilter, setFamilyFilter] = useState<"all" | "exposed" | "free" | "paid">("all");
+  // plan tier filter (plan-capable presets only); persists per preset, defaults
+  // to the common plan so paid-tier models never sneak into expose-alls
+  const [planFilter, setPlanFilter] = useState<"all" | CmdPlan>(() => {
+    if (!r.plans) return "all";
+    const v = localStorage.getItem(`plan-${r.id}`);
+    return v === "goat" || v === "pro" || v === "max" || v === "all" ? v : "goat";
+  });
+  const pickPlan = (v: "all" | CmdPlan) => {
+    setPlanFilter(v);
+    if (r.plans) localStorage.setItem(`plan-${r.id}`, v);
+  };
   const [filter, setFilter] = useState("");
   const [serveWildcard, setServeWildcard] = useState<null | { m: CatalogModel; sub: ProviderRow }>(null);
 
@@ -536,8 +547,11 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     if (!sub) { toast(`add a connection first — ${e.name} does not exist yet`, "err"); return; }
     // strict: unknown-family models are never swept onto a guessed wire — they
     // get an explicit per-row "serve on…" picker instead
-    const ids = catalog.models.filter((m) => familyFor(group, m) === e.family).map((m) => m.id);
-    if (ids.length === 0) { toast("no models in this family", "err"); return; }
+    const ids = catalog.models
+      .filter((m) => familyFor(group, m) === e.family)
+      .filter((m) => planFilter === "all" || cmdPlan(m.id) === planFilter)
+      .map((m) => m.id);
+    if (ids.length === 0) { toast(`no ${e.family} models${planFilter !== "all" ? ` on ${planFilter}` : ""}`, "err"); return; }
     const next = Array.from(new Set([...sub.models, ...ids]));
     try {
       await put(`providers/${encodeURIComponent(sub.name)}`, {
@@ -552,6 +566,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   };
 
   const shown = (catalog?.models ?? []).filter((m) =>
+    (planFilter === "all" || cmdPlan(m.id) === planFilter) &&
     (familyFilter === "all" || (familyFilter === "exposed" ? isVisible(m) : familyFilter === "free" ? m.free : !m.free)) &&
     (!filter || prefixedId(r.prefix, m.id).includes(filter)));
 
@@ -615,6 +630,11 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
           <div className="row">
             {catalog && !catalog.loading && !catalog.err && (
               <>
+                {r.plans && (["all", "goat", "pro", "max"] as const).map((f) => (
+                  <button key={`plan-${f}`} className={`btn sm ${planFilter === f ? "primary" : ""}`}
+                    title={`show only ${f === "all" ? "every" : f + "-plan"} models`}
+                    onClick={() => pickPlan(f)}>{f === "all" ? "all plans" : f}</button>
+                ))}
                 {(["all", "exposed", "free", "paid"] as const).map((f) => (
                   <button key={f} className={`btn sm ${familyFilter === f ? "primary" : ""}`} onClick={() => setFamilyFilter(f)}>{f}</button>
                 ))}
@@ -679,6 +699,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                             {m.reasoning && <span className="badge muted" title="extended thinking">think</span>}
                             {m.tool_call && <span className="badge muted" title="tool calling">tools</span>}
                             {m.image && <span className="badge muted" title="image input">img</span>}
+                            {r.plans && <span className="badge muted" title={cmdPlan(m.id) ? `${cmdPlan(m.id)} plan` : "new model — plan tier not yet classified"}>{cmdPlan(m.id) || "?"}</span>}
                           </td>
                           <td className="num">{m.context ? fmtTok(m.context) : "—"}</td>
                           <td className="num">{m.max_output ? fmtTok(m.max_output) : "—"}</td>

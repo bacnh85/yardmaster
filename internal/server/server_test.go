@@ -525,8 +525,8 @@ func TestCatalogEnrichment(t *testing.T) {
 
 	// "m.gpt" exercises the dot↔dash canonical join (upstream may use dots
 	// where models.dev uses dashes and vice versa)
-	enrichCatalog("https://opencode.ai/zen/v1", []string{"zzz-unknown", "m-chat", "m-claude", "m.gpt", "m-gem"})
-	enrichCatalog("https://opencode.ai/zen/go/v1", []string{"grok-4.6"})
+	enrichCatalog("https://opencode.ai/zen/v1", ids("zzz-unknown", "m-chat", "m-claude", "m.gpt", "m-gem"))
+	enrichCatalog("https://opencode.ai/zen/go/v1", ids("grok-4.6"))
 	e, ok := catalogCache.Load("https://opencode.ai/zen/v1")
 	if !ok {
 		t.Fatal("no cache entry")
@@ -590,7 +590,7 @@ func TestCatalogOpenCodeGoPricing(t *testing.T) {
 	resetModelsDevCache()
 	t.Cleanup(func() { modelsDevURL = oldURL; resetModelsDevCache() })
 
-	enrichCatalog("https://opencode.ai/zen/go/v1", []string{"qwen3.8-max", "mystery-model", "tiered"})
+	enrichCatalog("https://opencode.ai/zen/go/v1", ids("qwen3.8-max", "mystery-model", "tiered"))
 	e, ok := catalogCache.Load("https://opencode.ai/zen/go/v1")
 	if !ok {
 		t.Fatal("no cache entry")
@@ -611,7 +611,7 @@ func TestCatalogOpenCodeGoPricing(t *testing.T) {
 	}
 
 	// without /go the plain opencode entry still applies
-	enrichCatalog("https://opencode.ai/zen/v1", []string{"qwen3.8-max"})
+	enrichCatalog("https://opencode.ai/zen/v1", ids("qwen3.8-max"))
 	e2, ok := catalogCache.Load("https://opencode.ai/zen/v1")
 	if !ok {
 		t.Fatal("no v1 cache entry")
@@ -697,7 +697,7 @@ func TestCatalogFlatDeterministic(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		resetModelsDevCache() // force a fresh models.dev load each round
-		enrichCatalog("https://dup.example/v1", []string{"dup-model"})
+		enrichCatalog("https://dup.example/v1", ids("dup-model"))
 		e, _ := catalogCache.Load("https://dup.example/v1")
 		if got := e.(catalogEntry).models[0]; got.Input != 1 || got.Output != 3 {
 			t.Fatalf("round %d: nondeterministic flat winner: %+v", i, got)
@@ -710,6 +710,93 @@ func resetModelsDevCache() {
 	modelsDevData, modelsDevUntil = nil, time.Time{}
 	modelsDevFlat = nil
 	modelsDevMu.Unlock()
+}
+
+// ids builds bare-id ModelMeta slices for enrichCatalog test calls.
+func ids(ss ...string) []ModelMeta {
+	out := make([]ModelMeta, len(ss))
+	for i, s := range ss {
+		out[i] = ModelMeta{ID: s}
+	}
+	return out
+}
+
+// Upstream /models metadata (CommandCode-style): supported_endpoints drives
+// the wire family and beats an npm-family guess, name/context fill in without
+// models.dev, and vendor-namespaced ids price via the bare id under any
+// vendor (upstream context stays authoritative).
+func TestUpstreamModelsEndpoints(t *testing.T) {
+	dev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"somevendor":{"models":{
+			"claude-style":{"cost":{"input":1,"output":2},"provider":{"npm":"@ai-sdk/openai"}},
+			"glm-test":{"cost":{"input":0.15,"output":0.5},"limit":{"context":999}}
+		}}}`)
+	}))
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("unexpected upstream path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"object":"list","data":[
+			{"id":"claude-style","name":"Claude Style","context_length":1000000,"supported_endpoints":["/messages"]},
+			{"id":"gpt-style","name":"GPT Style","context_length":1050000,"supported_endpoints":["/chat/completions","/responses"]},
+			{"id":"z-ai/glm-test","name":"GLM Test","context_length":1000000,"supported_endpoints":["/chat/completions"]},
+			{"id":"resp-only","name":"Resp Only","supported_endpoints":["/responses"]},
+			{"id":"plain","name":"Plain"}
+		]}`)
+	}))
+	defer up.Close()
+	oldURL := modelsDevURL
+	modelsDevURL = dev.URL
+	resetModelsDevCache()
+	t.Cleanup(func() { modelsDevURL = oldURL; resetModelsDevCache() })
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "cmdcode", BaseURL: up.URL, Wire: "openai",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"sk-cc"}}},
+		},
+	}
+	cfg.Defaults()
+	cfg.Validate()
+	p := proxy.NewProxy(provider.New(cfg), st, cfg.CostFor)
+	p.Version = "test"
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, "", "pw", "test")
+
+	metas, err := srv.catalog(context.Background(), "cmdcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]ModelMeta{}
+	for _, mm := range metas {
+		byID[mm.ID] = mm
+	}
+	c := byID["claude-style"]
+	if c.Family != "anthropic" || c.Name != "Claude Style" || c.Context != 1000000 || c.Input != 1 {
+		t.Fatalf("claude-style: endpoint family must beat npm + dev pricing merge: %+v", c)
+	}
+	if g := byID["gpt-style"]; g.Family != "chat" || g.Context != 1050000 {
+		t.Fatalf("gpt-style: %+v", g)
+	}
+	z := byID["z-ai/glm-test"]
+	if z.Family != "chat" || z.Input != 0.15 || z.Name != "GLM Test" || z.Context != 1000000 {
+		t.Fatalf("z-ai/glm-test: namespaced bare-id pricing + upstream context: %+v", z)
+	}
+	if r := byID["resp-only"]; r.Family != "responses" {
+		t.Fatalf("resp-only: %+v", r)
+	}
+	if pl := byID["plain"]; pl.Family != "" || pl.Name != "Plain" {
+		t.Fatalf("plain (no endpoints): %+v", pl)
+	}
 }
 
 // enrichCatalog runs concurrently (admin handler + WarmCatalogs) and must not
@@ -732,7 +819,7 @@ func TestCatalogConcurrent(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 25; j++ {
 				resetModelsDevCache() // force the fetch+assign path mid-flight
-				enrichCatalog("https://opencode.ai/zen/v1", []string{"m-chat", "zzz"})
+				enrichCatalog("https://opencode.ai/zen/v1", ids("m-chat", "zzz"))
 			}
 		}()
 	}
