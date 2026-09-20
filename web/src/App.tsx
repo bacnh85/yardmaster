@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { get, login } from "./api";
 import { Toaster } from "./components";
-import { TABS, tabFromHash, type Tab } from "./route";
+import { TABS, tabFromHash, providerDetailFromHash, type Tab } from "./route";
 import {
   IconActivity, IconChart, IconGauge, IconList, IconKey, IconServer, IconSettings,
   IconSun, IconMoon,
@@ -38,6 +38,7 @@ const tabFromLocation = (): Tab => tabFromHash(location.hash);
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [tab, setTab] = useState<Tab>(tabFromLocation);
+  const [providerDetail, setProviderDetail] = useState<string>(() => providerDetailFromHash(location.hash));
   const [theme, setTheme] = useState<string>(() => document.documentElement.dataset.theme || "light");
   const [version, setVersion] = useState("");
 
@@ -56,13 +57,25 @@ export default function App() {
 
   // two-way tab <-> URL hash
   useEffect(() => {
-    const onHash = () => setTab(tabFromLocation());
+    const onHash = () => {
+      setTab(tabFromLocation());
+      setProviderDetail(providerDetailFromHash(location.hash));
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const selectTab = (t: Tab) => {
     setTab(t);
+    setProviderDetail("");
     history.pushState(null, "", `#/${t}`);
+  };
+  const openProviderDetail = (id: string) => {
+    setProviderDetail(id);
+    history.pushState(null, "", `#/providers/${encodeURIComponent(id)}`);
+  };
+  const closeProviderDetail = () => {
+    setProviderDetail("");
+    history.pushState(null, "", "#/providers");
   };
 
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
@@ -83,7 +96,7 @@ export default function App() {
   return (
     <div className="shell">
       <nav className="side" aria-label="main navigation">
-        <div className="brand">yardmaster</div>
+        <div className="brand">Yardmaster</div>
         {NAV.map((g) => (
           <div key={g.group} className="nav-group-wrap">
             <div className="nav-group">{g.group}</div>
@@ -109,7 +122,9 @@ export default function App() {
         {tab === "latency" && <LatencyTab />}
         {tab === "requests" && <RequestsTab />}
         {tab === "endpoints" && <EndpointsTab />}
-        {tab === "providers" && <ProvidersTab />}
+        {tab === "providers" && (
+          <ProvidersTab detail={providerDetail} onOpenDetail={openProviderDetail} onCloseDetail={closeProviderDetail} />
+        )}
         {tab === "settings" && <SettingsTab />}
       </main>
       <Toaster />
@@ -127,7 +142,7 @@ function Login({ onOk }: { onOk: () => void }) {
       setBusy(true);
       login(pw).then(onOk).catch(() => { setErr("wrong password"); setBusy(false); });
     }}>
-      <h3>yardmaster</h3>
+      <h3>Yardmaster</h3>
       <input type="password" placeholder="admin password" value={pw} autoFocus
         onChange={(e) => setPw(e.target.value)} />
       {err && <div className="error">{err}</div>}

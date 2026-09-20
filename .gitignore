@@ -9,8 +9,10 @@ web/node_modules/
 web/dist/*
 !web/dist/index.html
 /yardmaster
+/bin/
 .agents/plans/
 .zcode/
 .pi/
 .private/
 docs/
+*.log

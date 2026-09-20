@@ -33,12 +33,29 @@ providers:
     auth: { type: static, keys: ["sk-or-..."] }
     models: [deepseek/deepseek-chat, deepseek/deepseek-r1]
 
-  # --- OpenCode Zen (per-family wires: GPT/Grok -> responses, Claude -> anthropic) ---
-  - name: zen-claude
+  # --- OpenCode Go / OpenCode Zen (https://opencode.ai/zen) ---
+  # One base URL, three wire families — add the entries you need (dashboard
+  # presets do this in one click; `session: opencode` sends the required
+  # x-opencode-session/client headers). Free models: big-pickle,
+  # nemotron-3-ultra-free, mimo-v2.5-free, ling-3.0-flash-fin-free.
+  - name: opencode-go            # DeepSeek/GLM/Kimi/MiniMax + free models
+    base_url: https://opencode.ai/zen/v1
+    wire: openai
+    session: opencode
+    auth: { type: static, keys: ["..."] }
+    models: [big-pickle, deepseek-v4-flash, glm-5.3, kimi-k3, minimax-m3]
+  - name: opencode-go-claude     # Claude + Qwen family
     base_url: https://opencode.ai/zen/v1
     wire: anthropic
+    session: opencode
     auth: { type: static, keys: ["..."] }
-    models: [claude-sonnet-5, claude-haiku-4.5]
+    models: [claude-sonnet-5, claude-haiku-4-5, qwen3.7-plus]
+  # - name: opencode-go-gpt       # GPT + Grok family (responses wire)
+  #   base_url: https://opencode.ai/zen/v1
+  #   wire: responses
+  #   session: opencode
+  #   auth: { type: static, keys: ["..."] }
+  #   models: [gpt-5.5, grok-4.5]
 
   # --- Command Code Provider API (both wires) ---
   - name: cmdcode
@@ -83,9 +100,9 @@ routes:
   - match: "deepseek*"
     chain: [deepseek, openrouter]
   - match: "claude-*"
-    chain: [zen-claude, cmdcode]
+    chain: [opencode-go-claude, cmdcode]
   # - match: "claude-*"
-  #   chain: [claude-sub, zen-claude, cmdcode]   # subscription first, then API keys
+  #   chain: [claude-sub, opencode-go-claude, cmdcode]   # subscription first, then API keys
 
 # keys CLI agents authenticate with (yardmaster key add NAME generates one)
 keys:

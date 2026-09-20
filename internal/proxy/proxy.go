@@ -137,6 +137,11 @@ func (p *Proxy) ServeMessages(w http.ResponseWriter, r *http.Request) {
 	p.serve(w, r, WireAnthropic)
 }
 
+// ServeResponses handles POST /v1/responses (OpenAI Responses wire in).
+func (p *Proxy) ServeResponses(w http.ResponseWriter, r *http.Request) {
+	p.serve(w, r, WireResponses)
+}
+
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string) {
 	start := time.Now()
 	p.total.Add(1)
@@ -152,6 +157,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 	strictJSON := true
 	if err := json.Unmarshal(body, &req); err != nil {
 		strictJSON = false
+	}
+	if clientWire == WireResponses && strictJSON && req != nil {
+		// normalize the Responses request to the chat hub; the raw body bytes
+		// stay original so a Responses-wire upstream gets a byte-exact request
+		req = translate.ResponsesReqToChat(req)
 	}
 	model := ""
 	stream := false
@@ -337,25 +347,41 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	}
 
 	switch {
-	case pv.Wire == clientWire:
-		// same wire: patch model id (+ body overrides) via JSON re-encode when needed
+	case pv.Wire == clientWire || (clientWire == WireResponses && pv.Wire == WireOpenAI):
+		// same wire (incl. responses↔responses), or a responses client (req
+		// pre-normalized to the chat hub) hitting an openai upstream: patch model
+		// id (+ body overrides) via JSON re-encode when needed
 		if strictJSON {
-			req["model"] = upModel
-			for k, v := range pv.BodyOverrides {
-				if _, exists := req[k]; !exists {
-					req[k] = v
+			if pv.Wire == WireResponses {
+				// responses client: req was normalized to the chat hub — re-patch
+				// the ORIGINAL responses body instead so upstream gets native wire
+				var orig map[string]any
+				json.Unmarshal(rawBody, &orig)
+				orig["model"] = upModel
+				for k, v := range pv.BodyOverrides {
+					if _, exists := orig[k]; !exists {
+						orig[k] = v
+					}
 				}
+				bodyOut, _ = json.Marshal(orig)
+			} else {
+				req["model"] = upModel
+				for k, v := range pv.BodyOverrides {
+					if _, exists := req[k]; !exists {
+						req[k] = v
+					}
+				}
+				bodyOut, _ = json.Marshal(req)
 			}
-			bodyOut, _ = json.Marshal(req)
 		} else {
 			bodyOut = rawBody // ponytail: unparseable body passes untouched; model patch skipped
 		}
 		if pv.Wire == WireOpenAI {
 			url += "/chat/completions"
+		} else if pv.Wire == WireResponses {
+			url += "/responses"
 		} else {
-			url += "/v1/messages"
-			// anthropic base URLs may already end in /v1 or /api/anthropic etc:
-			// convention: base_url includes everything up to (not including) the endpoint path.
+			url = anthropicEndpoint(url)
 		}
 	case pv.Wire == WireResponses:
 		// any client wire -> Responses upstream (Codex backend). Chat wire is
@@ -390,7 +416,7 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 			}
 		}
 		bodyOut, _ = json.Marshal(a)
-		url += "/v1/messages"
+		url = anthropicEndpoint(url)
 	default: // anthropic client -> openai upstream
 		if !strictJSON {
 			return nil, errors.New("unparseable anthropic body for translation")
@@ -415,7 +441,7 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	if tgt.AuthType == "oauth" {
 		p.setOAuthAuth(httpReq, tgt, findAcct(pv, tgt.AcctName))
 	} else {
-		setAuth(httpReq, pv.Wire, tgt.APIKey)
+		SetAuth(httpReq, pv.Wire, tgt.APIKey)
 	}
 	for k, v := range pv.ExtraHeaders {
 		httpReq.Header.Set(k, v)
@@ -431,6 +457,12 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	// helpful attribution headers
 	httpReq.Header.Set("User-Agent", "github.com/bacnh85/yardmaster/"+p.Version)
 	return httpReq, nil
+}
+
+// anthropicEndpoint appends /v1/messages, tolerating base URLs that already
+// end in /v1 (e.g. https://opencode.ai/zen/v1 → …/zen/v1/messages).
+func anthropicEndpoint(base string) string {
+	return strings.TrimSuffix(base, "/v1") + "/v1/messages"
 }
 
 // opencodeSession returns a stable uuid per provider+key so upstream routing
@@ -488,7 +520,7 @@ func (p *Proxy) setOAuthAuth(h *http.Request, tgt *provider.Target, acct *config
 		h.Header.Set("originator", "codex_cli_rs")
 		h.Header.Set("User-Agent", "codex_cli_rs/0.1.0")
 	default:
-		setAuth(h, pv.Wire, token)
+		SetAuth(h, pv.Wire, token)
 	}
 }
 
@@ -507,7 +539,9 @@ func (p *Proxy) opencodeSession(k string) string {
 	return actual.(string)
 }
 
-func setAuth(h *http.Request, wire, key string) {
+// SetAuth applies the wire-appropriate static-key auth headers (x-api-key +
+// anthropic-version for the anthropic wire, Bearer otherwise).
+func SetAuth(h *http.Request, wire, key string) {
 	if key == "" {
 		return
 	}
@@ -603,7 +637,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, clientWire strin
 		touch()
 		tee.Write(b)
 		w.Write(b)
-		return tee.Usage(), sinceT(r, firstTouch)
+		// full-body usage: the line-based tee can't parse a JSON body without
+		// "data:" lines — use the exact-body parser (falls back to estimate)
+		return ParseUsageJSON(clientWire, b), sinceT(r, firstTouch)
 	}
 
 	// wire translation path
@@ -715,7 +751,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 		touch()
 		var b []byte
 		var err error
-		if clientWire == WireAnthropic {
+		if named := clientWire != WireOpenAI; named {
 			name := event
 			if name == "" {
 				name, _ = data["type"].(string)
@@ -740,6 +776,100 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 			flusher.Flush()
 		}
 		return err
+	}
+
+	if clientWire == WireResponses {
+		// any non-responses upstream (chat-hub format) → client responses SSE
+		tr := translate.NewChat2RespStream(req["model"].(string))
+		feedChat := func(chunk map[string]any) bool {
+			if u := asUsageMap(chunk["usage"]); u != nil {
+				usage.In = num(u["prompt_tokens"])
+				usage.Out = num(u["completion_tokens"])
+				usage.CacheR = num(u["cache_read_tokens"])
+				usage.CacheW = num(u["cache_write_tokens"])
+			}
+			for _, e := range tr.Chunk(chunk) {
+				if writeEvent(e.Name, e.Data) != nil {
+					return false
+				}
+			}
+			return true
+		}
+		if tgt.Provider.Wire == WireAnthropic {
+			// anthropic upstream → chat chunks (Anth2OAI) → responses events
+			a2o := translate.NewAnth2OAIStream(req["model"].(string))
+			eventName := ""
+			done := false
+			for sc.Scan() {
+				line := strings.TrimSpace(sc.Text()) // trim \r
+				if line == "" {
+					eventName = ""
+					continue
+				}
+				if strings.HasPrefix(line, "event:") {
+					eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+					continue
+				}
+				if !strings.HasPrefix(line, "data:") {
+					continue
+				}
+				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				var ev map[string]any
+				if json.Unmarshal([]byte(data), &ev) != nil {
+					continue
+				}
+				p.captureAnthropicUsage(&usage, eventName, ev)
+				stop := eventName == "message_stop"
+				for _, chunk := range a2o.Event(eventName, ev) {
+					if !feedChat(chunk) {
+						return usage, sinceT(r, *firstTouch)
+					}
+				}
+				if stop {
+					done = true
+					break
+				}
+			}
+			// upstream ended without message_stop: synthesize the tail
+			if a2o.SawStart() && !done {
+				for _, chunk := range a2o.Event("message_delta", map[string]any{
+					"delta": map[string]any{"stop_reason": "end_turn"},
+					"usage": map[string]any{"output_tokens": usage.Out},
+				}) {
+					if !feedChat(chunk) {
+						break
+					}
+				}
+				feedChat(a2o.UsageChunk())
+			}
+		} else {
+			// upstream openai chat SSE (or responses-normalized) → responses
+			for sc.Scan() {
+				line := sc.Bytes()
+				if !bytes.HasPrefix(line, []byte("data:")) {
+					continue
+				}
+				data := strings.TrimSpace(string(line[5:]))
+				if data == "[DONE]" {
+					break
+				}
+				var chunk map[string]any
+				if json.Unmarshal([]byte(data), &chunk) != nil {
+					continue
+				}
+				if !feedChat(chunk) {
+					return usage, sinceT(r, *firstTouch)
+				}
+			}
+		}
+		for _, e := range tr.Finish() {
+			writeEvent(e.Name, e.Data)
+		}
+		usage.Estimate = usage.In == 0 && usage.Out == 0
+		if usage.Estimate {
+			usage.In = usage.estBytes / 4
+		}
+		return usage, 0
 	}
 
 	if clientWire == WireAnthropic {
@@ -893,10 +1023,19 @@ func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, r *http.Request, cli
 		body, _ = json.Marshal(m)
 		upWire = WireOpenAI
 	}
+	if upWire == WireAnthropic {
+		// non-stream anthropic body must be normalized too, else it leaks raw
+		// to openai/responses clients
+		m = translate.AnthropicRespToOpenAI(m)
+		body, _ = json.Marshal(m)
+		upWire = WireOpenAI
+	}
 	usage := ParseUsageJSON(upWire, body)
 	var out map[string]any
 	if clientWire == WireAnthropic {
 		out = translate.OpenAIRespToAnthropic(m)
+	} else if clientWire == WireResponses {
+		out = translate.ChatRespToResponses(m)
 	} else {
 		out = m
 	}

@@ -48,6 +48,7 @@ func New(p *proxy.Proxy, keys *auth.KeyStore, st *store.Store, cfgPath, adminPas
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.wrap(s.Proxy.ServeChat))
+	mux.HandleFunc("POST /v1/responses", s.wrap(s.Proxy.ServeResponses))
 	mux.HandleFunc("POST /v1/messages", s.wrap(s.Proxy.ServeMessages))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.wrap(s.wrapCountTokens))
 	mux.HandleFunc("GET /v1/models", s.wrap(s.handleModels))
@@ -114,21 +115,70 @@ func (s *Server) wrapCountTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	// Field names follow what the pi-router extension's mapModel() reads:
+	// context_length / max_output_tokens / capabilities.vision.
+	type caps struct {
+		Vision bool `json:"vision,omitempty"`
+	}
 	type model struct {
-		ID     string `json:"id"`
-		Object string `json:"object"`
-		Owned  string `json:"owned_by"`
+		ID            string `json:"id"`
+		Object        string `json:"object"`
+		Owned         string `json:"owned_by"`
+		ContextLength int    `json:"context_length,omitempty"`
+		MaxOutTokens  int    `json:"max_output_tokens,omitempty"`
+		Capabilities  *caps  `json:"capabilities,omitempty"`
 	}
 	data := make([]model, 0) // never nil — empty registry must marshal as [], not null
 	seen := map[string]bool{}
+	metas := cachedCatalogMetas(s.Proxy.Reg.Config().Providers)
 	for _, m := range s.Proxy.Reg.Models() {
-		if !seen[m] {
-			seen[m] = true
-			data = append(data, model{ID: m, Object: "model", Owned: "yardmaster"})
+		if seen[m] {
+			continue
 		}
+		seen[m] = true
+		entry := model{ID: m, Object: "model", Owned: "yardmaster"}
+		if mm, ok := lookupMeta(metas, m); ok && (mm.Context > 0 || mm.Image) {
+			entry.ContextLength = mm.Context
+			entry.MaxOutTokens = mm.MaxOutput
+			entry.Capabilities = &caps{Vision: mm.Image}
+		}
+		data = append(data, entry)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+}
+
+// lookupMeta finds catalog metadata for an advertised id, trying the id
+// verbatim then with a known provider prefix stripped.
+func lookupMeta(metas map[string]ModelMeta, id string) (ModelMeta, bool) {
+	if mm, ok := metas[canonModelID(id)]; ok {
+		return mm, true
+	}
+	if i := strings.IndexByte(id, '/'); i > 0 {
+		if mm, ok := metas[canonModelID(id[i+1:])]; ok {
+			return mm, true
+		}
+	}
+	return ModelMeta{}, false
+}
+
+// cachedCatalogMetas merges the providers' in-cache catalogs into one
+// canon-id → meta map. Cache-hit only — never triggers an upstream fetch.
+func cachedCatalogMetas(providers []*config.Provider) map[string]ModelMeta {
+	out := map[string]ModelMeta{}
+	for _, p := range providers {
+		e, ok := catalogCache.Load(p.BaseURL)
+		if !ok {
+			continue
+		}
+		for _, mm := range e.(catalogEntry).models {
+			k := canonModelID(mm.ID)
+			if _, dup := out[k]; !dup {
+				out[k] = mm
+			}
+		}
+	}
+	return out
 }
 
 // ---- admin ----
@@ -251,12 +301,21 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case path == "providers" && r.Method == "GET":
 		out := make([]map[string]any, 0, len(s.Proxy.Reg.Config().Providers))
 		for _, p := range s.Proxy.Reg.Config().Providers {
+			conns := make([]map[string]any, 0, len(p.Auth.Keys))
+			for i, k := range p.Auth.Keys {
+				conns = append(conns, map[string]any{"label": p.Auth.KeyLabel(i), "suffix": suffix(k)})
+			}
 			out = append(out, map[string]any{
 				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
 				"models": nonNil(p.Models), "dispatch_interval_ms": p.DispatchIntervalMS,
+				"prefix":            p.Prefix,
+				"preset":            p.Preset,
+				"disabled":          p.Disabled,
+				"session":           p.Session,
 				"auth_type":         p.Auth.Type,
 				"adaptive_thinking": p.AdaptiveThinking, "inject_cache_control": p.InjectCacheControl,
-				"accounts": oauthAccountStates(p, s.Proxy.Pool),
+				"connections": conns,
+				"accounts":    oauthAccountStates(p, s.Proxy.Pool),
 			})
 		}
 		writeJSON(map[string]any{"providers": out})
@@ -304,6 +363,96 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(map[string]any{"ok": true})
+	case path == "playground" && r.Method == "POST":
+		var req struct {
+			Provider  string `json:"provider"`
+			Model     string `json:"model"`
+			Prompt    string `json:"prompt"`
+			MaxTokens int    `json:"max_tokens"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil ||
+			req.Provider == "" || req.Model == "" || req.Prompt == "" {
+			http.Error(w, "provider, model and prompt are required", 400)
+			return
+		}
+		res, err := s.Proxy.Probe(r.Context(), req.Provider, req.Model, req.Prompt, req.MaxTokens)
+		if err != nil {
+			http.Error(w, err.Error(), 502)
+			return
+		}
+		writeJSON(res)
+	case strings.HasPrefix(path, "providers/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
+		name := strings.TrimSuffix(strings.TrimPrefix(path, "providers/"), "/models")
+		models, err := s.catalog(r.Context(), name)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		writeJSON(map[string]any{"models": models})
+	case strings.HasPrefix(path, "providers/") && strings.HasSuffix(path, "/keys") && r.Method == "POST":
+		name := strings.TrimSuffix(strings.TrimPrefix(path, "providers/"), "/keys")
+		var req struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil || req.Key == "" {
+			http.Error(w, "key required", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			for _, x := range c.Providers {
+				if x.Name == name {
+					for _, k := range x.Auth.Keys {
+						if k == req.Key {
+							return fmt.Errorf("key already present")
+						}
+					}
+					x.Auth.Keys = append(x.Auth.Keys, req.Key)
+					// keep KeyLabels index-aligned with Keys even when earlier
+					// keys were unlabeled: pad, then append this label
+					for len(x.Auth.KeyLabels) < len(x.Auth.Keys)-1 {
+						x.Auth.KeyLabels = append(x.Auth.KeyLabels, "")
+					}
+					x.Auth.KeyLabels = append(x.Auth.KeyLabels, req.Label)
+					return nil
+				}
+			}
+			return fmt.Errorf("no provider named %q", name)
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
+	case strings.HasPrefix(path, "providers/") && strings.Contains(path, "/keys/") && r.Method == "DELETE":
+		rest := strings.TrimPrefix(path, "providers/")
+		slash := strings.Index(rest, "/keys/")
+		name, idxStr := rest[:slash], rest[slash+len("/keys/"):]
+		// index-addressed (not suffix): two keys may share a 6-char tail and
+		// each ✕ must remove the distinct key the user clicked. Order comes
+		// from the same GET the UI rendered — admin-only, races acceptable.
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil || idx < 0 {
+			http.Error(w, "key index must be an integer", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			for _, x := range c.Providers {
+				if x.Name == name {
+					if idx >= len(x.Auth.Keys) {
+						return fmt.Errorf("key index %d out of range (%d keys on %q)", idx, len(x.Auth.Keys), name)
+					}
+					x.Auth.Keys = append(x.Auth.Keys[:idx], x.Auth.Keys[idx+1:]...)
+					// keep labels index-aligned with the keys they describe
+					if idx < len(x.Auth.KeyLabels) {
+						x.Auth.KeyLabels = append(x.Auth.KeyLabels[:idx], x.Auth.KeyLabels[idx+1:]...)
+					}
+					return nil
+				}
+			}
+			return fmt.Errorf("no provider named %q", name)
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
 	case path == "providers" && r.Method == "POST":
 		var f providerForm
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&f); err != nil {
@@ -341,15 +490,31 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		p.Name = name
 		if !s.mutate(w, func(c *config.Config) error {
-				for i, x := range c.Providers {
-					if x.Name == name {
-						// the form covers a subset; preserve advanced fields it can't express
-						if f.Keys == nil {
-							p.Auth.Keys = x.Auth.Keys
-						}
-						p.Auth.Type = x.Auth.Type // form is static-only; never downgrade oauth
-						p.Auth.OAuth = x.Auth.OAuth
-					p.Session = x.Session
+			for i, x := range c.Providers {
+				if x.Name == name {
+					// the form covers a subset; preserve advanced fields it can't express
+					if f.Keys == nil {
+						p.Auth.Keys = x.Auth.Keys
+					}
+					if f.KeyLabels == nil {
+						p.Auth.KeyLabels = x.Auth.KeyLabels // survive key edits unless explicitly sent
+					}
+					if f.Prefix == nil {
+						p.Prefix = x.Prefix // omitted field keeps the stored prefix
+					}
+					if f.Session == nil {
+						p.Session = x.Session // omitted field keeps the stored session headers
+					}
+					if f.Preset == "" {
+						p.Preset = x.Preset
+					}
+					if f.Disabled == nil {
+						p.Disabled = x.Disabled // omitted field keeps the stored state
+					} else {
+						p.Disabled = *f.Disabled // registry toggle sends it explicitly
+					}
+					p.Auth.Type = x.Auth.Type // form is static-only; never downgrade oauth
+					p.Auth.OAuth = x.Auth.OAuth
 					p.ModelMap = x.ModelMap
 					p.ExtraHeaders = x.ExtraHeaders
 					p.BodyOverrides = x.BodyOverrides
@@ -472,6 +637,11 @@ type providerForm struct {
 	BaseURL            string   `json:"base_url"`
 	Models             []string `json:"models"`
 	Keys               []string `json:"keys"`
+	KeyLabels          []string `json:"keyLabels"`
+	Prefix             *string  `json:"prefix"`  // nil = omitted (keep stored); "" = none; else routing prefix
+	Session            *string  `json:"session"` // nil = omitted (keep stored); "" = none; "opencode" = session headers
+	Preset             string   `json:"preset"`
+	Disabled           *bool    `json:"disabled"` // nil = omitted (keep stored)
 	DispatchIntervalMS int      `json:"dispatch_interval_ms"`
 	AdaptiveThinking   bool     `json:"adaptive_thinking"`
 	InjectCacheControl bool     `json:"inject_cache_control"`
@@ -485,12 +655,34 @@ func (f providerForm) provider() (*config.Provider, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("base_url must be an http(s) URL")
 	}
+	prefix := ""
+	if f.Prefix != nil {
+		prefix = strings.ToLower(strings.TrimSpace(*f.Prefix))
+		if prefix != "" && !config.ValidPrefix(prefix) {
+			return nil, fmt.Errorf("prefix must be 1-12 lowercase letters, digits or hyphens")
+		}
+	}
+	session := ""
+	if f.Session != nil {
+		session = *f.Session
+		if session != "" && session != "opencode" {
+			return nil, fmt.Errorf("session must be empty or opencode")
+		}
+	}
+	disabled := false
+	if f.Disabled != nil {
+		disabled = *f.Disabled
+	}
 	return &config.Provider{
 		Name:               f.Name,
+		Prefix:             prefix,
 		Wire:               f.Wire,
 		BaseURL:            f.BaseURL,
-		Auth:               config.AuthConf{Type: "static", Keys: f.Keys},
+		Auth:               config.AuthConf{Type: "static", Keys: f.Keys, KeyLabels: f.KeyLabels},
 		Models:             f.Models,
+		Session:            session,
+		Preset:             f.Preset,
+		Disabled:           disabled,
 		DispatchIntervalMS: f.DispatchIntervalMS,
 		AdaptiveThinking:   f.AdaptiveThinking,
 		InjectCacheControl: f.InjectCacheControl,

@@ -100,7 +100,7 @@ func StopOAIToAnth(s string) string {
 // Anthropic messages request body.
 func OpenAIReqToAnthropic(req map[string]any, opts Options) map[string]any {
 	out := map[string]any{
-		"model": req["model"],
+		"model":  req["model"],
 		"stream": req["stream"] == true,
 	}
 	if mt := asInt(req["max_tokens"]); mt > 0 {
@@ -337,8 +337,8 @@ func openAIToolsToAnthropic(tools []any) []any {
 			schema = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
 		out = append(out, map[string]any{
-			"name": asString(fn["name"]),
-			"description": asString(fn["description"]),
+			"name":         asString(fn["name"]),
+			"description":  asString(fn["description"]),
 			"input_schema": schema,
 		})
 	}
@@ -666,10 +666,10 @@ func OpenAIRespToAnthropic(om map[string]any) map[string]any {
 	usage := map[string]any{"input_tokens": input, "output_tokens": asInt(u["completion_tokens"])}
 	return map[string]any{
 		"id": om["id"], "type": "message", "role": "assistant", "model": om["model"],
-		"content":      content,
-		"stop_reason":  StopOAIToAnth(finish),
+		"content":       content,
+		"stop_reason":   StopOAIToAnth(finish),
 		"stop_sequence": nil,
-		"usage":        usage,
+		"usage":         usage,
 	}
 }
 

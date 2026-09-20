@@ -101,6 +101,17 @@ button:disabled { opacity: 0.4; cursor: default; }
   .livedot.on { animation: none; }
 }
 
+/* provider registry cards */
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.provider-card { display: block; width: 100%; text-align: left; cursor: pointer; font: inherit; }
+.provider-card:hover { outline: 2px solid var(--accent); outline-offset: 1px; }
+.provider-desc { font-size: 13px; margin-top: 4px; }
+.monogram {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; border-radius: var(--radius-sm);
+  background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: 13px;
+}
+
 main { max-width: 1100px; padding: 24px 32px; overflow-x: clip; }
 main > * + * { margin-top: 12px; }
 .grid > * { min-width: 0; }  /* prevent grid blowout from wide children */
@@ -231,6 +242,8 @@ th.sortable:focus-visible, tr.clickable:focus-visible {
   overflow-x: auto;
 }
 .provider-title { margin: 0; display: flex; align-items: center; gap: 4px; }
+.provider-head { row-gap: 8px; }
+@media (max-width: 560px) { .provider-head { flex-wrap: wrap; } }
 .provider-meta { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; }
 
 /* login */

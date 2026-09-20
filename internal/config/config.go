@@ -23,9 +23,12 @@ type Config struct {
 
 type Provider struct {
 	Name               string            `yaml:"name"`
+	Prefix             string            `yaml:"prefix"` // short routing prefix; models exposed as "prefix/model"
 	BaseURL            string            `yaml:"base_url"`
 	Wire               string            `yaml:"wire"`    // "openai" | "anthropic"
 	Session            string            `yaml:"session"` // "opencode" adds x-opencode-session/client headers
+	Preset             string            `yaml:"preset"`  // registry id this provider was created from (e.g. "opencode-go"); "" = custom
+	Disabled           bool              `yaml:"disabled"`
 	Auth               AuthConf          `yaml:"auth"`
 	Models             []string          `yaml:"models"`               // upstream models this provider serves; empty = any
 	ModelMap           map[string]string `yaml:"model_map"`            // requested model -> upstream model id
@@ -38,9 +41,18 @@ type Provider struct {
 }
 
 type AuthConf struct {
-	Type  string       `yaml:"type"` // static | oauth
-	Keys  []string     `yaml:"keys"`
-	OAuth []*OAuthAcct `yaml:"oauth_accounts"`
+	Type      string       `yaml:"type"` // static | oauth
+	Keys      []string     `yaml:"keys"`
+	KeyLabels []string     `yaml:"key_labels"` // optional, index-aligned with Keys
+	OAuth     []*OAuthAcct `yaml:"oauth_accounts"`
+}
+
+// KeyLabel returns the display label for key i (default "Key N").
+func (a *AuthConf) KeyLabel(i int) string {
+	if i < len(a.KeyLabels) && a.KeyLabels[i] != "" {
+		return a.KeyLabels[i]
+	}
+	return fmt.Sprintf("Key %d", i+1)
 }
 
 type OAuthAcct struct {
@@ -80,6 +92,19 @@ func AuthKindDefaults(kind string) (endpoint, clientID string, ok bool) {
 			"app_EMoamEEZ73f0CkXaXp7hrann", true
 	}
 	return "", "", false
+}
+
+// ValidPrefix reports whether s is an acceptable routing prefix.
+func ValidPrefix(s string) bool {
+	if len(s) == 0 || len(s) > 12 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // Cost is USD per 1M tokens.
@@ -147,6 +172,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("duplicate provider %q", p.Name)
 		}
 		names[p.Name] = true
+		// prefixes may be shared across providers (one preset = several wire
+		// entries over one gateway, e.g. Zen) — only the format is validated
+		if p.Prefix != "" && !ValidPrefix(p.Prefix) {
+			return fmt.Errorf("provider %s: prefix must be 1-12 lowercase letters, digits or hyphens", p.Name)
+		}
 		if p.BaseURL == "" {
 			return fmt.Errorf("provider %s: missing base_url", p.Name)
 		}

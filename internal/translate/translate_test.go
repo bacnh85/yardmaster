@@ -53,7 +53,7 @@ func TestOpenAIReqToAnthropic(t *testing.T) {
 	msgs := out["messages"].([]any)
 	if len(msgs) != 3 {
 		t.Fatalf("want 3 messages (user, assistant+tool_use, user+tool_result), got %d", len(msgs))
-	}	// assistant message has tool_use
+	} // assistant message has tool_use
 	asst := msgs[1].(map[string]any)
 	blocks := asst["content"].([]any)
 	if len(blocks) != 1 {

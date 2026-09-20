@@ -14,9 +14,9 @@ type Event struct {
 type OAI2AnthStream struct {
 	model     string
 	started   bool
-	openBlock int  // index of currently open block, -1 = none
-	blockIdx  int  // next block index (monotonic)
-	blockKind byte // 't' text, 'k' thinking, 'u' tool
+	openBlock int          // index of currently open block, -1 = none
+	blockIdx  int          // next block index (monotonic)
+	blockKind byte         // 't' text, 'k' thinking, 'u' tool
 	toolOpen  map[int]bool // openai tool index -> open
 	usageIn   int
 	usageOut  int
@@ -296,7 +296,7 @@ func (t *Anth2OAIStream) UsageChunk() map[string]any {
 		"choices": []any{},
 		"usage": map[string]any{
 			"prompt_tokens": prompt, "completion_tokens": t.usageOut,
-			"total_tokens":    prompt + t.usageOut,
+			"total_tokens":      prompt + t.usageOut,
 			"cache_read_tokens": t.cacheR, "cache_write_tokens": t.cacheW,
 		},
 	}

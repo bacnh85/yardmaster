@@ -1,7 +1,9 @@
 package translate
 
 import (
+	"fmt"
 	"strings"
+	"time"
 )
 
 // The Responses wire (OpenAI /v1/responses, spoken by the Codex backend at
@@ -173,6 +175,371 @@ func responsesUsageToChat(u map[string]any) map[string]any {
 		m["cache_read_tokens"] = asInt(d["cached_tokens"])
 	}
 	return m
+}
+
+// ---- request: responses -> chat ----
+
+// ResponsesReqToChat converts a Responses-API request body to an OpenAI
+// chat-completions request. Whitelist mapping: unknown fields (store,
+// previous_response_id, include, metadata) are dropped — the router is
+// stateless. ponytail: reasoning input items are dropped (no chat carrier);
+// responses-native clients keep byte-exact passthrough instead.
+func ResponsesReqToChat(req map[string]any) map[string]any {
+	out := map[string]any{"model": req["model"]}
+	for _, k := range []string{"temperature", "top_p", "stream", "parallel_tool_calls", "stop", "user"} {
+		if v, ok := req[k]; ok {
+			out[k] = v
+		}
+	}
+	if mt := asFloat(req["max_output_tokens"]); mt > 0 {
+		out["max_tokens"] = asInt(mt)
+	}
+	if r := asMap(req["reasoning"]); r != nil {
+		if e := asString(r["effort"]); e != "" {
+			out["reasoning_effort"] = e
+		}
+	}
+	msgs := make([]any, 0, 16)
+	if instr := asString(req["instructions"]); instr != "" {
+		msgs = append(msgs, map[string]any{"role": "system", "content": instr})
+	}
+	switch in := req["input"].(type) {
+	case string:
+		if in != "" {
+			msgs = append(msgs, map[string]any{"role": "user", "content": in})
+		}
+	default:
+		for _, item := range asSlice(req["input"]) {
+			im := asMap(item)
+			itype := asString(im["type"])
+			if itype == "" && asString(im["role"]) != "" {
+				itype = "message" // type is optional on input message items
+			}
+			switch itype {
+			case "message":
+				role := asString(im["role"])
+				if role == "developer" {
+					role = "system"
+				}
+				msgs = append(msgs, map[string]any{"role": role, "content": responsesContentToChat(im["content"])})
+			case "function_call":
+				msgs = append(msgs, map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
+					"id": asString(im["call_id"]), "type": "function",
+					"function": map[string]any{"name": asString(im["name"]), "arguments": asString(im["arguments"])},
+				}}})
+			case "function_call_output":
+				msgs = append(msgs, map[string]any{"role": "tool",
+					"tool_call_id": asString(im["call_id"]), "content": asString(im["output"])})
+			}
+		}
+	}
+	out["messages"] = msgs
+	if tools := toolsFromResponses(req["tools"]); len(tools) > 0 {
+		out["tools"] = tools
+	}
+	if tc := toolChoiceFromResponses(req["tool_choice"]); tc != nil {
+		out["tool_choice"] = tc
+	}
+	return out
+}
+
+// responsesContentToChat maps responses content (string | part array) to chat
+// content: text parts joined, input_image kept as chat image_url blocks.
+func responsesContentToChat(v any) any {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	var texts []string
+	var blocks []any
+	for _, part := range asSlice(v) {
+		pm := asMap(part)
+		switch asString(pm["type"]) {
+		case "input_text", "output_text", "text", "refusal":
+			if t := asString(pm["text"]); t != "" {
+				texts = append(texts, t)
+			}
+		case "input_image":
+			if url := asString(pm["image_url"]); url != "" {
+				blocks = append(blocks, map[string]any{"type": "image_url",
+					"image_url": map[string]any{"url": url}})
+			}
+		}
+	}
+	txt := strings.Join(texts, "")
+	if len(blocks) == 0 {
+		return txt
+	}
+	if txt != "" {
+		blocks = append([]any{map[string]any{"type": "text", "text": txt}}, blocks...)
+	}
+	return blocks
+}
+
+func toolsFromResponses(v any) []any {
+	var out []any
+	for _, t := range asSlice(v) {
+		tm := asMap(t)
+		fn := map[string]any{"name": asString(tm["name"])}
+		if d := asString(tm["description"]); d != "" {
+			fn["description"] = d
+		}
+		if tm["parameters"] != nil {
+			fn["parameters"] = tm["parameters"]
+		}
+		if tm["strict"] != nil {
+			fn["strict"] = tm["strict"]
+		}
+		out = append(out, map[string]any{"type": "function", "function": fn})
+	}
+	return out
+}
+
+func toolChoiceFromResponses(tc any) any {
+	switch v := tc.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if n := asString(v["name"]); n != "" {
+			return map[string]any{"type": "function", "function": map[string]any{"name": n}}
+		}
+	}
+	return nil
+}
+
+// ---- non-stream response: chat -> responses ----
+
+// ChatRespToResponses converts an OpenAI chat-completion body to a
+// Responses-API response (inverse of ResponsesRespToChat).
+func ChatRespToResponses(chat map[string]any) map[string]any {
+	out := map[string]any{
+		"id": asString(chat["id"]), "object": "response", "model": asString(chat["model"]),
+		"status": "completed",
+	}
+	output := make([]any, 0, 4)
+	var choice map[string]any
+	if cs := asSlice(chat["choices"]); len(cs) > 0 {
+		choice = asMap(cs[0])
+	}
+	if choice != nil {
+		m := asMap(choice["message"])
+		if r := asString(m["reasoning_content"]); r != "" {
+			output = append(output, map[string]any{"type": "reasoning",
+				"content": []any{map[string]any{"type": "reasoning_text", "text": r}}})
+		}
+		var content []any
+		if t := openAIContentToText(m["content"]); t != "" {
+			content = append(content, map[string]any{"type": "output_text", "text": t})
+		}
+		if len(content) > 0 {
+			output = append(output, map[string]any{"type": "message", "role": "assistant", "content": content})
+		}
+		for _, tc := range asSlice(m["tool_calls"]) {
+			tcm := asMap(tc)
+			fn := asMap(tcm["function"])
+			output = append(output, map[string]any{
+				"type": "function_call", "call_id": asString(tcm["id"]),
+				"name": asString(fn["name"]), "arguments": asString(fn["arguments"]),
+				"status": "completed",
+			})
+		}
+		switch asString(choice["finish_reason"]) {
+		case "length":
+			out["status"] = "incomplete"
+		case "tool_calls":
+			// completed; function_call items carry the stop reason
+		}
+	}
+	if len(output) == 0 {
+		output = append(output, map[string]any{"type": "message", "role": "assistant",
+			"content": []any{map[string]any{"type": "output_text", "text": ""}}})
+	}
+	out["output"] = output
+	if u := chatUsageToResponses(asMap(chat["usage"])); u != nil {
+		out["usage"] = u
+	}
+	return out
+}
+
+// chatUsageToResponses is the inverse of responsesUsageToChat.
+func chatUsageToResponses(u map[string]any) map[string]any {
+	if u == nil {
+		return nil
+	}
+	in, outp := asInt(u["prompt_tokens"]), asInt(u["completion_tokens"])
+	m := map[string]any{"input_tokens": in, "output_tokens": outp, "total_tokens": in + outp}
+	if cr := asInt(u["cache_read_tokens"]); cr > 0 {
+		m["input_tokens_details"] = map[string]any{"cached_tokens": cr}
+	}
+	return m
+}
+
+// ---- stream: openai chat chunks -> responses SSE events ----
+
+// Chat2RespStream converts openai chat-completion chunks into Responses-API
+// SSE events (inverse of Resp2ChatStream). pi/codex clients correlate deltas
+// by output_index and backfill tool name/arguments from response.completed —
+// so the completed event carries the fully assembled output array + usage.
+type Chat2RespStream struct {
+	model     string
+	id        string
+	started   bool
+	finished  bool
+	nextIdx   int // responses output_index
+	tools     map[int]*chat2respTool
+	toolByID  map[int]int // chat tool_calls index -> responses output_index
+	text      strings.Builder
+	reason    strings.Builder
+	msgIdx    int // -1 until the message item is announced
+	reasonIdx int // -1 until the reasoning item is announced
+	usage     map[string]any
+	items     []any // output items in announce order (mutated in place)
+	itemIdx   []int // responses output_index per item (done events need it)
+}
+
+type chat2respTool struct {
+	itemID string
+	callID string
+	name   string
+	args   strings.Builder
+	item   map[string]any // live output item, mutated as args grow
+}
+
+func NewChat2RespStream(model string) *Chat2RespStream {
+	return &Chat2RespStream{
+		model: model, id: "resp-ar-" + time.Now().UTC().Format("20060102150405.000000000"),
+		msgIdx: -1, reasonIdx: -1, tools: map[int]*chat2respTool{}, toolByID: map[int]int{},
+	}
+}
+
+func (t *Chat2RespStream) ev(name string, data map[string]any) Event {
+	data["type"] = name
+	return Event{Name: name, Data: data}
+}
+
+// Chunk consumes one openai chat chunk; returns responses events to forward.
+func (t *Chat2RespStream) Chunk(chunk map[string]any) []Event {
+	var out []Event
+	if !t.started {
+		t.started = true
+		if id := asString(chunk["id"]); id != "" {
+			t.id = id
+		}
+		out = append(out, t.ev("response.created", map[string]any{"response": map[string]any{
+			"id": t.id, "object": "response", "model": t.model, "status": "in_progress",
+		}}))
+	}
+	if u := asMap(chunk["usage"]); u != nil {
+		t.usage = chatUsageToResponses(u)
+	}
+	var delta map[string]any
+	if cs := asSlice(chunk["choices"]); len(cs) > 0 {
+		delta = asMap(asMap(cs[0])["delta"])
+	}
+	if d := asString(delta["content"]); d != "" {
+		if t.msgIdx < 0 {
+			// announce the message item BEFORE its deltas — clients correlate
+			// deltas by output_index and drop orphans
+			t.msgIdx = t.nextIdx
+			t.nextIdx++
+			msg := map[string]any{"type": "message", "id": "msg_0",
+				"role": "assistant", "content": []any{}}
+			t.items = append(t.items, msg)
+			t.itemIdx = append(t.itemIdx, t.msgIdx)
+			out = append(out, t.ev("response.output_item.added", map[string]any{
+				"output_index": t.msgIdx, "item": msg}))
+		}
+		t.text.WriteString(d)
+		out = append(out, t.ev("response.output_text.delta", map[string]any{
+			"item_id": "msg_0", "output_index": t.msgIdx, "content_index": 0, "delta": d,
+		}))
+	}
+	if d := asString(delta["reasoning_content"]); d != "" {
+		if t.reasonIdx < 0 {
+			t.reasonIdx = t.nextIdx
+			t.nextIdx++
+			rs := map[string]any{"type": "reasoning", "id": "rs_0", "content": []any{}}
+			t.items = append(t.items, rs)
+			t.itemIdx = append(t.itemIdx, t.reasonIdx)
+			out = append(out, t.ev("response.output_item.added", map[string]any{
+				"output_index": t.reasonIdx, "item": rs}))
+		}
+		t.reason.WriteString(d)
+		out = append(out, t.ev("response.reasoning_text.delta", map[string]any{
+			"item_id": "rs_0", "output_index": t.reasonIdx, "content_index": 0, "delta": d,
+		}))
+	}
+	for _, tc := range asSlice(delta["tool_calls"]) {
+		tcm := asMap(tc)
+		idx := asInt(tcm["index"])
+		tool, ok := t.tools[idx]
+		if !ok {
+			fn := asMap(tcm["function"])
+			tool = &chat2respTool{
+				itemID: "fc_" + asString(tcm["id"]),
+				callID: asString(tcm["id"]),
+				name:   asString(fn["name"]),
+			}
+			if tool.callID == "" {
+				tool.callID = fmt.Sprintf("call_%d", idx)
+				tool.itemID = "fc_" + tool.callID
+			}
+			tool.item = map[string]any{"type": "function_call", "id": tool.itemID,
+				"call_id": tool.callID, "name": tool.name, "arguments": ""}
+			t.tools[idx] = tool
+			t.toolByID[idx] = t.nextIdx
+			t.items = append(t.items, tool.item)
+			t.itemIdx = append(t.itemIdx, t.nextIdx)
+			out = append(out, t.ev("response.output_item.added", map[string]any{
+				"output_index": t.nextIdx,
+				"item":         tool.item,
+			}))
+			t.nextIdx++
+		} else if n := asString(asMap(tcm["function"])["name"]); n != "" && tool.name == "" {
+			tool.name = n
+			tool.item["name"] = n
+		}
+		if d := asString(asMap(tcm["function"])["arguments"]); d != "" {
+			tool.args.WriteString(d)
+			tool.item["arguments"] = tool.args.String()
+			out = append(out, t.ev("response.function_call_arguments.delta", map[string]any{
+				"item_id": tool.itemID, "output_index": t.toolByID[idx], "delta": d,
+			}))
+		}
+	}
+	// finish_reason does NOT trigger Finish here: usage rides the final chunk
+	// (often after finish); the proxy calls Finish after the stream ends.
+	return out
+}
+
+// Finish emits the terminal events (idempotent). response.completed carries
+// the assembled output array + usage — pi backfills tool calls from it.
+func (t *Chat2RespStream) Finish() []Event {
+	if !t.started || t.finished {
+		return nil
+	}
+	t.finished = true
+	var out []Event
+	// fill the announced placeholders in place, then mark everything done
+	for i, it := range t.items {
+		im := it.(map[string]any)
+		switch asString(im["type"]) {
+		case "message":
+			im["content"] = []any{map[string]any{"type": "output_text", "text": t.text.String()}}
+		case "reasoning":
+			im["content"] = []any{map[string]any{"type": "reasoning_text", "text": t.reason.String()}}
+		case "function_call":
+			im["status"] = "completed"
+		}
+		out = append(out, t.ev("response.output_item.done", map[string]any{
+			"output_index": t.itemIdx[i], "item": it}))
+	}
+	if t.usage == nil {
+		t.usage = map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+	}
+	resp := map[string]any{"id": t.id, "object": "response", "model": t.model,
+		"status": "completed", "output": t.items, "usage": t.usage}
+	out = append(out, t.ev("response.completed", map[string]any{"response": resp}))
+	return out
 }
 
 // ---- stream: responses SSE -> openai chat chunks ----

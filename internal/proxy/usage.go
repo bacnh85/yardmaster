@@ -75,6 +75,13 @@ func (t *UsageTee) consumeLine() {
 func (t *UsageTee) parse(m map[string]any) {
 	if t.wire == "anthropic" {
 		switch m["type"] {
+		case "message": // full non-streaming message body
+			if u, ok := m["usage"].(map[string]any); ok {
+				t.usage.In = num(u["input_tokens"])
+				t.usage.Out = num(u["output_tokens"])
+				t.usage.CacheR = num(u["cache_read_input_tokens"])
+				t.usage.CacheW = num(u["cache_creation_input_tokens"])
+			}
 		case "message_start":
 			msg, _ := m["message"].(map[string]any)
 			if u, ok := msg["usage"].(map[string]any); ok {
@@ -90,6 +97,27 @@ func (t *UsageTee) parse(m map[string]any) {
 				if v := num(u["input_tokens"]); v > 0 {
 					t.usage.In = v
 				}
+			}
+		}
+		return
+	}
+	if t.wire == "responses" {
+		// responses fast path: usage rides response.completed/incomplete events,
+		// or sits top-level on a full non-stream body
+		u, _ := m["usage"].(map[string]any)
+		if u == nil {
+			if resp, ok := m["response"].(map[string]any); ok {
+				switch m["type"] {
+				case "response.completed", "response.incomplete":
+					u, _ = resp["usage"].(map[string]any)
+				}
+			}
+		}
+		if u != nil {
+			t.usage.In = num(u["input_tokens"])
+			t.usage.Out = num(u["output_tokens"])
+			if d, ok := u["input_tokens_details"].(map[string]any); ok {
+				t.usage.CacheR = num(d["cached_tokens"])
 			}
 		}
 		return

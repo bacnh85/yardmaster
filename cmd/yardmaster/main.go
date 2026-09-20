@@ -93,6 +93,7 @@ func cmdRun(args []string) {
 	p.Pool = pool
 	p.Version = version
 	srv := server.New(p, keys, st, *cfgPath, cfg.AdminPassword, version)
+	go srv.WarmCatalogs(context.Background())
 
 	httpSrv := &http.Server{
 		Addr:    cfg.Listen,

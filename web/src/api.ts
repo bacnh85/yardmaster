@@ -45,9 +45,22 @@ export interface BreakdownRow {
 export interface KeyRow { name: string; key_suffix: string; allow: string[]; rpm: number }
 export interface ProviderRow {
   name: string; wire: string; base_url: string; models: string[];
+  prefix?: string; // absent from older servers → prefill degrades to ""
+  session?: string; // absent from older servers → prefill degrades to ""
+  preset: string; disabled: boolean;
   dispatch_interval_ms: number; auth_type: string;
   adaptive_thinking: boolean; inject_cache_control: boolean;
+  connections: { label: string; suffix: string }[];
   accounts: { name: string; kind: string; disabled: boolean; expires_at: number; state?: string; last_error?: string }[];
+}
+export interface CatalogModel {
+  id: string; name?: string; family: string; context?: number; max_output?: number;
+  input: number; output: number; cache_read: number; cache_write: number;
+  reasoning?: boolean; tool_call?: boolean; image?: boolean; free?: boolean;
+}
+export interface ProbeResult {
+  text: string; tok_in: number; tok_out: number;
+  cost_usd: number; ttft_ms: number; dur_ms: number;
 }
 export interface LivePayload {
   active: { id: string; model: string; provider: string; key: string; stream: boolean; start: number; ttft_ms: number }[];

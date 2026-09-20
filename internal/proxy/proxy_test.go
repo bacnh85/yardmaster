@@ -350,6 +350,25 @@ func TestAnthropicClientToOpenAIUpstream(t *testing.T) {
 	}
 }
 
+// Disabled providers are skipped at dispatch (registry toggle).
+func TestDisabledProviderSkipped(t *testing.T) {
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "off", BaseURL: "http://127.0.0.1:1", Wire: "openai", Disabled: true,
+			Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k"}}}}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("disabled provider served the request: %d", resp.StatusCode)
+	}
+}
+
 // TestOpenAIClientToAnthropicUpstream: zai-style upstream.
 func TestOpenAIClientToAnthropicUpstream(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +433,40 @@ func TestOpenAIClientToAnthropicUpstream(t *testing.T) {
 	}
 	if n := strings.Count(joined, `"stop_reason"`); n > 0 {
 		t.Fatalf("anthropic stop_reason leaked into openai stream: %s", joined)
+	}
+}
+
+// Zen-style anthropic base URL already ends in /v1 — must not double it.
+func TestAnthropicBaseURLWithV1Suffix(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": "m", "role": "assistant",
+			"content":     []any{map[string]any{"type": "text", "text": "hola"}},
+			"stop_reason": "end_turn",
+			"usage":       map[string]any{"input_tokens": 3, "output_tokens": 2},
+		})
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "zen", BaseURL: up.URL + "/v1", Wire: "anthropic", Models: []string{"claude-haiku-4.5"},
+			Auth: config.AuthConf{Keys: []string{"zen-key"}}}}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(
+		`{"model":"claude-haiku-4.5","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
 }
 

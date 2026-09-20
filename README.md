@@ -14,9 +14,11 @@ routing, honest stats, and isolated auth adapters.
   chunk; client disconnect cancels the upstream call. Bench: **TTFT overhead
   p95 ≤ 1 ms** at 200–500 concurrent streams × 300 tok/s, zero stalls
   (`yardmaster bench`).
-- **Wire surface**: `POST /v1/chat/completions` (OpenAI) and `POST /v1/messages`
-  (Anthropic) in; OpenAI or Anthropic wire per upstream. Full translation
-  (tool calls, thinking/reasoning, usage) between the two.
+- **Wire surface**: `POST /v1/chat/completions` (OpenAI), `POST /v1/messages`
+  (Anthropic), and `POST /v1/responses` (OpenAI Responses — pi/codex clients)
+  in; OpenAI, Anthropic, or Responses wire per upstream (same-wire requests are
+  byte-exact passthrough). Full translation (tool calls, thinking/reasoning,
+  usage) between the wires. `GET /v1/models` lists the enriched catalog.
 - **Ordered failover**: model → provider chain; any upstream >=400 falls
   through to the next provider/key; the last real upstream error is surfaced.
 - **Z.ai GLM Coding Plan support** (`session`-style providers, see config):
@@ -26,6 +28,13 @@ routing, honest stats, and isolated auth adapters.
 - **OpenCode Go support**: `session: opencode` providers send the required
   `x-opencode-session`/`x-opencode-client` headers (stable per key; a client
   header is forwarded when present).
+- **Provider presets, model catalog & playground**: the dashboard's
+  Providers tab ships one-click presets (OpenCode Go, DeepSeek, Z.AI,
+  Command Code), pulls each provider's live model catalog (`/models` +
+  models.dev enrichment: pricing, context, reasoning/tools, wire family) into
+  a checklist, manages multiple API keys ("connections") per provider, and has
+  a playground that fires a one-shot test request through the real dispatch
+  path on any wire.
 - **Stats**: SQLite request log (async batched), per-model/provider/key
   breakdowns, TTFT p50/p95, cache hit rate, cost accounting (config-editable
   per-model prices; built-in estimates), live SSE feed, embedded dashboard.
