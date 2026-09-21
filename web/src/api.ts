@@ -107,6 +107,7 @@ export interface QuotaWindow { used: number; cap: number; unit?: string; exceede
 export interface QuotaAccount {
   label: string; suffix: string;
   five_hour?: QuotaWindow; weekly?: QuotaWindow;
+  monthly?: QuotaWindow;
   monthly_credits?: number; monthly_total?: number; limited?: boolean; err?: string; currency?: string;
 }
 export interface QuotaGroup { source: string; providers: string[]; accounts: QuotaAccount[]; fetched_at: number }

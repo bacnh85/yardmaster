@@ -65,28 +65,31 @@ providers:
     models: [deepseek/deepseek-chat, deepseek/deepseek-r1]
 
   # --- OpenCode Go / OpenCode Zen (https://opencode.ai/zen) ---
-  # One base URL, three wire families — add the entries you need (dashboard
+  # One gateway, three wire families — add the entries you need (dashboard
   # presets do this in one click; `session: opencode` sends the required
-  # x-opencode-session/client headers). Free models: big-pickle,
-  # nemotron-3-ultra-free, mimo-v2.5-free, ling-3.0-flash-fin-free.
+  # x-opencode-session/client headers). zen/go/v1 bills the Go subscription's
+  # per-model monthly limits and feeds the Quota tab's usage windows; use
+  # https://opencode.ai/zen/v1 instead for pay-as-you-go Zen credits (no
+  # usage API). Free models: big-pickle, nemotron-3-ultra-free,
+  # mimo-v2.5-free, ling-3.0-flash-fin-free.
   - name: opencode-go            # DeepSeek/GLM/Kimi/MiniMax + free models
-    base_url: https://opencode.ai/zen/v1
+    base_url: https://opencode.ai/zen/go/v1
     wire: openai
     session: opencode
     auth: { type: static, keys: ["..."] }
-    models: [big-pickle, deepseek-v4-flash, glm-5.3, kimi-k3, minimax-m3]
+    models: [deepseek-v4-flash, deepseek-v4-pro, glm-5.3, glm-5.3-flash, kimi-k3, minimax-m3]
   - name: opencode-go-claude     # Claude + Qwen family
-    base_url: https://opencode.ai/zen/v1
+    base_url: https://opencode.ai/zen/go/v1
     wire: anthropic
     session: opencode
     auth: { type: static, keys: ["..."] }
-    models: [claude-sonnet-5, claude-haiku-4-5, qwen3.7-plus]
+    models: [minimax-m2.7, minimax-m3, qwen3.7-plus, qwen3.8-max]
   # - name: opencode-go-gpt       # GPT + Grok family (responses wire)
-  #   base_url: https://opencode.ai/zen/v1
+  #   base_url: https://opencode.ai/zen/go/v1
   #   wire: responses
   #   session: opencode
   #   auth: { type: static, keys: ["..."] }
-  #   models: [gpt-5.5, grok-4.5]
+  #   models: [gpt-5.6-luna, grok-4.6, grok-4.7]
 
   # --- Command Code Provider API (both wires) ---
   # GOAT plan: open models on the openai wire. Claude models (Pro/Max) need the

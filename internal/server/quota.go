@@ -35,6 +35,7 @@ type QuotaAccount struct {
 	Suffix         string       `json:"suffix"`
 	FiveHour       *QuotaWindow `json:"five_hour,omitempty"`
 	Weekly         *QuotaWindow `json:"weekly,omitempty"`
+	Monthly        *QuotaWindow `json:"monthly,omitempty"` // explicit percent window (OpenCode Go); cc/DeepSeek derive the column instead
 	MonthlyCredits *float64     `json:"monthly_credits,omitempty"` // USD remaining, or balance per Currency
 	Currency       string       `json:"currency,omitempty"`        // balance currency when not USD (e.g. DeepSeek CNY accounts)
 	MonthlyTotal   float64      `json:"monthly_total,omitempty"`   // plan allowance; 0 = unknown plan
@@ -66,6 +67,10 @@ func quotaSource(baseURL string) string {
 		return "deepseek"
 	case "api.z.ai", "zcode.z.ai":
 		return "zai"
+	case "opencode.ai":
+		if strings.Contains(strings.ToLower(u.Path), "/go/") {
+			return "opencode" // zen/go/v1 = Go subscription; plain zen/v1 (credits) has no usage API
+		}
 	}
 	return ""
 }
@@ -76,6 +81,7 @@ var billingPaths = map[string]string{
 	"commandcode": "/alpha/billing/credits",
 	"deepseek":    "/user/balance",
 	"zai":         "/api/monitor/usage/quota/limit",
+	"opencode":    "/zen/go/v1/usage",
 }
 
 // quotaClient fetches usage windows; var so tests can redirect upstream.
@@ -306,6 +312,68 @@ func fetchZaiQuota(ctx context.Context, quotaURL, key string) (*QuotaAccount, er
 	return acct, nil // PAYG key: no windows — empty account, never a fake 0%
 }
 
+// ocUsage mirrors GET https://opencode.ai/zen/go/v1/usage (live-verified
+// 2026-09-22 with a Go API key; no workspace id or session header needed).
+// Limits are per-model monthly dollar amounts (5h = 20%, weekly = 50%,
+// monthly = 100% of it — https://opencode.ai/docs/go/#usage-limits); the API
+// blends them into one percent per window. resetsAt is RFC3339.
+type ocUsage struct {
+	Usage struct {
+		Rolling ocWindow `json:"rolling"`
+		Weekly  ocWindow `json:"weekly"`
+		Monthly ocWindow `json:"monthly"`
+	} `json:"usage"`
+}
+
+type ocWindow struct {
+	Status   string  `json:"status"`
+	Percent  float64 `json:"percent"`
+	ResetsAt string  `json:"resetsAt"`
+}
+
+// ocPctWindow converts one usage window. Exceedance is percent-based — the
+// status enum is undocumented (only "ok" observed), so it is never guessed.
+// A window the API did not return (no percent, no reset) maps to nil —
+// same invariant as the other fetchers: never a fabricated 0%.
+func ocPctWindow(w ocWindow) *QuotaWindow {
+	if w.Percent == 0 && w.ResetsAt == "" {
+		return nil
+	}
+	reset := int64(0)
+	if t, err := time.Parse(time.RFC3339, w.ResetsAt); err == nil {
+		reset = t.UnixMilli()
+	}
+	return &QuotaWindow{Used: w.Percent, Cap: 100, Unit: "pct", Exceeded: w.Percent >= 100, ResetAt: reset}
+}
+
+// fetchOpencodeQuota reads the Go subscription usage windows for one key.
+func fetchOpencodeQuota(ctx context.Context, quotaURL, key string) (*QuotaAccount, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, quotaURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := quotaClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var body ocUsage
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	return &QuotaAccount{
+		FiveHour: ocPctWindow(body.Usage.Rolling),
+		Weekly:   ocPctWindow(body.Usage.Weekly),
+		Monthly:  ocPctWindow(body.Usage.Monthly),
+	}, nil
+}
+
 const quotaTTL = 60 * time.Second
 
 var (
@@ -412,6 +480,8 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 				acct, err = fetchDeepSeekQuota(context.Background(), origin, key)
 			case "zai":
 				acct, err = fetchZaiQuota(context.Background(), origin, key)
+			case "opencode":
+				acct, err = fetchOpencodeQuota(context.Background(), origin, key)
 			default:
 				acct, err = fetchCommandCodeQuota(context.Background(), origin, key)
 			}

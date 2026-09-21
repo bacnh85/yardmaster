@@ -14,14 +14,16 @@ export const monthlyWindow = (a: QuotaAccount): QuotaWindow | undefined =>
     ? { used: Math.max(0, a.monthly_total - a.monthly_credits), cap: a.monthly_total }
     : undefined;
 
-const SOURCE_LABEL: Record<string, string> = { commandcode: "Command Code", deepseek: "DeepSeek", zai: "Z.AI GLM Coding Plan" };
+const SOURCE_LABEL: Record<string, string> = { commandcode: "Command Code", deepseek: "DeepSeek", zai: "Z.AI GLM Coding Plan", opencode: "OpenCode Go" };
 
 /** Client mirror of the server matcher (internal/server/quota.go quotaSource).
  *  host (not hostname) keeps the port in play, matching Go's url.Host compare. */
 export const isQuotaProvider = (base_url: string) => {
   try {
     const h = new URL(base_url).host.toLowerCase();
-    return h === "api.commandcode.ai" || h === "api.deepseek.com" || h === "api.z.ai" || h === "zcode.z.ai";
+    const p = new URL(base_url).pathname.toLowerCase();
+    return h === "api.commandcode.ai" || h === "api.deepseek.com" || h === "api.z.ai" || h === "zcode.z.ai"
+      || (h === "opencode.ai" && p.includes("/go/")); // zen/go/v1 = Go subscription; plain zen/v1 has no usage API
   } catch { return false; }
 };
 
@@ -79,12 +81,14 @@ export function QuotaTable({ accounts }: { accounts: QuotaAccount[] }) {
               </td>
               <td><WindowCell w={a.five_hour} /></td>
               <td><WindowCell w={a.weekly} /></td>
-              <td title="monthly allowance or prepaid balance · reset date not exposed by the provider API">
-                {monthlyWindow(a)
-                  ? <WindowCell w={monthlyWindow(a)} />
-                  : a.monthly_credits != null
-                    ? <span className="quota-cell"><span className="num">{fmtUSD(a.monthly_credits, a.currency)} <span className="faint">left</span></span></span>
-                    : <span className="faint">—</span>}
+              <td title={a.monthly ? "monthly usage window" : "monthly allowance or prepaid balance · reset date not exposed by the provider API"}>
+                {a.monthly
+                  ? <WindowCell w={a.monthly} />
+                  : monthlyWindow(a)
+                    ? <WindowCell w={monthlyWindow(a)} />
+                    : a.monthly_credits != null
+                      ? <span className="quota-cell"><span className="num">{fmtUSD(a.monthly_credits, a.currency)} <span className="faint">left</span></span></span>
+                      : <span className="faint">—</span>}
               </td>
             </tr>
           ))}
@@ -107,7 +111,7 @@ export function QuotaTab() {
       {error && <ErrorBanner msg={error} onRetry={reload} />}
       {loading && quotas.length === 0 && <div className="faint" style={{ padding: 8 }}>loading…</div>}
       {!loading && quotas.length === 0 && !error && (
-        <Empty>no providers expose usage yet — connect Command Code, DeepSeek or Z.AI under Providers</Empty>
+        <Empty>no providers expose usage yet — connect Command Code, DeepSeek, Z.AI or OpenCode Go under Providers</Empty>
       )}
       {quotas.map((g) => (
         <div className="card" key={g.source} style={{ marginBottom: 16 }}>

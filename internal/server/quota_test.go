@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -344,6 +345,10 @@ func TestQuotaSourceMatcher(t *testing.T) {
 		"http://API.commandcode.ai":              "commandcode", // host match is case-insensitive
 		"https://api.deepseek.com":               "deepseek",
 		"https://api.deepseek.com/anthropic":     "deepseek",
+		"https://opencode.ai/zen/go/v1":          "opencode",
+		"http://OpenCode.AI/zen/go/v1":           "opencode", // case-insensitive host + path
+		"https://opencode.ai/zen/v1":             "",          // Zen credits: no usage API → no quota row
+		"https://opencode.ai":                    "",
 		"https://api.example.com/v1":             "",
 		"not a url":                              "",
 	}
@@ -376,6 +381,59 @@ func TestQuotaFetchError(t *testing.T) {
 	quotaClient = bad.Client()
 	if _, err := fetchCommandCodeQuota(context.Background(), bad.URL, "k"); err == nil {
 		t.Error("want decode error, got nil")
+	}
+}
+
+// TestFetchOpencodeQuota parses the live-verified zen/go/v1/usage shape:
+// one blended percent per window, RFC3339 resetsAt, no fabricated dollars.
+func TestFetchOpencodeQuota(t *testing.T) {
+	orig := quotaClient
+	t.Cleanup(func() { quotaClient = orig })
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer k1" {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		fmt.Fprint(w, `{"usage":{`+
+			`"rolling":{"status":"ok","percent":12.5,"resetsAt":"2026-09-21T20:35:59.444Z"},`+
+			`"weekly":{"status":"ok","percent":0,"resetsAt":"2026-09-28T00:00:00.000Z"},`+
+			`"monthly":{"status":"ok","percent":80,"resetsAt":"2026-09-26T09:38:03.000Z"}}}`)
+	}))
+	defer up.Close()
+	quotaClient = up.Client()
+	acct, err := fetchOpencodeQuota(context.Background(), up.URL, "k1")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	reset, _ := time.Parse(time.RFC3339, "2026-09-21T20:35:59.444Z")
+	if w := acct.FiveHour; w == nil || w.Used != 12.5 || w.Cap != 100 || w.Unit != "pct" || w.Exceeded || w.ResetAt != reset.UnixMilli() {
+		t.Errorf("FiveHour = %+v, want 12.5%% pct window resetting at %d", acct.FiveHour, reset.UnixMilli())
+	}
+	if w := acct.Weekly; w == nil || w.Used != 0 || w.ResetAt == 0 {
+		t.Errorf("Weekly = %+v, want a 0%% window with a real reset", acct.Weekly)
+	}
+	if w := acct.Monthly; w == nil || w.Used != 80 || w.Exceeded {
+		t.Errorf("Monthly = %+v, want 80%% not exceeded", acct.Monthly)
+	}
+	if acct.MonthlyCredits != nil || acct.MonthlyTotal != 0 || acct.Limited {
+		t.Errorf("dollars/limited fabricated: %+v", acct)
+	}
+
+	// 100% flags exceeded; a bad resetsAt just zeroes the reset; absent
+	// windows map to nil (— in the UI), never a fabricated 0%.
+	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"usage":{"rolling":{"status":"x","percent":100,"resetsAt":"nope"},"weekly":{},"monthly":{}}}`)
+	}))
+	defer up2.Close()
+	quotaClient = up2.Client()
+	acct, err = fetchOpencodeQuota(context.Background(), up2.URL, "k1")
+	if err != nil {
+		t.Fatalf("fetch 100%%: %v", err)
+	}
+	if w := acct.FiveHour; w == nil || !w.Exceeded || w.ResetAt != 0 {
+		t.Errorf("FiveHour = %+v, want exceeded with zeroed reset", acct.FiveHour)
+	}
+	if acct.Weekly != nil || acct.Monthly != nil {
+		t.Errorf("absent windows must be nil, got %+v", acct)
 	}
 }
 

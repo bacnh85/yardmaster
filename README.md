@@ -27,7 +27,9 @@ routing, honest stats, and isolated auth adapters.
   dispatch throttle that dodges the 429/1302 request-rate limit.
 - **OpenCode Go support**: `session: opencode` providers send the required
   `x-opencode-session`/`x-opencode-client` headers (stable per key; a client
-  header is forwarded when present).
+  header is forwarded when present), bill the Go subscription at
+  `https://opencode.ai/zen/go/v1`, and report live rolling-5h/weekly/monthly
+  usage windows in the Quota tab.
 - **DeepSeek API support**: all three wires from one key (chat / Anthropic at
   `…/anthropic` / Responses), models `deepseek-flash` (vision) + `deepseek-v4-pro`,
   1M context, cache-hit tokens priced at the cache rate, and the prepaid balance

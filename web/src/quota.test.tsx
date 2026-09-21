@@ -55,6 +55,9 @@ describe("isQuotaProvider", () => {
     ["https://api.commandcode.ai:8443/v1", false], // port present: server quotaSource also rejects (u.Host compare)
     ["https://api.deepseek.com", true],
     ["https://api.deepseek.com/anthropic", true],
+    ["https://opencode.ai/zen/go/v1", true],
+    ["https://opencode.ai/zen/v1", false], // Zen credits: no usage API
+    ["https://opencode.ai", false],
     ["https://api.example.com/v1", false],
     ["", false],
     ["not a url", false],
@@ -80,5 +83,17 @@ describe("QuotaTable key display", () => {
 
     const unique = renderToString(<QuotaTable accounts={[acct("Key 1", "ab12cd")]} />);
     expect(unique).not.toContain("mono faint"); // unique label stays label-only
+  });
+
+  it("prefers an explicit monthly percent window (OpenCode Go) over the derived allowance", () => {
+    const a: QuotaAccount = {
+      label: "go", suffix: "xy99", monthly: { used: 80, cap: 100, unit: "pct", reset_at: mins(240) },
+      monthly_credits: 3, monthly_total: 70, // would compute a different bar — explicit window wins
+    };
+    const html = renderToString(<QuotaTable accounts={[a]} />);
+    expect(html).toContain("80%");
+    expect(html).toContain("resets in");
+    expect(html).toContain("4h");
+    expect(html).not.toContain("$67");
   });
 });
