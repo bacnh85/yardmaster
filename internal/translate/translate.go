@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Options control provider-specific translation behavior.
@@ -477,6 +478,7 @@ func AnthropicReqToOpenAI(req map[string]any, _ Options) map[string]any {
 			var text string
 			var toolCalls []any
 			var pendingToolResults []any
+			var pendingImages []any
 			for _, b := range c {
 				bm := asMap(b)
 				if bm == nil {
@@ -493,7 +495,7 @@ func AnthropicReqToOpenAI(req map[string]any, _ Options) map[string]any {
 						if asString(src["type"]) == "base64" {
 							url = fmt.Sprintf("data:%s;base64,%s", asString(src["media_type"]), asString(src["data"]))
 						}
-						msgs = append(msgs, map[string]any{"role": role, "content": []any{
+						pendingImages = append(pendingImages, map[string]any{"role": role, "content": []any{
 							map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}}}})
 					}
 				case "tool_use":
@@ -509,8 +511,11 @@ func AnthropicReqToOpenAI(req map[string]any, _ Options) map[string]any {
 					})
 				}
 			}
-			// flush tool results first (they respond to the previous assistant turn)
+			// flush tool results first (they respond to the previous assistant
+			// turn — OpenAI-family upstreams require tool msgs to directly follow
+			// the assistant tool_calls msg), then images, then plain content
 			msgs = append(msgs, pendingToolResults...)
+			msgs = append(msgs, pendingImages...)
 			if role == "assistant" && (text != "" || len(toolCalls) > 0) {
 				am := map[string]any{"role": "assistant", "content": text}
 				if len(toolCalls) > 0 {
@@ -642,8 +647,12 @@ func AnthropicRespToOpenAI(am map[string]any) map[string]any {
 			"cached_tokens": cr, "cache_write_tokens": asInt(u["cache_creation_input_tokens"]),
 		}
 	}
+	created := time.Now().Unix() // anthropic bodies carry no created_at; openai clients expect a number
+	if n, ok := am["created_at"].(float64); ok {
+		created = int64(n)
+	}
 	return map[string]any{
-		"id": am["id"], "object": "chat.completion", "created": am["created_at"],
+		"id": am["id"], "object": "chat.completion", "created": created,
 		"model": am["model"],
 		"choices": []any{map[string]any{
 			"index": 0, "message": msg,

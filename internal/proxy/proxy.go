@@ -11,11 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"io"
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -925,6 +925,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 	if clientWire == WireAnthropic {
 		// upstream openai → client anthropic
 		tr := translate.NewOAI2AnthStream(req["model"].(string))
+		done := false
 		for sc.Scan() {
 			line := sc.Bytes()
 			if !bytes.HasPrefix(line, []byte("data:")) {
@@ -937,6 +938,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 						return usage, 0
 					}
 				}
+				done = true
 				break
 			}
 			var chunk map[string]any
@@ -949,6 +951,15 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 			for _, ev := range tr.Chunk(chunk) {
 				if writeEvent(ev.Name, ev.Data) != nil {
 					return usage, 0
+				}
+			}
+		}
+		// upstream ended without [DONE] (drop/timeout): still terminate the
+		// anthropic stream or the client hangs until its own timeout
+		if !done {
+			for _, ev := range tr.Finish() {
+				if writeEvent(ev.Name, ev.Data) != nil {
+					break
 				}
 			}
 		}

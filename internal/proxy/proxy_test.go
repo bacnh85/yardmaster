@@ -575,3 +575,43 @@ func mustMap(t *testing.T, s string) map[string]any {
 	}
 	return m
 }
+
+// Upstream SSE that dies without [DONE] must still terminate the anthropic
+// client stream (message_delta end_turn + message_stop), or the client hangs.
+func TestAnthropicClientUpstreamDropsWithoutDone(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		c1, _ := json.Marshal(oaiChunk(map[string]any{"role": "assistant", "content": ""}, nil))
+		c2, _ := json.Marshal(oaiChunk(map[string]any{"content": "partial"}, nil))
+		fmt.Fprintf(w, "data: %s\n\ndata: %s\n\n", c1, c2)
+		f.Flush()
+		// EOF without [DONE]
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "ds", BaseURL: up.URL, Wire: "openai", Models: []string{"claude-x"},
+			Auth: config.AuthConf{Keys: []string{"k"}}}}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeMessages))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(
+		`{"model":"claude-x","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	s := string(got)
+	if !strings.Contains(s, `"stop_reason":"end_turn"`) {
+		t.Fatalf("no terminating message_delta: %q", s)
+	}
+	if !strings.Contains(s, "message_stop") {
+		t.Fatalf("no message_stop: %q", s)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(s), `"type":"message_stop"}`) {
+		t.Fatalf("message_stop is not last: %q", s[len(s)-80:])
+	}
+}

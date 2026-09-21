@@ -329,3 +329,59 @@ func TestOpenAIRespToAnthropicEmptyChoices(t *testing.T) {
 		}
 	}
 }
+
+// A user turn [tool_result, image, text] must emit the tool message FIRST
+// (adjacent to the assistant tool_calls turn), then the image, then text.
+func TestAnthropicReqToOpenAI_ToolResultImageOrder(t *testing.T) {
+	req := mustJSON(t, `{
+		"model": "m", "max_tokens": 100,
+		"messages": [
+			{"role": "user", "content": "screenshot the db"},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "shot", "input": {}}]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "t1", "content": "shot ok"},
+				{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+				{"type": "text", "text": "describe it"}
+			]}
+		]
+	}`)
+	out := AnthropicReqToOpenAI(req, Options{})
+	msgs := out["messages"].([]any)
+	roles := make([]string, len(msgs))
+	for i, m := range msgs {
+		roles[i] = asString(asMap(m)["role"])
+	}
+	want := []string{"user", "assistant", "tool", "user", "user"}
+	if len(roles) != len(want) {
+		t.Fatalf("roles: %v", roles)
+	}
+	for i := range want {
+		if roles[i] != want[i] {
+			t.Fatalf("roles: %v, want %v", roles, want)
+		}
+	}
+	// image message carries the image_url block
+	img := asMap(msgs[3])["content"].([]any)[0].(map[string]any)
+	if img["type"] != "image_url" {
+		t.Fatalf("msgs[3] content: %v", img)
+	}
+	// tool message directly follows the assistant tool_calls turn
+	if asMap(msgs[2])["tool_call_id"] != "t1" {
+		t.Fatalf("msgs[2]: %v", msgs[2])
+	}
+}
+
+// translated completions always carry a numeric `created` (openai SDK shape)
+func TestAnthropicRespToOpenAI_CreatedNumeric(t *testing.T) {
+	am := mustJSON(t, `{"id":"m1","type":"message","role":"assistant","model":"glm",
+		"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",
+		"usage":{"input_tokens":1,"output_tokens":1}}`)
+	om := AnthropicRespToOpenAI(am)
+	b, _ := json.Marshal(om)
+	var rt struct {
+		Created int64 `json:"created"`
+	}
+	if json.Unmarshal(b, &rt) != nil || rt.Created <= 0 {
+		t.Fatalf("created must be a positive integer, got %s", b)
+	}
+}
