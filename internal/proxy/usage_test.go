@@ -75,3 +75,15 @@ func jsonMust(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+// Z.ai shape: cache fields arrive only in message_delta, never message_start.
+func TestUsageAnthropicZaiStreamCacheInDelta(t *testing.T) {
+	u := teeUsage(t, "anthropic",
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","usage":{"input_tokens":27,"output_tokens":8,"cache_read_input_tokens":2688}}`)
+	if u.In != 27 || u.CacheR != 2688 || u.Out != 8 {
+		t.Fatalf("got in=%d cacheR=%d out=%d, want 27/2688/8", u.In, u.CacheR, u.Out)
+	}
+}

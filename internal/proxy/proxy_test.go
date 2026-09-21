@@ -554,3 +554,24 @@ func TestUsageRecordedThroughStore(t *testing.T) {
 		t.Fatal("active should be empty after finish")
 	}
 }
+
+// Z.ai reports cache usage only in the terminal message_delta (message_start
+// is zeros) — stats capture must pick it up there.
+func TestCaptureAnthropicUsage_ZaiDelta(t *testing.T) {
+	p := &Proxy{}
+	var u Usage
+	p.captureAnthropicUsage(&u, "message_start", mustMap(t, `{"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}}}`))
+	p.captureAnthropicUsage(&u, "message_delta", mustMap(t, `{"type":"message_delta","usage":{"input_tokens":27,"output_tokens":8,"cache_read_input_tokens":2688}}`))
+	if u.In != 27 || u.Out != 8 || u.CacheR != 2688 {
+		t.Fatalf("usage: %+v", u)
+	}
+}
+
+func mustMap(t *testing.T, s string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}

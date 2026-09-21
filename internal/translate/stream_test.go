@@ -223,3 +223,31 @@ func hasToolCall(chunks []map[string]any, id, name, args string) bool {
 	}
 	return sawID && sawArgs
 }
+
+// Z.ai shape: message_start carries zero usage; all usage (incl. cache fields)
+// rides the terminal message_delta.
+func TestAnth2OAI_ZaiStreamUsage(t *testing.T) {
+	tr := NewAnth2OAIStream("glm-5.3-flash")
+	tr.Event("message_start", mustJSON(t, `{"type":"message_start","message":{"id":"m1","usage":{"input_tokens":0,"output_tokens":0}}}`))
+	tr.Event("content_block_start", mustJSON(t, `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`))
+	tr.Event("content_block_delta", mustJSON(t, `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`))
+	tr.Event("content_block_stop", mustJSON(t, `{"type":"content_block_stop","index":0}`))
+	tr.Event("message_delta", mustJSON(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":27,"output_tokens":8,"cache_read_input_tokens":2688}}`))
+	chunks := tr.Event("message_stop", mustJSON(t, `{"type":"message_stop"}`))
+
+	u := chunks[len(chunks)-1]["usage"].(map[string]any)
+	if u["prompt_tokens"] != 2715 || u["completion_tokens"] != 8 { // 27+2688
+		t.Fatalf("usage chunk: %v", u)
+	}
+	if u["cache_read_tokens"] != 2688 {
+		t.Fatalf("house cache_read_tokens: %v", u)
+	}
+	d, ok := u["prompt_tokens_details"].(map[string]any)
+	if !ok || d["cached_tokens"] != 2688 {
+		t.Fatalf("prompt_tokens_details: %v", u)
+	}
+	in, out, cr, _ := tr.Usage()
+	if in != 27 || out != 8 || cr != 2688 {
+		t.Fatalf("tracker: %d %d %d", in, out, cr)
+	}
+}

@@ -266,6 +266,10 @@ func TestResponsesNonStream(t *testing.T) {
 	if u["prompt_tokens"] != 155 { // 100 + 50 + 5
 		t.Fatalf("prompt_tokens: %v", u["prompt_tokens"])
 	}
+	d, ok := u["prompt_tokens_details"].(map[string]any)
+	if !ok || d["cached_tokens"] != 50 {
+		t.Fatalf("prompt_tokens_details: %v", u)
+	}
 	if u["completion_tokens"] != 20 {
 		t.Fatalf("completion_tokens: %v", u["completion_tokens"])
 	}

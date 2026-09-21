@@ -1128,6 +1128,13 @@ func (p *Proxy) captureAnthropicUsage(usage *Usage, event string, ev map[string]
 			if v := num(u["input_tokens"]); v > 0 {
 				usage.In = v
 			}
+			// Z.ai reports cache fields only here, not in message_start
+			if v := num(u["cache_read_input_tokens"]); v > 0 {
+				usage.CacheR = v
+			}
+			if v := num(u["cache_creation_input_tokens"]); v > 0 {
+				usage.CacheW = v
+			}
 		}
 	}
 }

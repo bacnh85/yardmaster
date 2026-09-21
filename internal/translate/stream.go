@@ -275,6 +275,14 @@ func (t *Anth2OAIStream) Event(name string, data map[string]any) []map[string]an
 			if v := asInt(u["input_tokens"]); v > 0 {
 				t.usageIn = v
 			}
+			// Z.ai (unlike Anthropic) reports usage only here, not in
+			// message_start — including the cache fields
+			if v := asInt(u["cache_read_input_tokens"]); v > 0 {
+				t.cacheR = v
+			}
+			if v := asInt(u["cache_creation_input_tokens"]); v > 0 {
+				t.cacheW = v
+			}
 		}
 		out = append(out, t.chunk(map[string]any{}, StopAnthToOAI(t.finish)))
 	case "message_stop":
@@ -298,6 +306,8 @@ func (t *Anth2OAIStream) UsageChunk() map[string]any {
 			"prompt_tokens": prompt, "completion_tokens": t.usageOut,
 			"total_tokens":      prompt + t.usageOut,
 			"cache_read_tokens": t.cacheR, "cache_write_tokens": t.cacheW,
+			// openai-standard dialect — pi reads only this shape
+			"prompt_tokens_details": map[string]any{"cached_tokens": t.cacheR, "cache_write_tokens": t.cacheW},
 		},
 	}
 }

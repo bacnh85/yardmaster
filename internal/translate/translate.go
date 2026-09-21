@@ -636,6 +636,12 @@ func AnthropicRespToOpenAI(am map[string]any) map[string]any {
 		prompt += cw
 	}
 	usage["prompt_tokens"] = prompt
+	if cr := asInt(u["cache_read_input_tokens"]); cr > 0 {
+		// openai-standard dialect — pi reads only this shape
+		usage["prompt_tokens_details"] = map[string]any{
+			"cached_tokens": cr, "cache_write_tokens": asInt(u["cache_creation_input_tokens"]),
+		}
+	}
 	return map[string]any{
 		"id": am["id"], "object": "chat.completion", "created": am["created_at"],
 		"model": am["model"],

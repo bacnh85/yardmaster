@@ -97,6 +97,13 @@ func (t *UsageTee) parse(m map[string]any) {
 				if v := num(u["input_tokens"]); v > 0 {
 					t.usage.In = v
 				}
+				// Z.ai reports cache fields only here, not in message_start
+				if v := num(u["cache_read_input_tokens"]); v > 0 {
+					t.usage.CacheR = v
+				}
+				if v := num(u["cache_creation_input_tokens"]); v > 0 {
+					t.usage.CacheW = v
+				}
 			}
 		}
 		return
