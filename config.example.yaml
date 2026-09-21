@@ -27,6 +27,14 @@ providers:
   #   models: [deepseek-flash, deepseek-v4-pro]
 
   # --- Z.ai GLM Coding Plan (Anthropic wire; maximizes subscription usage) ---
+  # Coding-plan models: GLM-5.3 (1M ctx, text-only, reasoning low/high/max) and
+  # GLM-5.3-Flash (multimodal, 3x plan quota). glm-5.2/5.1 auto-route to 5.3.
+  # Credits = (input*6.9 + cached*1.7 + output*24)/10k (flash: 2.3/0.56/8) —
+  # cache_control injection makes cached input ~4x cheaper; off-peak (incl.
+  # weekends) is half credits. Plans: Lite 2k/5h + 10k/wk; Pro 12k/60k;
+  # Max 28k/140k. Live windows show in the dashboard Quota tab.
+  # ZCode campaign: traffic through ZCode parity converts at a 0.67 coefficient
+  # (~1.5x quota) while it runs — subject to official announcement.
   # - cache_control injection → cache reads ~0.1x input
   # - fast mode + adaptive thinking (ZCode parity)
   # - 1s dispatch spacing → avoids 429 code 1302 rate limit
@@ -34,14 +42,20 @@ providers:
     base_url: https://api.z.ai/api/anthropic
     wire: anthropic
     auth: { type: static, keys: ["..."] }
-    models: [glm-5.3, glm-5.3-flash, glm-5.2]
+    models: [glm-5.3, glm-5.3-flash]
     dispatch_interval_ms: 1000
     adaptive_thinking: true
     inject_cache_control: true
     extra_headers: { anthropic-beta: "fast-mode-2026-02-01" }
     body_overrides: { speed: fast }
+    zcode_signing: true   # ZCode identity + Client-Signing V4; fail-open when the gate is off
     # rotation: round_robin        # rotate starting key/account per request
     #                              # (default first = config order; spreads quota)
+  # Full ZCode route (what the signed ZCode desktop hits today) — use this base
+  # URL while chasing the 0.67 campaign coefficient; keep zcode_signing: true:
+  #   base_url: https://zcode.z.ai/api/v1/ultra-zai/anthropic
+  # Signing needs a two-part key ({id}.{secret}); single-part keys silently
+  # send unsigned (matching the real client's fail-open).
 
   # --- OpenRouter (OpenAI wire, model ids like "deepseek/deepseek-chat") ---
   - name: openrouter

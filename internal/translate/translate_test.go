@@ -15,6 +15,71 @@ func mustJSON(t *testing.T, s string) map[string]any {
 	return m
 }
 
+// zai's GLM-5.x always reasons and its server default is effort=max — a client
+// that sends no reasoning_effort (thinking off) must land on adaptive+low.
+func TestAdaptiveDefaultEffortLow(t *testing.T) {
+	req := mustJSON(t, `{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)
+	out := OpenAIReqToAnthropic(req, Options{AdaptiveThinking: true})
+	if th, ok := out["thinking"].(map[string]any); !ok || th["type"] != "adaptive" {
+		t.Fatalf("adaptive thinking expected: %v", out["thinking"])
+	}
+	if oc, ok := out["output_config"].(map[string]any); !ok || oc["effort"] != "low" {
+		t.Fatalf("default effort must be low, got: %v", out["output_config"])
+	}
+	// without adaptive_thinking, no effort from the client stays effort-less
+	out2 := OpenAIReqToAnthropic(req, Options{})
+	if _, ok := out2["thinking"]; ok {
+		t.Fatalf("no thinking expected without adaptive_thinking: %v", out2["thinking"])
+	}
+	// explicit effort keeps the mapping
+	req3 := mustJSON(t, `{"model":"glm-5.3","reasoning_effort":"max","messages":[{"role":"user","content":"hi"}]}`)
+	out3 := OpenAIReqToAnthropic(req3, Options{AdaptiveThinking: true})
+	if oc := out3["output_config"].(map[string]any); oc["effort"] != "max" {
+		t.Fatalf("explicit max effort: %v", out3["output_config"])
+	}
+}
+
+// Anthropic requires 1024 ≤ budget_tokens < max_tokens: small max_tokens must
+// clamp the budget (never emit <1024) or drop thinking when there is no room.
+func TestBudgetTokensFitsMaxTokens(t *testing.T) {
+	// default max_tokens 8192: big effort budget capped under it
+	out := OpenAIReqToAnthropic(mustJSON(t, `{"model":"m","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`), Options{})
+	if b := out["thinking"].(map[string]any)["budget_tokens"]; b != 7168 {
+		t.Fatalf("budget capped under 8192: %v", b)
+	}
+	// small max_tokens: budget clamps to the 1024 floor (1024 < 2048 ✓)
+	out2 := OpenAIReqToAnthropic(mustJSON(t, `{"model":"m","reasoning_effort":"high","max_tokens":2048,"messages":[{"role":"user","content":"hi"}]}`), Options{})
+	if b := out2["thinking"].(map[string]any)["budget_tokens"]; b != 1024 {
+		t.Fatalf("budget floor: %v", b)
+	}
+	// max_tokens ≤ 1024: no valid budget exists — thinking dropped, still valid
+	out3 := OpenAIReqToAnthropic(mustJSON(t, `{"model":"m","reasoning_effort":"high","max_tokens":512,"messages":[{"role":"user","content":"hi"}]}`), Options{})
+	if _, ok := out3["thinking"]; ok {
+		t.Fatalf("thinking must be dropped when max_tokens leaves no room: %v", out3["thinking"])
+	}
+}
+
+// InjectCacheControlAnthropic must mark an anthropic body that lacks markers
+// and leave one that already carries them untouched.
+func TestInjectCacheControlAnthropic(t *testing.T) {
+	req := mustJSON(t, `{"model":"glm-5.3","system":[{"type":"text","text":"s"}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	InjectCacheControlAnthropic(req)
+	sys := req["system"].([]any)
+	if _, ok := sys[0].(map[string]any)["cache_control"]; !ok {
+		t.Fatal("system block not marked")
+	}
+	last := req["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if _, ok := last["cache_control"]; !ok {
+		t.Fatal("last user block not marked")
+	}
+	// existing markers respected
+	req2 := mustJSON(t, `{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}]}`)
+	InjectCacheControlAnthropic(req2)
+	if len(req2["system"].([]any)[0].(map[string]any)) != 3 {
+		t.Fatal("existing marker replaced")
+	}
+}
+
 func TestOpenAIReqToAnthropic(t *testing.T) {
 	req := mustJSON(t, `{
 		"model": "claude-x", "stream": true, "max_tokens": 4096, "temperature": 0.7,

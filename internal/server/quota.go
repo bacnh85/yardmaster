@@ -19,9 +19,12 @@ import (
 )
 
 // QuotaWindow is one rolling usage window. Used/Cap are USD; ResetAt is epoch ms.
+// Unit "pct" marks a percent-of-quota window (z.ai coding-plan credits):
+// Used carries the raw percentage, Cap is 100.
 type QuotaWindow struct {
 	Used     float64 `json:"used"`
 	Cap      float64 `json:"cap"`
+	Unit     string  `json:"unit,omitempty"` // "" = USD; "pct" = percent of window quota
 	Exceeded bool    `json:"exceeded,omitempty"`
 	ResetAt  int64   `json:"reset_at,omitempty"`
 }
@@ -61,6 +64,8 @@ func quotaSource(baseURL string) string {
 		return "commandcode"
 	case "api.deepseek.com":
 		return "deepseek"
+	case "api.z.ai", "zcode.z.ai":
+		return "zai"
 	}
 	return ""
 }
@@ -70,6 +75,7 @@ func quotaSource(baseURL string) string {
 var billingPaths = map[string]string{
 	"commandcode": "/alpha/billing/credits",
 	"deepseek":    "/user/balance",
+	"zai":         "/api/monitor/usage/quota/limit",
 }
 
 // quotaClient fetches usage windows; var so tests can redirect upstream.
@@ -209,6 +215,97 @@ func fetchDeepSeekQuota(ctx context.Context, quotaURL, key string) (*QuotaAccoun
 	}, nil
 }
 
+// zaiQuota mirrors GET https://api.z.ai/api/monitor/usage/quota/limit
+// (undocumented; live-verified 2026-09-21 against a lite-plan account:
+// `data.limits[]` with TOKENS_LIMIT unit=3 (5h) + TIME_LIMIT unit=5 (MCP
+// monthly); AgentDeck #348 also observed a weekly window (unit=6) and wrote
+// the array as `windows` — both spellings are accepted here). Unknown/absent
+// fields stay unknown — never fabricated; PAYG keys have no windows at all.
+type zaiQuotaResp struct {
+	Data struct {
+		Level   string      `json:"level"` // max | pro | lite
+		Limits  []zaiWindow `json:"limits"`
+		Windows []zaiWindow `json:"windows"` // alternate spelling seen in the wild
+	} `json:"data"`
+}
+
+type zaiWindow struct {
+	Type       string          `json:"type"`
+	Unit       int             `json:"unit"`
+	Number     int             `json:"number"`
+	Percentage float64         `json:"percentage"`
+	NextReset  int64           `json:"nextResetTime"` // epoch ms
+	Usage      json.RawMessage `json:"usage"`         // object {percentage} on some windows, bare number on others
+}
+
+// usagePct extracts the usage percentage from either shape.
+func (w zaiWindow) usagePct() float64 {
+	var obj struct {
+		Percentage float64 `json:"percentage"`
+	}
+	if err := json.Unmarshal(w.Usage, &obj); err == nil && obj.Percentage != 0 {
+		return obj.Percentage
+	}
+	var num float64
+	if err := json.Unmarshal(w.Usage, &num); err == nil {
+		return num
+	}
+	return 0
+}
+
+func (r zaiQuotaResp) windows() []zaiWindow {
+	if len(r.Data.Limits) > 0 {
+		return r.Data.Limits
+	}
+	return r.Data.Windows
+}
+
+// fetchZaiQuota reads the coding-plan usage windows for one z.ai key. The
+// monitor endpoint is served on api.z.ai only (ultra-route providers included).
+func fetchZaiQuota(ctx context.Context, quotaURL, key string) (*QuotaAccount, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, quotaURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", key) // raw key; Bearer also accepted upstream
+	resp, err := quotaClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var body zaiQuotaResp
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	acct := &QuotaAccount{}
+	for _, w := range body.windows() {
+		pct := w.Percentage
+		if pct == 0 {
+			pct = w.usagePct()
+		}
+		if pct <= 0 && w.NextReset == 0 {
+			continue // no real window content
+		}
+		win := &QuotaWindow{Used: pct, Cap: 100, Unit: "pct", Exceeded: pct >= 100, ResetAt: w.NextReset}
+		switch w.Unit {
+		case 3:
+			if acct.FiveHour == nil {
+				acct.FiveHour = win
+			}
+		case 6:
+			if acct.Weekly == nil {
+				acct.Weekly = win
+			}
+		} // unit 5 (MCP monthly) intentionally ignored
+	}
+	return acct, nil // PAYG key: no windows — empty account, never a fake 0%
+}
+
 const quotaTTL = 60 * time.Second
 
 var (
@@ -302,6 +399,9 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 			continue
 		}
 		origin := u.Scheme + "://" + u.Host + billingPaths[src]
+		if src == "zai" {
+			origin = "https://api.z.ai" + billingPaths["zai"] // monitor endpoint lives on api.z.ai, even for ultra-route providers
+		}
 		for i, key := range p.Auth.Keys {
 			if g.fetched[key] {
 				continue
@@ -312,6 +412,8 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 			switch src {
 			case "deepseek":
 				acct, err = fetchDeepSeekQuota(context.Background(), origin, key)
+			case "zai":
+				acct, err = fetchZaiQuota(context.Background(), origin, key)
 			default:
 				acct, err = fetchCommandCodeQuota(context.Background(), origin, key)
 			}

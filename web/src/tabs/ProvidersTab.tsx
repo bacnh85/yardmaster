@@ -10,11 +10,14 @@ interface ProviderForm {
   keys: string; session: string; rotation: string;
   dispatch_interval_ms: number;
   adaptive_thinking: boolean; inject_cache_control: boolean;
+  zcode_signing: boolean;
+  extra_headers: string; body_overrides: string; // JSON text ("" = none)
 }
 
 export const EMPTY_FORM: ProviderForm = {
   name: "", wire: "openai", base_url: "", models: "", prefix: "", keys: "", session: "", rotation: "",
   dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
+  zcode_signing: false, extra_headers: "", body_overrides: "",
 };
 
 const urlValid = (s: string) => {
@@ -29,7 +32,17 @@ export interface ProviderBody {
   keys?: string[];
   preset?: string; disabled?: boolean;
   dispatch_interval_ms: number; adaptive_thinking: boolean; inject_cache_control: boolean;
+  zcode_signing: boolean;
+  extra_headers?: Record<string, string>; body_overrides?: Record<string, unknown>;
 }
+
+/** JSON-text form fields → objects; blank = omitted (server keeps stored). */
+export const parseJsonField = (s: string): Record<string, unknown> => {
+  if (!s.trim()) return {} as Record<string, unknown>;
+  const v = JSON.parse(s); // throws → save() shows the error
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("must be a JSON object");
+  return v as Record<string, unknown>;
+};
 
 /** Form → API payload. Pure so tests can pin the types the Go server expects. */
 export const providerBody = (form: ProviderForm): ProviderBody => ({
@@ -42,6 +55,24 @@ export const providerBody = (form: ProviderForm): ProviderBody => ({
   dispatch_interval_ms: Number(form.dispatch_interval_ms) || 0, // type=number inputs yield strings; Go rejects string→int
   adaptive_thinking: form.adaptive_thinking,
   inject_cache_control: form.inject_cache_control,
+  zcode_signing: form.zcode_signing,
+  ...(Object.keys(parseJsonField(form.extra_headers)).length ? { extra_headers: parseJsonField(form.extra_headers) as Record<string, string> } : {}),
+  ...(Object.keys(parseJsonField(form.body_overrides)).length ? { body_overrides: parseJsonField(form.body_overrides) } : {}),
+});
+
+/** Row → full PUT body for provider actions (model visibility, expose-all,
+ *  rotation). Round-trips EVERY editable field — the server treats omitted
+ *  advanced fields as keep-stored, but sending the stored values explicitly
+ *  keeps intentional flips propagating and stale partials from diverging. */
+export const providerUpdateBody = (p: ProviderRow, models: string[]): ProviderBody => ({
+  name: p.name, wire: p.wire, base_url: p.base_url, models,
+  prefix: p.prefix ?? "", session: p.session ?? "", rotation: p.rotation ?? "",
+  preset: p.preset, disabled: p.disabled,
+  dispatch_interval_ms: p.dispatch_interval_ms,
+  adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
+  zcode_signing: p.zcode_signing ?? false,
+  ...(p.extra_headers ? { extra_headers: p.extra_headers } : {}),
+  ...(p.body_overrides ? { body_overrides: p.body_overrides } : {}),
 });
 
 /** GET provider row → edit-form prefill (custom providers). Session round-trips:
@@ -55,6 +86,9 @@ export const rowToForm = (p: ProviderRow): ProviderForm => ({
   rotation: p.rotation ?? "",
   dispatch_interval_ms: p.dispatch_interval_ms,
   adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
+  zcode_signing: p.zcode_signing ?? false,
+  extra_headers: p.extra_headers ? JSON.stringify(p.extra_headers, null, 2) : "",
+  body_overrides: p.body_overrides ? JSON.stringify(p.body_overrides, null, 2) : "",
 });
 
 // -1 = unknown pricing (models.dev has no per-token cost) — never shown as "free"
@@ -286,7 +320,22 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
               <label>options</label>
               <label className="checkbox"><input type="checkbox" checked={form.adaptive_thinking} onChange={set("adaptive_thinking")} /> adaptive thinking</label>
               <label className="checkbox"><input type="checkbox" checked={form.inject_cache_control} onChange={set("inject_cache_control")} /> inject cache control</label>
+              {form.wire === "anthropic" && (
+                <label className="checkbox"><input type="checkbox" checked={form.zcode_signing} onChange={set("zcode_signing")} /> zcode signing (z.ai)</label>
+              )}
             </div>
+            {form.wire === "anthropic" && (
+              <>
+                <div className="field">
+                  <label htmlFor="pf-xheaders">extra headers (JSON, optional)</label>
+                  <input id="pf-xheaders" value={form.extra_headers} onChange={set("extra_headers")} placeholder='{"anthropic-beta": "fast-mode-2026-02-01"}' />
+                </div>
+                <div className="field">
+                  <label htmlFor="pf-bodyovr">body overrides (JSON, optional)</label>
+                  <input id="pf-bodyovr" value={form.body_overrides} onChange={set("body_overrides")} placeholder='{"speed": "fast"}' />
+                </div>
+              </>
+            )}
           </div>
           {err && <div className="form-error">{err}</div>}
           <div className="row" style={{ marginTop: 12 }}>
@@ -452,6 +501,8 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
             name: entry.name, wire: entry.wire, base_url: entry.base_url,
             models: [], session: entry.session ?? "", preset: r.id, prefix: r.prefix,
             dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
+            zcode_signing: false,
+            ...entry.defaults, // preset tricks (zai: cache injection, fast mode, zcode signing)
             keys: [key.trim()],
             ...(stored ? { keyLabels: [stored] } : {}),
           });
@@ -479,16 +530,10 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     reload();
   };
 
-  /** Key rotation override for one provider entry; omitted fields are preserved server-side. */
+  /** Key rotation override for one provider entry; the rest round-trips. */
   const setRotation = async (p: ProviderRow, rotation: string) => {
     try {
-      await put(`providers/${encodeURIComponent(p.name)}`, {
-        name: p.name, wire: p.wire, base_url: p.base_url, models: p.models,
-        prefix: p.prefix ?? "", session: p.session ?? "", rotation,
-        preset: p.preset, disabled: p.disabled,
-        dispatch_interval_ms: p.dispatch_interval_ms,
-        adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
-      });
+      await put(`providers/${encodeURIComponent(p.name)}`, { ...providerUpdateBody(p, p.models), rotation });
       reload();
       toast(`${p.name} key rotation: ${rotation || "inherit (global default)"}`);
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
@@ -533,12 +578,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
       next = sub.models.includes(m.id) ? sub.models.filter((x) => x !== m.id) : [...sub.models, m.id];
     }
     try {
-      await put(`providers/${encodeURIComponent(sub.name)}`, {
-        name: sub.name, wire: sub.wire, base_url: sub.base_url, models: next,
-        prefix: sub.prefix ?? "", session: sub.session ?? "", preset: sub.preset, disabled: sub.disabled,
-        dispatch_interval_ms: sub.dispatch_interval_ms,
-        adaptive_thinking: sub.adaptive_thinking, inject_cache_control: sub.inject_cache_control,
-      });
+      await put(`providers/${encodeURIComponent(sub.name)}`, providerUpdateBody(sub, next));
       reload();
       toast(`${prefixedId(r.prefix, m.id)} ${wildcard || sub.models.includes(m.id) ? "hidden" : "visible"}`);
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
@@ -557,12 +597,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   };
   const doServe = async (m: CatalogModel, sub: ProviderRow, models: string[], family: string) => {
     try {
-      await put(`providers/${encodeURIComponent(sub.name)}`, {
-        name: sub.name, wire: sub.wire, base_url: sub.base_url, models,
-        prefix: sub.prefix ?? "", session: sub.session ?? "", preset: sub.preset, disabled: sub.disabled,
-        dispatch_interval_ms: sub.dispatch_interval_ms,
-        adaptive_thinking: sub.adaptive_thinking, inject_cache_control: sub.inject_cache_control,
-      });
+      await put(`providers/${encodeURIComponent(sub.name)}`, providerUpdateBody(sub, models));
       reload();
       toast(`${prefixedId(r.prefix, m.id)} exposed on ${family}`);
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
@@ -594,12 +629,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     if (ids.length === 0) { toast(`no ${e.family} models${planFilter !== "all" ? ` on ${planFilter}` : ""}`, "err"); return; }
     const next = Array.from(new Set([...sub.models, ...ids]));
     try {
-      await put(`providers/${encodeURIComponent(sub.name)}`, {
-        name: sub.name, wire: sub.wire, base_url: sub.base_url, models: next,
-        prefix: sub.prefix ?? "", session: sub.session ?? "", preset: sub.preset, disabled: sub.disabled,
-        dispatch_interval_ms: sub.dispatch_interval_ms,
-        adaptive_thinking: sub.adaptive_thinking, inject_cache_control: sub.inject_cache_control,
-      });
+      await put(`providers/${encodeURIComponent(sub.name)}`, providerUpdateBody(sub, next));
       reload();
       toast(`${ids.length} ${e.family} models exposed${r.prefix ? ` as ${r.prefix}/<model>` : ""}`);
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }

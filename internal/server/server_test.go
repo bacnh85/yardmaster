@@ -677,7 +677,7 @@ func TestCatalogEmptyShortTTL(t *testing.T) {
 	if !ok {
 		t.Fatal("no cache entry")
 	}
-	if until := e.(catalogEntry).until; until.After(time.Now().Add(3*time.Minute)) {
+	if until := e.(catalogEntry).until; until.After(time.Now().Add(3 * time.Minute)) {
 		t.Fatalf("empty catalog cached too long: %v", until)
 	}
 }

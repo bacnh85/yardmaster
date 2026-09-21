@@ -46,6 +46,7 @@ type Provider struct {
 	BodyOverrides      map[string]any    `yaml:"body_overrides"`
 	AdaptiveThinking   bool              `yaml:"adaptive_thinking"`    // zai-style thinking:{type:adaptive}+output_config.effort
 	InjectCacheControl bool              `yaml:"inject_cache_control"` // add ephemeral markers when translating to anthropic wire
+	ZcodeSigning       bool              `yaml:"zcode_signing"`        // zai: ZCode desktop parity (identity headers + Client-Signing V4)
 	HeadersTimeoutS    int               `yaml:"headers_timeout_s"`    // max wait for upstream response headers (default 300)
 	Rotation           string            `yaml:"rotation"`             // first (default) | round_robin — starting key/account per request
 }
@@ -138,17 +139,22 @@ var DefaultCosts = map[string]*Cost{
 	"deepseek-v4-flash":            {Input: 0.30, Output: 1.20, CacheRead: 0.006},
 	"deepseek-v4-flash-vision-exp": {Input: 0.30, Output: 1.20, CacheRead: 0.006},
 	"deepseek-v4-pro":              {Input: 1.32, Output: 3.96, CacheRead: 0.044},
-	"glm-5.3":                      {Input: 1.00, Output: 3.20, CacheRead: 0.10},
-	"glm-5.3-flash":                {Input: 0.30, Output: 1.00, CacheRead: 0.03},
-	"glm-5.2":                      {Input: 0.60, Output: 2.20, CacheRead: 0.06},
-	"claude-sonnet-5":              {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
-	"claude-opus-5":                {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},
-	"claude-haiku-4.5":             {Input: 1.00, Output: 5.00, CacheRead: 0.10},
-	"gpt-5.5":                      {Input: 1.25, Output: 10.00, CacheRead: 0.12},
-	"kimi-k3":                      {Input: 0.60, Output: 2.50, CacheRead: 0.06},
-	"minimax-m3":                   {Input: 0.30, Output: 1.20, CacheRead: 0.03},
-	"qwen3.7-max":                  {Input: 0.60, Output: 2.40, CacheRead: 0.06},
-	"grok-4.5":                     {Input: 3.00, Output: 15.00, CacheRead: 0.30},
+	// GLM (Z.ai pay-as-you-go rates, Sep 2026). GLM Coding Plan traffic is
+	// flat-rate credits — these only drive dashboard estimates. glm-5.2
+	// auto-routes to 5.3 upstream at the same rate; flashx is served by
+	// CommandCode, not the coding plan.
+	"glm-5.3":          {Input: 1.40, Output: 4.40, CacheRead: 0.26},
+	"glm-5.3-flash":    {Input: 0.075, Output: 0.25, CacheRead: 0.015},
+	"glm-5.3-flashx":   {Input: 0.37, Output: 1.25, CacheRead: 0.075},
+	"glm-5.2":          {Input: 1.40, Output: 4.40, CacheRead: 0.26},
+	"claude-sonnet-5":  {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
+	"claude-opus-5":    {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},
+	"claude-haiku-4.5": {Input: 1.00, Output: 5.00, CacheRead: 0.10},
+	"gpt-5.5":          {Input: 1.25, Output: 10.00, CacheRead: 0.12},
+	"kimi-k3":          {Input: 0.60, Output: 2.50, CacheRead: 0.06},
+	"minimax-m3":       {Input: 0.30, Output: 1.20, CacheRead: 0.03},
+	"qwen3.7-max":      {Input: 0.60, Output: 2.40, CacheRead: 0.06},
+	"grok-4.5":         {Input: 3.00, Output: 15.00, CacheRead: 0.30},
 }
 
 func Load(path string) (*Config, error) {

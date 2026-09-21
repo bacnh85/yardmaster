@@ -290,6 +290,54 @@ func TestDispatchThrottleSpacing(t *testing.T) {
 	}
 }
 
+// TestAnthropicPassthroughCacheInjection: same-wire anthropic client → zai-style
+// anthropic upstream with inject_cache_control must reach the upstream WITH
+// ephemeral markers — the cross-wire translate never runs on this path, so
+// before the fix the subscription multiplier silently didn't apply.
+func TestAnthropicPassthroughCacheInjection(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Errorf("path: %s", r.URL.Path)
+		}
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		sys, ok := req["system"].([]any)
+		if !ok {
+			t.Fatalf("system must be blocks: %v", req["system"])
+		}
+		blk := sys[0].(map[string]any)
+		if _, ok := blk["cache_control"]; !ok {
+			t.Fatalf("cache_control missing on passthrough: %v", blk)
+		}
+		if req["speed"] != "fast" {
+			t.Fatalf("body override on passthrough: %v", req["speed"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"m","type":"message","role":"assistant","model":"glm-5.3","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "zai", BaseURL: up.URL, Wire: "anthropic", Models: []string{"glm-5.3"},
+			InjectCacheControl: true,
+			BodyOverrides:      map[string]any{"speed": "fast"},
+			Auth:               config.AuthConf{Keys: []string{"k"}}}}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeMessages))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(
+		`{"model":"glm-5.3","max_tokens":64,"system":[{"type":"text","text":"be terse"}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, b)
+	}
+}
+
 // TestAnthropicClientToOpenAIUpstream: full cross-wire stream.
 func TestAnthropicClientToOpenAIUpstream(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

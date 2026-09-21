@@ -40,7 +40,7 @@ var (
 	modelsDevMu    sync.Mutex
 	modelsDevData  map[string]modelsDevProvider
 	modelsDevUntil time.Time
-		modelsDevFlat  map[string]modelsDevModel // canon id → meta across ALL providers
+	modelsDevFlat  map[string]modelsDevModel // canon id → meta across ALL providers
 )
 
 type modelsDevModel struct {

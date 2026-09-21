@@ -316,6 +316,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				"rotation":          p.Rotation,
 				"auth_type":         p.Auth.Type,
 				"adaptive_thinking": p.AdaptiveThinking, "inject_cache_control": p.InjectCacheControl,
+				"zcode_signing": p.ZcodeSigning,
+				"extra_headers": p.ExtraHeaders, "body_overrides": p.BodyOverrides,
 				"connections": conns,
 				"accounts":    oauthAccountStates(p, s.Proxy.Pool),
 			})
@@ -520,11 +522,39 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					} else {
 						p.Disabled = *f.Disabled // registry toggle sends it explicitly
 					}
+					if f.ExtraHeaders != nil {
+						p.ExtraHeaders = f.ExtraHeaders // form can express these now
+					} else {
+						p.ExtraHeaders = x.ExtraHeaders // omitted keeps stored
+					}
+					if f.BodyOverrides != nil {
+						p.BodyOverrides = f.BodyOverrides
+					} else {
+						p.BodyOverrides = x.BodyOverrides
+					}
+					if f.DispatchIntervalMS != nil {
+						p.DispatchIntervalMS = *f.DispatchIntervalMS
+					} else {
+						p.DispatchIntervalMS = x.DispatchIntervalMS
+					}
+					if f.AdaptiveThinking != nil {
+						p.AdaptiveThinking = *f.AdaptiveThinking
+					} else {
+						p.AdaptiveThinking = x.AdaptiveThinking
+					}
+					if f.InjectCacheControl != nil {
+						p.InjectCacheControl = *f.InjectCacheControl
+					} else {
+						p.InjectCacheControl = x.InjectCacheControl
+					}
+					if f.ZcodeSigning != nil {
+						p.ZcodeSigning = *f.ZcodeSigning
+					} else {
+						p.ZcodeSigning = x.ZcodeSigning
+					}
 					p.Auth.Type = x.Auth.Type // form is static-only; never downgrade oauth
 					p.Auth.OAuth = x.Auth.OAuth
 					p.ModelMap = x.ModelMap
-					p.ExtraHeaders = x.ExtraHeaders
-					p.BodyOverrides = x.BodyOverrides
 					p.HeadersTimeoutS = x.HeadersTimeoutS
 					c.Providers[i] = p
 					return nil
@@ -592,6 +622,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				"dispatch_interval_ms": p.DispatchIntervalMS,
 				"adaptive_thinking":    p.AdaptiveThinking,
 				"inject_cache_control": p.InjectCacheControl,
+				"zcode_signing":        p.ZcodeSigning,
 			})
 		}
 		writeJSON(map[string]any{
@@ -684,20 +715,31 @@ func (s *Server) mutate(w http.ResponseWriter, fn func(*config.Config) error) bo
 
 // providerForm is the dashboard-editable subset of a provider.
 type providerForm struct {
-	Name               string   `json:"name"`
-	Wire               string   `json:"wire"`
-	BaseURL            string   `json:"base_url"`
-	Models             []string `json:"models"`
-	Keys               []string `json:"keys"`
-	KeyLabels          []string `json:"keyLabels"`
-	Prefix             *string  `json:"prefix"`   // nil = omitted (keep stored); "" = none; else routing prefix
-	Session            *string  `json:"session"`  // nil = omitted (keep stored); "" = none; "opencode" = session headers
-	Rotation           *string  `json:"rotation"` // nil = omitted (keep stored); first | round_robin
-	Preset             string   `json:"preset"`
-	Disabled           *bool    `json:"disabled"` // nil = omitted (keep stored)
-	DispatchIntervalMS int      `json:"dispatch_interval_ms"`
-	AdaptiveThinking   bool     `json:"adaptive_thinking"`
-	InjectCacheControl bool     `json:"inject_cache_control"`
+	Name               string            `json:"name"`
+	Wire               string            `json:"wire"`
+	BaseURL            string            `json:"base_url"`
+	Models             []string          `json:"models"`
+	Keys               []string          `json:"keys"`
+	KeyLabels          []string          `json:"keyLabels"`
+	Prefix             *string           `json:"prefix"`   // nil = omitted (keep stored); "" = none; else routing prefix
+	Session            *string           `json:"session"`  // nil = omitted (keep stored); "" = none; "opencode" = session headers
+	Rotation           *string           `json:"rotation"` // nil = omitted (keep stored); first | round_robin
+	Preset             string            `json:"preset"`
+	Disabled           *bool             `json:"disabled"`             // nil = omitted (keep stored)
+	DispatchIntervalMS *int              `json:"dispatch_interval_ms"` // nil = omitted (keep stored)
+	AdaptiveThinking   *bool             `json:"adaptive_thinking"`    // nil = omitted (keep stored)
+	InjectCacheControl *bool             `json:"inject_cache_control"` // nil = omitted (keep stored)
+	ZcodeSigning       *bool             `json:"zcode_signing"`        // nil = omitted (keep stored)
+	ExtraHeaders       map[string]string `json:"extra_headers"`        // nil = omitted (keep stored on update)
+	BodyOverrides      map[string]any    `json:"body_overrides"`       // nil = omitted (keep stored on update)
+}
+
+func derefBool(p *bool) bool { return p != nil && *p }
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 func (f providerForm) provider() (*config.Provider, error) {
@@ -744,9 +786,12 @@ func (f providerForm) provider() (*config.Provider, error) {
 		Preset:             f.Preset,
 		Rotation:           rotation,
 		Disabled:           disabled,
-		DispatchIntervalMS: f.DispatchIntervalMS,
-		AdaptiveThinking:   f.AdaptiveThinking,
-		InjectCacheControl: f.InjectCacheControl,
+		DispatchIntervalMS: derefInt(f.DispatchIntervalMS),
+		AdaptiveThinking:   derefBool(f.AdaptiveThinking),
+		InjectCacheControl: derefBool(f.InjectCacheControl),
+		ZcodeSigning:       derefBool(f.ZcodeSigning),
+		ExtraHeaders:       f.ExtraHeaders,
+		BodyOverrides:      f.BodyOverrides,
 	}, nil
 }
 

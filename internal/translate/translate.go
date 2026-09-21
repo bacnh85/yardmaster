@@ -103,13 +103,15 @@ func OpenAIReqToAnthropic(req map[string]any, opts Options) map[string]any {
 		"model":  req["model"],
 		"stream": req["stream"] == true,
 	}
+	var maxTok int
 	if mt := asInt(req["max_tokens"]); mt > 0 {
-		out["max_tokens"] = mt
+		maxTok = mt
 	} else if mt := asInt(req["max_completion_tokens"]); mt > 0 {
-		out["max_tokens"] = mt
+		maxTok = mt
 	} else {
-		out["max_tokens"] = 8192
+		maxTok = 8192
 	}
+	out["max_tokens"] = maxTok
 	if v, ok := req["temperature"]; ok {
 		out["temperature"] = v
 	}
@@ -125,14 +127,29 @@ func OpenAIReqToAnthropic(req map[string]any, opts Options) map[string]any {
 		}
 	}
 
-	// reasoning effort
+	// reasoning effort. zai's GLM-5.x always reasons and its server default is
+	// effort=max (the priciest credit tier: output ×24), so a client that sends
+	// no effort (thinking off) still gets adaptive+low instead of inheriting max.
 	if effort := asString(req["reasoning_effort"]); effort != "" {
 		if opts.AdaptiveThinking {
 			out["thinking"] = map[string]any{"type": "adaptive"}
 			out["output_config"] = map[string]any{"effort": mapEffort(effort)}
-		} else {
-			out["thinking"] = map[string]any{"type": "enabled", "budget_tokens": effortBudget(effort)}
+		} else if maxTok > 1024 {
+			// Anthropic requires 1024 ≤ budget_tokens < max_tokens: cap under
+			// max_tokens but never below 1024; with max_tokens ≤ 1024 there is
+			// no valid budget — drop thinking entirely
+			budget := effortBudget(effort)
+			if budget > maxTok-1024 {
+				budget = maxTok - 1024
+			}
+			if budget < 1024 {
+				budget = 1024
+			}
+			out["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
 		}
+	} else if opts.AdaptiveThinking {
+		out["thinking"] = map[string]any{"type": "adaptive"}
+		out["output_config"] = map[string]any{"effort": "low"}
 	}
 
 	// system
@@ -363,6 +380,12 @@ func toolChoiceToAnthropic(tc any) map[string]any {
 	}
 	return nil
 }
+
+// InjectCacheControlAnthropic adds ephemeral cache markers to an anthropic
+// request body (system / tools / last user message) that doesn't already carry
+// any. Used for same-wire anthropic passthrough when the provider sets
+// inject_cache_control (the Z.ai / Claude subscription multiplier).
+func InjectCacheControlAnthropic(out map[string]any) { injectCacheControl(out) }
 
 func injectCacheControl(out map[string]any) {
 	mark := func(blocks []any) {

@@ -25,6 +25,7 @@ import (
 	"github.com/bacnh85/yardmaster/internal/provider"
 	"github.com/bacnh85/yardmaster/internal/store"
 	"github.com/bacnh85/yardmaster/internal/translate"
+	"github.com/bacnh85/yardmaster/internal/zcode"
 )
 
 const (
@@ -45,6 +46,9 @@ type Proxy struct {
 	Active   Active
 	inflight atomic.Int64
 	total    atomic.Int64
+
+	zc     *zcode.Manager // zai zcode_signing parity (lazy — see zcodeManager)
+	zcOnce sync.Once
 }
 
 // NewProxy builds the proxy with a tuned shared transport.
@@ -387,6 +391,11 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 						req[k] = v
 					}
 				}
+				// same-wire anthropic passthrough (e.g. Claude Code → zai): the
+				// cross-wire translate never runs, so inject cache markers here
+				if pv.Wire == WireAnthropic && opts.InjectCacheControl {
+					translate.InjectCacheControlAnthropic(req)
+				}
 				bodyOut, _ = json.Marshal(req)
 			}
 		} else {
@@ -470,8 +479,16 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 		httpReq.Header.Set("x-opencode-session", sid)
 		httpReq.Header.Set("x-opencode-client", "yardmaster")
 	}
-	// helpful attribution headers
+	// helpful attribution headers (zcode signing, below, replaces the UA)
 	httpReq.Header.Set("User-Agent", "github.com/bacnh85/yardmaster/"+p.Version)
+	if pv.ZcodeSigning {
+		zc := p.zcodeManager()
+		for k, v := range zc.Identity.Headers() {
+			httpReq.Header.Set(k, v) // ZCode identity (incl. its User-Agent) wins
+		}
+		httpReq.Header.Set("X-Session-Id", p.opencodeSession("zcode:"+pv.Name+":"+tgt.APIKey))
+		zc.Sign(ctx, httpReq) // fail-open: unsigned on any ineligible/failed path
+	}
 	return httpReq, nil
 }
 
@@ -576,6 +593,15 @@ var hopHeaders = []string{
 }
 
 // do sends the request with a headers timeout; streaming bodies are not bounded.
+func (p *Proxy) zcodeManager() *zcode.Manager {
+	p.zcOnce.Do(func() {
+		m := zcode.NewManager(zcode.DefaultIdentity(), nil)
+		m.Logf = func(msg string) { log.Printf("[zcode] %s", strings.TrimPrefix(msg, "client-signing: ")) }
+		p.zc = m
+	})
+	return p.zc
+}
+
 func (p *Proxy) do(tgt *provider.Target, req *http.Request) (*http.Response, error) {
 	ctx := req.Context()
 	ctx, cancel := context.WithCancel(ctx)
@@ -590,6 +616,9 @@ func (p *Proxy) do(tgt *provider.Target, req *http.Request) (*http.Response, err
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+	if tgt.Provider.ZcodeSigning {
+		p.zcodeManager().NoteStatus(tgt.APIKey, resp.StatusCode) // 401 ladder, scoped to this credential
 	}
 	// keep cancel alive for the body pump: store in resp via Unwrap? Simplest:
 	// attach to resp.Body via a wrapper that cancels on Close.

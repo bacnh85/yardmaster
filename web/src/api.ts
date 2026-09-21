@@ -51,6 +51,9 @@ export interface ProviderRow {
   preset: string; disabled: boolean;
   dispatch_interval_ms: number; auth_type: string;
   adaptive_thinking: boolean; inject_cache_control: boolean;
+  zcode_signing?: boolean; // absent from older servers → prefill degrades to false
+  extra_headers?: Record<string, string> | null;
+  body_overrides?: Record<string, unknown> | null;
   connections: { label: string; suffix: string }[];
   accounts: { name: string; kind: string; disabled: boolean; expires_at: number; state?: string; last_error?: string }[];
 }
@@ -100,7 +103,7 @@ export const fmtResetIn = (resetAtMs: number | null | undefined) => {
   return rh ? `${d}d ${rh}h` : `${d}d`;
 };
 
-export interface QuotaWindow { used: number; cap: number; exceeded?: boolean; reset_at?: number }
+export interface QuotaWindow { used: number; cap: number; unit?: string; exceeded?: boolean; reset_at?: number }
 export interface QuotaAccount {
   label: string; suffix: string;
   five_hour?: QuotaWindow; weekly?: QuotaWindow;

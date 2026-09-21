@@ -14,14 +14,14 @@ export const monthlyWindow = (a: QuotaAccount): QuotaWindow | undefined =>
     ? { used: Math.max(0, a.monthly_total - a.monthly_credits), cap: a.monthly_total }
     : undefined;
 
-const SOURCE_LABEL: Record<string, string> = { commandcode: "Command Code", deepseek: "DeepSeek" };
+const SOURCE_LABEL: Record<string, string> = { commandcode: "Command Code", deepseek: "DeepSeek", zai: "Z.AI GLM Coding Plan" };
 
 /** Client mirror of the server matcher (internal/server/quota.go quotaSource).
  *  host (not hostname) keeps the port in play, matching Go's url.Host compare. */
 export const isQuotaProvider = (base_url: string) => {
   try {
     const h = new URL(base_url).host.toLowerCase();
-    return h === "api.commandcode.ai" || h === "api.deepseek.com";
+    return h === "api.commandcode.ai" || h === "api.deepseek.com" || h === "api.z.ai" || h === "zcode.z.ai";
   } catch { return false; }
 };
 
@@ -34,14 +34,14 @@ function Bar({ p }: { p: number }) {
   );
 }
 
-/** One usage window cell: bar + $used/$cap + reset countdown. */
+/** One usage window cell: bar + $used/$cap (or % for credit windows) + reset countdown. */
 const WindowCell = ({ w }: { w?: QuotaWindow }) => {
   if (!w) return <span className="faint">—</span>;
   return (
     <div className="quota-cell">
       <Bar p={pct(w)} />
       <span className="quota-meta">
-        <span className="num">{fmtUSD(w.used)} / {fmtUSD(w.cap)}</span>
+        <span className="num">{w.unit === "pct" ? `${Math.round(w.used)}%` : <>{fmtUSD(w.used)} / {fmtUSD(w.cap)}</>}</span>
         {w.reset_at ? <span className="faint">resets in {fmtResetIn(w.reset_at)}</span> : null}
       </span>
     </div>
@@ -98,7 +98,7 @@ export function QuotaTab() {
       {error && <ErrorBanner msg={error} onRetry={reload} />}
       {loading && quotas.length === 0 && <div className="faint" style={{ padding: 8 }}>loading…</div>}
       {!loading && quotas.length === 0 && !error && (
-        <Empty>no providers expose usage yet — connect Command Code or DeepSeek under Providers</Empty>
+        <Empty>no providers expose usage yet — connect Command Code, DeepSeek or Z.AI under Providers</Empty>
       )}
       {quotas.map((g) => (
         <div className="card" key={g.source} style={{ marginBottom: 16 }}>

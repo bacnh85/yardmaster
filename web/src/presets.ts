@@ -7,6 +7,7 @@ export interface RegistryEntry {
   session?: string;
   family: string;    // chat | anthropic | responses — which catalog models this entry serves
   familyLabel: string;
+  defaults?: Record<string, unknown>; // merged into the create POST (provider tricks: cache injection, fast mode, …)
 }
 
 export interface RegistryProvider {
@@ -40,9 +41,21 @@ export const REGISTRY: RegistryProvider[] = [
   },
   {
     id: "zai", title: "Z.AI (GLM Coding Plan)", code: "ZAI", prefix: "zai",
-    desc: "GLM models over the Anthropic wire with cache-control injection and dispatch spacing",
+    desc: "GLM-5.3 / GLM-5.3-Flash via the Anthropic wire — cache-control injection, fast mode, ZCode signing (0.67 campaign coefficient), 5h/weekly credit windows",
     entries: [
-      { name: "zai", wire: "anthropic", base_url: "https://api.z.ai/api/anthropic", family: "anthropic", familyLabel: "GLM" },
+      {
+        name: "zai", wire: "anthropic", base_url: "https://api.z.ai/api/anthropic", family: "anthropic", familyLabel: "GLM",
+        // the coding-plan quota levers, applied on one-click create
+        defaults: {
+          models: ["glm-5.3", "glm-5.3-flash"],
+          dispatch_interval_ms: 1000,           // zai 429/1302 request-rate protection
+          adaptive_thinking: true,              // thinking:{type:adaptive} + output_config.effort
+          inject_cache_control: true,           // ephemeral markers: cached input costs 1.7 vs 6.9 credits/10k
+          zcode_signing: true,                  // ZCode parity (Client-Signing V4); fail-open when gate off
+          extra_headers: { "anthropic-beta": "fast-mode-2026-02-01" },
+          body_overrides: { speed: "fast" },    // fast serving tier (63 vs 39 tok/s live)
+        },
+      },
     ],
   },
   {

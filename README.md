@@ -84,7 +84,6 @@ providers:
   - name: zai
     base_url: https://api.z.ai/api/anthropic
     wire: anthropic
-    session: opencode            # opencode-style session headers (opencode-go)
     auth: { type: static, keys: ["..."] }
     models: [glm-5.3, glm-5.3-flash]
     dispatch_interval_ms: 1000   # per-key spacing (Z.ai 429/1302)
@@ -92,6 +91,7 @@ providers:
     inject_cache_control: true   # ephemeral markers on system/tools/last msg
     extra_headers: { anthropic-beta: "fast-mode-2026-02-01" }
     body_overrides: { speed: fast }
+    zcode_signing: true          # ZCode desktop parity (Client-Signing V4, fail-open)
 
 routes:
   - match: "glm-*"

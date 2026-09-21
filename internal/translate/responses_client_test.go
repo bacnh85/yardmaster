@@ -17,14 +17,14 @@ func evm(t *testing.T, v any) map[string]any {
 
 func TestResponsesReqToChat(t *testing.T) {
 	req := map[string]any{
-		"model":             "gpt-5.5",
-		"max_output_tokens": 1024.0,
-		"temperature":       0.7,
-		"stream":            true,
-		"store":             false,
+		"model":                "gpt-5.5",
+		"max_output_tokens":    1024.0,
+		"temperature":          0.7,
+		"stream":               true,
+		"store":                false,
 		"previous_response_id": "resp_old",
-		"instructions":      "be terse",
-		"reasoning":         map[string]any{"effort": "high"},
+		"instructions":         "be terse",
+		"reasoning":            map[string]any{"effort": "high"},
 		"input": []any{
 			evm(t, map[string]any{"type": "message", "role": "user",
 				"content": []any{map[string]any{"type": "input_text", "text": "hi"}}}),

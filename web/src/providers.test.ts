@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_FORM, providerBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels } from "./tabs/ProvidersTab";
+import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels } from "./tabs/ProvidersTab";
 import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan } from "./presets";
 import type { ProviderRow } from "./api";
 
@@ -39,6 +39,63 @@ describe("providerBody", () => {
     const p: Partial<ProviderRow> = { prefix: "ocg" };
     expect(providerBody(rowToForm({ ...baseRow, ...p })).prefix).toBe("ocg");
     expect(providerBody(rowToForm(baseRow)).prefix).toBe("");
+  });
+  it("round-trips zcode signing + header/body overrides on edit", () => {
+    const row: ProviderRow = { ...baseRow, wire: "anthropic", zcode_signing: true,
+      extra_headers: { "anthropic-beta": "fast-mode-2026-02-01" }, body_overrides: { speed: "fast" } };
+    const f = rowToForm(row);
+    expect(f.zcode_signing).toBe(true);
+    const body = providerBody(f);
+    expect(body.zcode_signing).toBe(true);
+    expect(body.extra_headers).toEqual({ "anthropic-beta": "fast-mode-2026-02-01" });
+    expect(body.body_overrides).toEqual({ speed: "fast" });
+    // blank JSON fields are omitted → server keeps stored
+    const blank = providerBody(rowToForm(baseRow));
+    expect(blank.zcode_signing).toBe(false);
+    expect(blank.extra_headers).toBeUndefined();
+    expect(blank.body_overrides).toBeUndefined();
+  });
+  it("rejects non-object JSON in override fields (save() surfaces the error)", () => {
+    expect(() => providerBody({ ...EMPTY_FORM, extra_headers: "[1,2]" })).toThrow();
+    expect(() => providerBody({ ...EMPTY_FORM, body_overrides: "not json" })).toThrow();
+  });
+});
+
+describe("providerUpdateBody (row actions)", () => {
+  it("round-trips every advanced field incl. zcode_signing — row actions must never drop the tricks", () => {
+    const row: ProviderRow = { ...baseRow, wire: "anthropic", zcode_signing: true,
+      adaptive_thinking: true, inject_cache_control: true, dispatch_interval_ms: 1000,
+      extra_headers: { "anthropic-beta": "fast-mode-2026-02-01" }, body_overrides: { speed: "fast" } };
+    const body = providerUpdateBody(row, ["glm-5.3"]);
+    expect(body.zcode_signing).toBe(true);
+    expect(body.adaptive_thinking).toBe(true);
+    expect(body.inject_cache_control).toBe(true);
+    expect(body.dispatch_interval_ms).toBe(1000);
+    expect(body.extra_headers).toEqual({ "anthropic-beta": "fast-mode-2026-02-01" });
+    expect(body.body_overrides).toEqual({ speed: "fast" });
+    expect(body.models).toEqual(["glm-5.3"]);
+  });
+});
+
+describe("zai preset defaults", () => {
+  it("the zai entry ships the coding-plan quota levers as create defaults", () => {
+    const zai = REGISTRY.find((r) => r.id === "zai");
+    expect(zai?.entries).toHaveLength(1);
+    const d = zai?.entries[0].defaults as Record<string, unknown>;
+    expect(d.models).toEqual(["glm-5.3", "glm-5.3-flash"]);
+    expect(d.dispatch_interval_ms).toBe(1000);
+    expect(d.adaptive_thinking).toBe(true);
+    expect(d.inject_cache_control).toBe(true);
+    expect(d.zcode_signing).toBe(true);
+    expect(d.extra_headers).toEqual({ "anthropic-beta": "fast-mode-2026-02-01" });
+    expect(d.body_overrides).toEqual({ speed: "fast" });
+  });
+  it("only zai carries defaults — other presets create bare providers", () => {
+    for (const r of REGISTRY.filter((r) => r.id !== "zai")) {
+      for (const e of r.entries) {
+        expect(e.defaults).toBeUndefined();
+      }
+    }
   });
 });
 
