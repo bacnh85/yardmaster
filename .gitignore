@@ -11,6 +11,8 @@ web/dist/*
 /yardmaster
 /bin/
 .agents/plans/
+docs/*
+!docs/routing.md
 .zcode/
 .pi/
 .private/
