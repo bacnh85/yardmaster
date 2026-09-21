@@ -19,3 +19,4 @@ export const IconSun = (p: P) => <S {...p}><circle cx="12" cy="12" r="4" /><path
 export const IconMoon = (p: P) => <S {...p}><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" /></S>;
 export const IconX = (p: P) => <S {...p}><path d="M18 6 6 18M6 6l12 12" /></S>;
 export const IconPlus = (p: P) => <S {...p}><path d="M12 5v14M5 12h14" /></S>;
+export const IconPlay = (p: P) => <S {...p}><polygon points="6 4 20 12 6 20 6 4" /></S>;

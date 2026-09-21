@@ -40,6 +40,14 @@ a { color: var(--accent); }
 button { font: inherit; cursor: pointer; }
 button:disabled { opacity: 0.4; cursor: default; }
 
+/* micro-interactions: color-only transitions (no layout motion) */
+button, tr.clickable td, input, select, textarea {
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
 /* small layout utilities */
 .row { display: flex; align-items: center; gap: 8px; }
 .row.wrap { flex-wrap: wrap; gap: 16px; }
@@ -97,9 +105,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .livedot.on { background: var(--ok); animation: pulse 2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) {
-  .livedot.on { animation: none; }
-}
+.live-head { display: flex; align-items: center; gap: 10px; }
+.live-head .value { font-size: 25px; font-weight: 600; }
 
 /* provider registry cards */
 .provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
@@ -112,7 +119,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: 13px;
 }
 
-main { max-width: 1100px; padding: 24px 32px; overflow-x: clip; }
+main { padding: 24px 32px; overflow-x: clip; } /* fluid: fill the browser width (DESIGN.md layout) */
 main > * + * { margin-top: 12px; }
 .grid > * { min-width: 0; }  /* prevent grid blowout from wide children */
 .chart, .uplot, .uplot canvas, table { max-width: 100%; }
@@ -156,26 +163,35 @@ main > * + * { margin-top: 12px; }
 table { width: 100%; border-collapse: collapse; }
 th {
   text-align: left; font-size: 13px; font-weight: 600; color: var(--ink);
-  background: var(--surface2); padding: 8px 12px;
+  background: var(--surface2); padding: 8px 10px;
   position: sticky; top: 0; z-index: 1;
 }
 th.n, td.n { text-align: right; font-variant-numeric: tabular-nums; }
-td { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+td { padding: 8px 10px; border-bottom: 1px solid var(--line); }
 tr:hover td { background: var(--surface2); }
 table td { white-space: nowrap; } /* data tables: no mid-token wraps; .table-wrap scrolls instead */
 td .err { color: var(--danger); font-size: 12px; }
-td .err.mono { display: inline-block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+td .err.mono { display: inline-block; max-width: 120px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 th.sortable:hover { color: var(--ink); }
 .sort-ind { display: inline-block; margin-left: 4px; font-size: 9px; opacity: 0.9; }
 tr.clickable { cursor: pointer; }
 
-/* quota: usage-window bars */
-.quota-bar { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; width: 110px; }
+/* responsive tables: progressive column disclosure, not horizontal scroll */
+@media (max-width: 1200px) { .col-lg { display: none; } }
+@media (max-width: 900px) { .col-md { display: none; } }
+
+/* quota: usage-window bars. table-layout fixed + proportional widths keep the
+   5-hour/weekly/monthly columns aligned across every provider card. */
+table.quota-t { table-layout: fixed; }
+table.quota-t th:nth-child(1), table.quota-t td:nth-child(1) { width: 34%; }
+table.quota-t th:nth-child(n+2), table.quota-t td:nth-child(n+2) { width: 22%; }
+table.quota-t td { white-space: normal; } /* fixed cols are narrower than account labels at mobile — wrap, never overlap */
+.quota-bar { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; width: 110px; max-width: 100%; }
 .quota-fill { height: 100%; background: var(--accent); }
 .quota-fill.warn { background: var(--warn); }
 .quota-fill.danger { background: var(--danger); }
-.quota-cell { display: flex; flex-direction: column; gap: 3px; min-width: 130px; }
+.quota-cell { display: flex; flex-direction: column; gap: 3px; }
 .quota-meta { display: flex; flex-direction: column; font-size: 12px; }
 
 table.kv { width: auto; min-width: 320px; }
@@ -190,6 +206,10 @@ table.kv td { border-bottom: 1px solid var(--line); padding: 6px 0; }
 }
 
 /* badges */
+.sr-only { /* visually hidden, still announced — title tooltips are invisible to touch + AT */
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 .badge {
   display: inline-block; padding: 2px 8px; border-radius: 999px;
   font-size: 12px; font-weight: 500;
@@ -216,6 +236,15 @@ table.kv td { border-bottom: 1px solid var(--line); padding: 6px 0; }
   padding: 6px; color: var(--muted); display: inline-flex;
 }
 .icon-btn:hover { background: var(--surface2); color: var(--ink); }
+
+/* segmented control + filter toolbar */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.seg > button { appearance: none; border: none; background: var(--surface); color: var(--muted); padding: 4px 10px; font-size: 13px; }
+.seg > button + button { border-inline-start: 1px solid var(--line); }
+.seg > button:hover { background: var(--surface2); color: var(--ink); }
+.seg > button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.toolbar input.grow { flex: 1 1 120px; max-width: 200px; }
 
 /* forms */
 input, select, textarea {
@@ -268,7 +297,6 @@ th.sortable:focus-visible, tr.clickable:focus-visible {
   animation: shimmer 1.4s ease infinite;
 }
 @keyframes shimmer { to { background-position: -100% 0; } }
-@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
 
 .error-banner {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -313,7 +341,6 @@ th.sortable:focus-visible, tr.clickable:focus-visible {
 }
 .toast.err { background: var(--danger); color: var(--bg); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(4px); } }
-@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
 
 .empty { color: var(--faint); padding: 24px; text-align: center; }
 .muted { color: var(--muted); }

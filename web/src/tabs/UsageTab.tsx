@@ -82,9 +82,9 @@ function BreakTable({ rows }: { rows: BreakdownRow[] }) {
           {th("errors", "errors", true)}
           {th("tok_in", "tok in", true)}
           {th("tok_out", "tok out", true)}
-          {th("cache_read", "cache rd", true)}
+          {th("cache_read", "cache rd", true, "col-md")}
           {th("cost", "cost", true)}
-          {th("ttft_p50_ms", "ttft p50", true)}
+          {th("ttft_p50_ms", "ttft p50", true, "col-lg")}
         </tr></thead>
         <tbody>
           {sorted.map((r) => (
@@ -94,9 +94,9 @@ function BreakTable({ rows }: { rows: BreakdownRow[] }) {
               <td className="n">{r.errors > 0 ? <span className="err">{fmtN(r.errors)}</span> : 0}</td>
               <td className="n">{fmtN(r.tok_in)}</td>
               <td className="n">{fmtN(r.tok_out)}</td>
-              <td className="n">{fmtN(r.cache_read)}</td>
+              <td className="n col-md">{fmtN(r.cache_read)}</td>
               <td className="n">{fmtUSD(r.cost)}</td>
-              <td className="n">{fmtMs(r.ttft_p50_ms)}</td>
+              <td className="n col-lg">{fmtMs(r.ttft_p50_ms)}</td>
             </tr>
           ))}
         </tbody>

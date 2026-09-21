@@ -32,6 +32,7 @@ elevation:
   md: 0 4px 12px rgb(28 25 23 / 0.10)  # popover/live panel
 motion:
   live-dot: pulse 2s            # the ONLY looping animation
+  micro: background/border-color .12s ease on interactive elements
   reduced-motion: disable pulse
 ```
 
@@ -43,9 +44,12 @@ One accent (teal) carries brand + chart primary; status colors carry meaning onl
 
 ## Layout
 
-- Header: product name left, live inflight counter + reload right. Sticky.
-- Tab bar under header: Live, Usage, Latency, Requests, Keys, Providers, Settings.
-- Content: max-width 1100px, 24px gutters.
+- Sidebar nav (sticky): brand; groups Proxy (Live, Usage, Quota, Latency, Requests),
+  Access (Endpoints, Providers), System (Settings); theme toggle + version in the footer.
+  Collapses to icons below 800px.
+- Content: fluid — fills the browser width, no max-width; 24px/32px gutters (16px below 600px).
+- Tables: progressive column disclosure — `.col-lg` hides <1200px, `.col-md` hides <900px;
+  identity + status columns always stay visible. Horizontal scroll is the last resort.
 - Cards: `surface` bg, `sm` elevation, `md` radius, 16px padding. Section titles 16/600.
 
 ## Components
@@ -59,6 +63,11 @@ One accent (teal) carries brand + chart primary; status colors carry meaning onl
 - **Button**: primary = accent bg/white text; secondary = surface + `line` border;
   focus-visible: 2px accent outline offset 2; disabled: 40% opacity.
 - **Input**: surface bg, `line` border, `sm` radius; error state: danger border + message.
+- **Segmented control** (`.seg`): connected buttons; `accent-soft` bg + accent text for
+  `aria-pressed="true"`. Filter toolbars use it instead of stacks of primary buttons.
+- **Connection/account row**: identity is the stored label (`"<CODE> <label>"`) ONLY —
+  the masked key suffix is a hover tooltip (`title`), never visible text. Destructive
+  actions (remove connection / API key / provider) always confirm via modal.
 
 ## States (contract)
 
@@ -70,6 +79,8 @@ All motion respects `prefers-reduced-motion` (pulse → static).
 
 - DO use tabular-nums for every number wider than 3 digits.
 - DO right-align numerics in tables; left-align labels.
+- DO show key/account identity by label only; suffix on hover.
+- DO drop secondary table columns on narrow screens (`.col-md`/`.col-lg`) before scrolling.
 - DON'T color whole rows by status — color the status cell only.
 - DON'T introduce a second accent, gradients, or dark theme.
 - DON'T shadow-stack: cards get `sm`, nothing else gets a shadow.

@@ -51,15 +51,12 @@ export function LiveTab() {
       {!live && connected && <Empty>waiting for data…</Empty>}
       {live && (
         <>
-          <div className="grid stats">
-            <div className="card stat">
-              <div className="label">Active streams</div>
-              <div className="value num">
-                <span className={`livedot ${live.inflight > 0 ? "on" : ""}`} />
-                {fmtN(live.inflight)}
-              </div>
-              <div className="sub">{fmtN(live.total)} requests since start</div>
-            </div>
+          <div className="card live-head">
+            <span className={`livedot ${live.inflight > 0 ? "on" : ""}`} aria-hidden />
+            <span className="value num">{fmtN(live.inflight)}</span>
+            <span className="muted">in flight</span>
+            <span className="spacer" />
+            <span className="faint">{fmtN(live.total)} requests since start</span>
           </div>
           <div className="card" style={{ padding: 0 }}>
             <h3 className="card-pad">In flight</h3>

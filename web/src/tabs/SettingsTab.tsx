@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { get, put, RouteRow } from "../api";
 import { ErrorBanner, PageHead, Skeleton, toast } from "../components";
+import { IconX } from "../icons";
 
 interface Cfg {
   listen: string; db_path: string; providers?: unknown[]; routes?: RouteRow[];
@@ -172,8 +173,8 @@ export function SettingsTab() {
                         ) : <span className="faint">—</span>}
                       </td>
                       <td>
-                        <button className="icon-btn" aria-label={`remove route ${r.match || i + 1}`}
-                          onClick={() => setRoutes((rs) => rs && rs.filter((_, j) => j !== i))}>✕</button>
+                        <button className="icon-btn" aria-label={`remove route ${r.match || i + 1}`} title="remove route"
+                          onClick={() => setRoutes((rs) => rs && rs.filter((_, j) => j !== i))}><IconX size={14} /></button>
                       </td>
                     </tr>
                   ))}

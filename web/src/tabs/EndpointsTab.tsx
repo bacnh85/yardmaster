@@ -150,14 +150,22 @@ export function EndpointsTab() {
       {showAdd && (
         <Modal title="Add API key" onClose={closeAdd}>
           <form onSubmit={addKey} style={{ display: "grid", gap: 12 }}>
-            <input placeholder="API key name" value={name} required autoFocus
-              onChange={(e) => setName(e.target.value)} aria-label="API key name" />
-            <input placeholder="allowed models, e.g. glm-* or * (optional)" value={allow}
-              onChange={(e) => setAllow(e.target.value)} aria-label="allowed models" />
-            <label className="row" style={{ gap: 8, alignItems: "center" }}>
-              <input type="checkbox" checked={allowUsage} onChange={(e) => setAllowUsage(e.target.checked)} />
-              allow usage reporting (GET /v1/usage)
-            </label>
+            <div className="form-grid">
+              <div className="field full">
+                <label htmlFor="ak-name">name</label>
+                <input id="ak-name" placeholder="e.g. pi-tui" value={name} required autoFocus
+                  onChange={(e) => setName(e.target.value)} />
+              </div>
+              <div className="field full">
+                <label htmlFor="ak-allow">allowed models</label>
+                <input id="ak-allow" placeholder="glm-* or * (optional)" value={allow}
+                  onChange={(e) => setAllow(e.target.value)} />
+                <div className="field-hint">comma-separated globs; empty = all models</div>
+              </div>
+              <div className="field full">
+                <label className="checkbox"><input type="checkbox" checked={allowUsage} onChange={(e) => setAllowUsage(e.target.checked)} /> allow usage reporting (GET /v1/usage)</label>
+              </div>
+            </div>
             {err && <div className="form-error">{err}</div>}
             <div className="row end">
               <button type="button" className="btn" onClick={closeAdd}>Cancel</button>

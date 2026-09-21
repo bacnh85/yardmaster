@@ -49,11 +49,16 @@ const WindowCell = ({ w }: { w?: QuotaWindow }) => {
 };
 
 /** Accounts table for one quota group — shared by the Quota tab and the
- *  Command Code provider detail page. */
+ *  Command Code provider detail page. The masked key suffix is hover-tooltip
+ *  plus sr-only text; labels duplicated within the group also show it visibly
+ *  (touch has no tooltips — duplicates must stay distinguishable). */
 export function QuotaTable({ accounts }: { accounts: QuotaAccount[] }) {
+  const dupLabels = new Set(
+    accounts.filter((a, i) => accounts.some((b, j) => i !== j && b.label === a.label)).map((a) => a.label),
+  );
   return (
     <div className="table-wrap">
-      <table>
+      <table className="quota-t">
         <thead><tr>
           <th>account</th>
           <th>5-hour</th>
@@ -64,7 +69,11 @@ export function QuotaTable({ accounts }: { accounts: QuotaAccount[] }) {
           {accounts.map((a, i) => (
             <tr key={`${i}-${a.label}-${a.suffix}`}>
               <td>
-                {a.label} <span className="mono faint">{a.suffix}</span>
+                <span title={`key …${a.suffix}`}>
+                  {a.label}
+                  {dupLabels.has(a.label) && <span className="mono faint"> …{a.suffix}</span>}
+                  <span className="sr-only"> key …{a.suffix}</span>
+                </span>
                 {a.limited && <span className="badge warn" title="provider reports this account as rate-limited">limited</span>}
                 {a.err && <div className="field-err">{a.err}</div>}
               </td>

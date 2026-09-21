@@ -49,9 +49,9 @@ export function useSorted<T extends object>(rows: T[], initialKey: keyof T, init
   const sorted = useMemo(() => {
     return [...rows].sort((a, b) => cmpVals(a[key], b[key], dir));
   }, [rows, key, dir]);
-  const th = (k: keyof T, label: string, num = false) => (
+  const th = (k: keyof T, label: string, num = false, cls = "") => (
     <th
-      className={num ? "n sortable" : "sortable"}
+      className={`${num ? "n " : ""}sortable${cls ? ` ${cls}` : ""}`}
       aria-sort={key === k ? (dir === 1 ? "ascending" : "descending") : "none"}
       tabIndex={0}
       onClick={() => sort(k)}

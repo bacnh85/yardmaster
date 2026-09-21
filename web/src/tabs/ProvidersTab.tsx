@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult, QuotaGroup, CooldownRow } from "../api";
 import { useApi, usePoll } from "../hooks";
-import { Confirm, Empty, ErrorBanner, Modal, PageHead, toast } from "../components";
+import { Confirm, Empty, ErrorBanner, Modal, PageHead, Skeleton, toast } from "../components";
+import { IconPlay, IconX } from "../icons";
 import { QuotaTable, isQuotaProvider } from "./QuotaTab";
 import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPlan, CmdPlan } from "../presets";
 
@@ -208,7 +209,19 @@ function ProviderList({ provs, error, loading, reload, onOpenDetail, cooling }: 
 
       <h3 style={{ margin: "24px 0 8px" }}>Custom providers</h3>
       <CustomProviders provs={custom} reload={reload} cooling={cooling} />
-      {loading && provs.length === 0 && <div className="faint" style={{ padding: 12 }}>loading…</div>}
+      {loading && provs.length === 0 && (
+        <div className="provider-grid">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="card">
+              <Skeleton h={36} w={36} />
+              <div style={{ height: 12 }} />
+              <Skeleton h={14} w="60%" />
+              <div style={{ height: 6 }} />
+              <Skeleton h={12} w="85%" />
+            </div>
+          ))}
+        </div>
+      )}
     </>
   );
 }
@@ -458,6 +471,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   };
   const [filter, setFilter] = useState("");
   const [serveWildcard, setServeWildcard] = useState<null | { m: CatalogModel; sub: ProviderRow }>(null);
+  const [removing, setRemoving] = useState<ConnRow | null>(null);
 
   const catalogSource = group.find((p) => !p.disabled) || group[0];
 
@@ -683,12 +697,15 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
           const rowKey = row.targets.map((t) => `${t.p.name}:${t.idx}`).join("|"); // unique even with duplicate suffixes
           return (
             <div key={rowKey} className="provider-meta" style={{ borderTop: "1px solid var(--line)", padding: "8px 0" }}>
-              <span>{row.label || "key"}</span>
-              <span className="mono faint">{row.suffix}</span>
+              <span title={`key …${row.suffix}`}>
+                {row.label || "key"}
+                <span className="sr-only"> key …{row.suffix}</span>
+              </span>
               {row.targets.every((t) => t.p.disabled) && <span className="badge warn">disabled</span>}
+              <span className="spacer" />
               <button className="btn sm" onClick={() => retest(target)} disabled={target.models.length === 0}>retest</button>
-              <button className="icon-btn" aria-label={`remove connection ${row.label}`} style={{ padding: "0 2px" }}
-                onClick={() => removeConnection(row)}>✕</button>
+              <button className="icon-btn" aria-label={`remove connection ${row.label || row.suffix}`} title="remove"
+                onClick={() => setRemoving(row)}><IconX size={14} /></button>
             </div>
           );
         })}
@@ -733,31 +750,36 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
       <div className="card" style={{ marginTop: 16 }}>
         <div className="row spread baseline">
           <h3>Available Models</h3>
-          <div className="row">
-            {catalog && !catalog.loading && !catalog.err && (
-              <>
-                {r.plans && (["all", "goat", "pro", "max"] as const).map((f) => (
-                  <button key={`plan-${f}`} className={`btn sm ${planFilter === f ? "primary" : ""}`}
+          <button className="btn sm primary" onClick={fetchCatalog} disabled={!catalogSource || catalog?.loading}>
+            {catalog?.loading ? "fetching…" : catalog ? "refresh" : "load catalog"}
+          </button>
+        </div>
+        {catalog && !catalog.loading && !catalog.err && (
+          <div className="toolbar">
+            {r.plans && (
+              <div className="seg" role="group" aria-label="plan tier filter">
+                {(["all", "goat", "pro", "max"] as const).map((f) => (
+                  <button key={`plan-${f}`} aria-pressed={planFilter === f}
                     title={`show only ${f === "all" ? "every" : f + "-plan"} models`}
                     onClick={() => pickPlan(f)}>{f === "all" ? "all plans" : f}</button>
                 ))}
-                {(["all", "exposed", "free", "paid"] as const).map((f) => (
-                  <button key={f} className={`btn sm ${familyFilter === f ? "primary" : ""}`} onClick={() => setFamilyFilter(f)}>{f}</button>
-                ))}
-                <input aria-label="filter models" placeholder="filter…" value={filter} onChange={(e) => setFilter(e.target.value)} style={{ width: 140 }} />
-                {r.entries.filter((e) => e.family !== "gemini").map((e) => (
-                  <button key={e.name} className="btn sm" title={`expose every ${e.familyLabel} model on ${e.name}`}
-                    onClick={() => exposeAll(e)}>
-                    expose all {e.family}
-                  </button>
-                ))}
-              </>
+              </div>
             )}
-            <button className="btn sm primary" onClick={fetchCatalog} disabled={!catalogSource || catalog?.loading}>
-              {catalog?.loading ? "fetching…" : catalog ? "refresh" : "load catalog"}
-            </button>
+            <div className="seg" role="group" aria-label="visibility filter">
+              {(["all", "exposed", "free", "paid"] as const).map((f) => (
+                <button key={f} aria-pressed={familyFilter === f} onClick={() => setFamilyFilter(f)}>{f}</button>
+              ))}
+            </div>
+            <input className="grow" aria-label="filter models" placeholder="filter…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+            <span className="spacer" />
+            {r.entries.filter((e) => e.family !== "gemini").map((e) => (
+              <button key={e.name} className="btn sm" title={`expose every ${e.familyLabel} model on ${e.name}`}
+                onClick={() => exposeAll(e)}>
+                expose all {e.family}
+              </button>
+            ))}
           </div>
-        </div>
+        )}
         {catalog && !catalog.loading && !catalog.err && catalogSource && (
           <div className="faint" style={{ padding: "4px 0" }}>
             source: <span className="mono">{catalogSource.base_url}/models</span> · {catalog.models.length} models · {group.reduce((n, p) => n + p.models.length, 0)} exposed
@@ -773,9 +795,9 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                 <table>
                   <thead>
                     <tr>
-                      <th>visible</th><th>model</th><th>family</th>
-                      <th className="num">context</th><th className="num">max out</th>
-                      <th className="num">$ in</th><th className="num">$ out</th><th className="num">$ cache r/w</th>
+                      <th>visible</th><th>model</th><th className="col-lg">family</th>
+                      <th className="num">context</th><th className="num col-md">max out</th>
+                      <th className="num">$ in</th><th className="num">$ out</th><th className="num col-md">$ cache r/w</th>
                       <th>test</th>
                     </tr>
                   </thead>
@@ -791,7 +813,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                               : <input type="checkbox" aria-label={`toggle ${prefixedId(r.prefix, m.id)}`} checked={isVisible(m)} onChange={() => toggleVisible(m)} />}
                           </td>
                           <td className="mono">{prefixedId(r.prefix, m.id)}</td>
-                          <td>
+                          <td className="col-lg">
                             {m.family === "gemini"
                               ? <span className="badge muted" title="gemini-native wire is not served yet">gemini</span>
                               : familyFor(group, m)
@@ -808,14 +830,15 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                             {r.plans && <span className="badge muted" title={cmdPlan(m.id) ? `${cmdPlan(m.id)} plan` : "new model — plan tier not yet classified"}>{cmdPlan(m.id) || "?"}</span>}
                           </td>
                           <td className="num">{m.context ? fmtTok(m.context) : "—"}</td>
-                          <td className="num">{m.max_output ? fmtTok(m.max_output) : "—"}</td>
+                          <td className="num col-md">{m.max_output ? fmtTok(m.max_output) : "—"}</td>
                           <td className="num">{fmtPrice(m.input)}</td>
                           <td className="num">{fmtPrice(m.output)}</td>
-                          <td className="num">{cached ? `${fmtPrice(m.cache_read)} / ${fmtPrice(m.cache_write)}` : "—"}</td>
+                          <td className="num col-md">{cached ? `${fmtPrice(m.cache_read)} / ${fmtPrice(m.cache_write)}` : "—"}</td>
                           <td>
-                            <button className="btn sm" disabled={!entry || test?.busy} title={entry ? `test via ${entry.name}` : "unknown wire — expose the model first"}
+                            <button className="btn sm" disabled={!entry || test?.busy} aria-label={`test ${prefixedId(r.prefix, m.id)}`}
+                              title={entry ? `test via ${entry.name}` : "unknown wire — expose the model first"}
                               onClick={() => testModel(entry, m)}>
-                              ▶
+                              <IconPlay size={12} />
                             </button>
                           </td>
                         </tr>
@@ -837,6 +860,12 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
         )}
         {!catalog && <div className="faint" style={{ padding: 8 }}>load the provider's model catalog to browse, hide/show, and test models.</div>}
       </div>
+
+      {removing && (
+        <Confirm title={`Remove connection "${removing.label || removing.suffix}"?`} danger action="Remove"
+          body={<>Requests stop rotating onto this key on {removing.targets.length === 1 ? "1 wire entry" : `${removing.targets.length} wire entries`}.</>}
+          onDone={(ok) => { const r = removing; setRemoving(null); if (ok) removeConnection(r); }} />
+      )}
 
       {serveWildcard && (
         <Confirm title={`Serve ${prefixedId(r.prefix, serveWildcard.m.id)} on ${serveWildcard.sub.name}?`} action="Serve only this model"

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { renderToString } from "react-dom/server";
 import { fmtResetIn, QuotaWindow, QuotaAccount } from "./api";
-import { pct, monthlyWindow, isQuotaProvider } from "./tabs/QuotaTab";
+import { pct, monthlyWindow, isQuotaProvider, QuotaTable } from "./tabs/QuotaTab";
 
 const mins = (n: number) => Date.now() + n * 60000;
 
@@ -59,5 +60,25 @@ describe("isQuotaProvider", () => {
     ["not a url", false],
   ])("%s -> %s", (url, want) => {
     expect(isQuotaProvider(url)).toBe(want);
+  });
+});
+
+describe("QuotaTable key display", () => {
+  const acct = (label: string, suffix: string): QuotaAccount => ({ label, suffix });
+
+  it("exposes the suffix in every account cell (title + sr-only) so AT/touch keep the disambiguator", () => {
+    const html = renderToString(<QuotaTable accounts={[acct("Key 1", "ab12cd")]} />);
+    expect(html).toContain('title="key …ab12cd"');
+    expect(html).toContain('class="sr-only"');
+  });
+
+  it("shows the suffix VISIBLY only when another account in the group shares the label", () => {
+    const dup = renderToString(<QuotaTable accounts={[acct("Key 1", "ab12cd"), acct("Key 1", "ef34gh")]} />);
+    expect(dup).toContain('title="key …ab12cd"');
+    expect(dup).toContain('title="key …ef34gh"');
+    expect(dup.match(/mono faint/g)?.length).toBe(2); // both duplicate rows get the visible suffix
+
+    const unique = renderToString(<QuotaTable accounts={[acct("Key 1", "ab12cd")]} />);
+    expect(unique).not.toContain("mono faint"); // unique label stays label-only
   });
 });

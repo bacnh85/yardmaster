@@ -34,14 +34,14 @@ export function RequestsTab() {
                 {th("provider", "provider")}
                 {th("key", "key")}
                 {th("status", "status")}
-                <th aria-label="error" />
+                <th aria-label="error" className="col-lg" />
                 {th("ttft_ms", "ttft", true)}
                 {th("dur_ms", "dur", true)}
                 {th("tok_in", "in", true)}
                 {th("tok_out", "out", true)}
-                {th("cache_read", "cache", true)}
-                {th("cost_usd", "cost", true)}
-                {th("attempts", "tries", true)}
+                {th("cache_read", "cache", true, "col-md")}
+                {th("cost_usd", "cost", true, "col-lg")}
+                {th("attempts", "tries", true, "col-md")}
               </tr></thead>
               <tbody>
                 {sorted.map((r) => (
@@ -54,14 +54,14 @@ export function RequestsTab() {
                     <td>{r.provider}</td>
                     <td>{r.key}</td>
                     <td><StatusBadge status={r.status} /></td>
-                    <td><ErrCell err={r.err} /></td>
+                    <td className="col-lg"><ErrCell err={r.err} /></td>
                     <td className="n">{fmtMs(r.ttft_ms)}</td>
                     <td className="n">{fmtDur(r.dur_ms)}</td>
                     <td className="n">{fmtN(r.tok_in)}</td>
                     <td className="n">{fmtN(r.tok_out)}</td>
-                    <td className="n">{fmtN(r.cache_read)}</td>
-                    <td className="n">{fmtUSD(r.cost_usd)}</td>
-                    <td className="n">{r.attempts}</td>
+                    <td className="n col-md">{fmtN(r.cache_read)}</td>
+                    <td className="n col-lg">{fmtUSD(r.cost_usd)}</td>
+                    <td className="n col-md">{r.attempts}</td>
                   </tr>
                 ))}
               </tbody>
