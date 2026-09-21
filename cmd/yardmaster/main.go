@@ -92,6 +92,7 @@ func cmdRun(args []string) {
 	p := proxy.NewProxy(reg, st, cfg.CostFor)
 	p.Pool = pool
 	p.Version = version
+	p.DumpDir = os.Getenv("YARDMASTER_DUMP_DIR")
 	srv := server.New(p, keys, st, *cfgPath, cfg.AdminPassword, version)
 	go srv.WarmCatalogs(context.Background())
 

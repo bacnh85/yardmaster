@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"io"
 	"log"
 	"math/rand"
@@ -42,10 +43,12 @@ type Proxy struct {
 	Cost    func(model string) config.Cost
 	Pool    *auth.OAuthPool
 	Cd      *provider.Cooldowns
+	DumpDir string // debug: write upstream request bodies here (YARDMASTER_DUMP_DIR)
 
 	Active   Active
 	inflight atomic.Int64
 	total    atomic.Int64
+	dumpSeq  atomic.Int64
 
 	zc     *zcode.Manager // zai zcode_signing parity (lazy — see zcodeManager)
 	zcOnce sync.Once
@@ -460,6 +463,11 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyOut))
 	if err != nil {
 		return nil, err
+	}
+	if p.DumpDir != "" { // debug body capture (cache-hit diagnosis)
+		seq := p.dumpSeq.Add(1)
+		name := fmt.Sprintf("%s/%03d-%s-%s.json", p.DumpDir, seq, tgt.Provider.Name, strings.ReplaceAll(upModel, "/", "_"))
+		os.WriteFile(name, bodyOut, 0o600)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream, application/json")
