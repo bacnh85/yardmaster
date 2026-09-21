@@ -52,6 +52,8 @@ describe("isQuotaProvider", () => {
     ["https://api.commandcode.ai/provider/v1", true],
     ["https://API.CommandCode.AI/provider/v1", true],
     ["https://api.commandcode.ai:8443/v1", false], // port present: server quotaSource also rejects (u.Host compare)
+    ["https://api.deepseek.com", true],
+    ["https://api.deepseek.com/anthropic", true],
     ["https://api.example.com/v1", false],
     ["", false],
     ["not a url", false],

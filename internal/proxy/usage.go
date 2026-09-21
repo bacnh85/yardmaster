@@ -119,20 +119,50 @@ func (t *UsageTee) parse(m map[string]any) {
 			if d, ok := u["input_tokens_details"].(map[string]any); ok {
 				t.usage.CacheR = num(d["cached_tokens"])
 			}
+			// input_tokens includes cached tokens — report cache-exclusive so
+			// cost = In*input + CacheR*cache_read doesn't double-count them
+			if t.usage.CacheR > 0 && t.usage.In >= t.usage.CacheR {
+				t.usage.In -= t.usage.CacheR
+			}
 		}
 		return
 	}
 	// openai chunk
 	if u, ok := m["usage"].(map[string]any); ok && u != nil {
-		if v := num(u["prompt_tokens"]); v > 0 {
-			t.usage.In = v
-		}
-		if v := num(u["completion_tokens"]); v > 0 {
-			t.usage.Out = v
-		}
-		t.usage.CacheR = num(u["cache_read_tokens"])
-		t.usage.CacheW = num(u["cache_write_tokens"])
+		applyOpenAIUsage(&t.usage, u)
 	}
+}
+
+// openaiCacheRead reads cache-hit input tokens in the openai-family usage
+// shapes: prompt_tokens_details.cached_tokens (OpenAI, DeepSeek), DeepSeek's
+// legacy flat prompt_cache_hit_tokens, or OpenRouter-style cache_read_tokens.
+func openaiCacheRead(u map[string]any) int {
+	if d, ok := u["prompt_tokens_details"].(map[string]any); ok {
+		if v := num(d["cached_tokens"]); v > 0 {
+			return v
+		}
+	}
+	if v := num(u["prompt_cache_hit_tokens"]); v > 0 {
+		return v
+	}
+	return num(u["cache_read_tokens"])
+}
+
+// applyOpenAIUsage fills usage from an openai chat-chunk usage object.
+func applyOpenAIUsage(usage *Usage, u map[string]any) {
+	if v := num(u["prompt_tokens"]); v > 0 {
+		usage.In = v
+	}
+	if v := num(u["completion_tokens"]); v > 0 {
+		usage.Out = v
+	}
+	usage.CacheR = openaiCacheRead(u)
+	// prompt_tokens includes cached tokens (OpenAI/DeepSeek) — report
+	// cache-exclusive so cost accounting doesn't double-count them
+	if usage.CacheR > 0 && usage.In >= usage.CacheR {
+		usage.In -= usage.CacheR
+	}
+	usage.CacheW = num(u["cache_write_tokens"])
 }
 
 // Usage returns the parsed usage (with estimate fallback) — call after the

@@ -31,9 +31,11 @@ export const REGISTRY: RegistryProvider[] = [
   },
   {
     id: "deepseek", title: "DeepSeek (DS)", code: "DS", prefix: "ds",
-    desc: "DeepSeek API — deepseek-chat / reasoner on the OpenAI wire",
+    desc: "DeepSeek API — deepseek-flash / deepseek-v4-pro, 1M context, all three wires",
     entries: [
       { name: "deepseek", wire: "openai", base_url: "https://api.deepseek.com", family: "chat", familyLabel: "DeepSeek V4" },
+      { name: "deepseek-claude", wire: "anthropic", base_url: "https://api.deepseek.com/anthropic", family: "anthropic", familyLabel: "DeepSeek (Claude wire)" },
+      { name: "deepseek-gpt", wire: "responses", base_url: "https://api.deepseek.com", family: "responses", familyLabel: "DeepSeek (Responses wire)" },
     ],
   },
   {

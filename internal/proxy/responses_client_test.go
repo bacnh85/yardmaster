@@ -108,15 +108,18 @@ func respUpstream(t *testing.T, wire, mode string) *httptest.Server {
 
 func TestResponsesClientAllWires(t *testing.T) {
 	cases := []struct {
-		wire     string
-		stream   bool
-		wantSub  string // substring the client must see
-		wantIn   int
-		wantOut  int
+		wire    string
+		stream  bool
+		wantSub string // substring the client must see
+		wantIn  int
+		wantOut int
 	}{
 		{"openai", true, `output_text.delta`, 11, 2},
 		{"openai", false, "hola-full", 11, 2},
-		{"anthropic", true, `output_text.delta`, 80, 4},
+		// anthropic-stream: upstream input_tokens=50 + cache_read=30; TokIn is
+		// stored cache-exclusive (50) with the 30 in CacheRead — cost no longer
+		// double-counts the cached tokens at full input price
+		{"anthropic", true, `output_text.delta`, 50, 4},
 		{"anthropic", false, "hola-full", 50, 4},
 		{"responses", true, `output_text.delta`, 11, 2},
 		{"responses", false, "hola-full", 11, 2},
@@ -200,4 +203,67 @@ func mustStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { st.Close() })
 	return st
+}
+
+// DeepSeek's responses wire is stateless: previous_response_id/store/
+// stream_options/conversation are unsupported and silently ignored upstream
+// (api-docs.deepseek.com/guides/responses_api). yardmaster's job is to forward
+// them faithfully — responses→responses passthrough re-patches only `model`
+// (+ body_overrides). Pin that contract: stateful params must survive verbatim,
+// and the request must complete even though the upstream ignores them.
+func TestResponsesPassthroughStatefulParams(t *testing.T) {
+	var got map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": "r1", "object": "response", "model": "deepseek-flash", "status": "completed",
+			"output": []any{}, "store": false,
+			"usage": map[string]any{"input_tokens": 3, "output_tokens": 1},
+		})
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "ds", BaseURL: up.URL, Wire: "responses",
+			Models: []string{"ds/deepseek-flash"}, ModelMap: map[string]string{"ds/deepseek-flash": "deepseek-flash"},
+			Auth: config.AuthConf{Keys: []string{"k"}}}}}
+	p := NewProxy(provider.New(cfg), mustStore(t), nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/responses", p.ServeResponses)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := `{"model":"ds/deepseek-flash","input":"hi","store":true,` +
+		`"previous_response_id":"resp_old","conversation":"conv_1",` +
+		`"stream_options":{"include_usage":true}}`
+	resp, err := http.Post(ts.URL+"/v1/responses", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, raw)
+	}
+
+	// model patched to the bare curated id; everything else verbatim
+	if got["model"] != "deepseek-flash" {
+		t.Errorf("upstream model %v, want patched bare id", got["model"])
+	}
+	for k, want := range map[string]any{
+		"previous_response_id": "resp_old", "store": true, "conversation": "conv_1",
+	} {
+		if got[k] != want {
+			t.Errorf("upstream %s = %v, want %v (must pass through untouched)", k, got[k], want)
+		}
+	}
+	if _, ok := got["stream_options"]; !ok {
+		t.Error("upstream stream_options missing (must pass through untouched)")
+	}
 }

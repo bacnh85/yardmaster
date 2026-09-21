@@ -14,12 +14,15 @@ export const monthlyWindow = (a: QuotaAccount): QuotaWindow | undefined =>
     ? { used: Math.max(0, a.monthly_total - a.monthly_credits), cap: a.monthly_total }
     : undefined;
 
-const SOURCE_LABEL: Record<string, string> = { commandcode: "Command Code" };
+const SOURCE_LABEL: Record<string, string> = { commandcode: "Command Code", deepseek: "DeepSeek" };
 
 /** Client mirror of the server matcher (internal/server/quota.go quotaSource).
  *  host (not hostname) keeps the port in play, matching Go's url.Host compare. */
 export const isQuotaProvider = (base_url: string) => {
-  try { return new URL(base_url).host.toLowerCase() === "api.commandcode.ai"; } catch { return false; }
+  try {
+    const h = new URL(base_url).host.toLowerCase();
+    return h === "api.commandcode.ai" || h === "api.deepseek.com";
+  } catch { return false; }
 };
 
 function Bar({ p }: { p: number }) {
@@ -67,11 +70,11 @@ export function QuotaTable({ accounts }: { accounts: QuotaAccount[] }) {
               </td>
               <td><WindowCell w={a.five_hour} /></td>
               <td><WindowCell w={a.weekly} /></td>
-              <td title="monthly allowance · renews on your billing-cycle date (reset date not exposed by the provider API)">
+              <td title="monthly allowance or prepaid balance · reset date not exposed by the provider API">
                 {monthlyWindow(a)
                   ? <WindowCell w={monthlyWindow(a)} />
                   : a.monthly_credits != null
-                    ? <span className="quota-cell"><span className="num">{fmtUSD(a.monthly_credits)} <span className="faint">left</span></span></span>
+                    ? <span className="quota-cell"><span className="num">{fmtUSD(a.monthly_credits, a.currency)} <span className="faint">left</span></span></span>
                     : <span className="faint">—</span>}
               </td>
             </tr>
@@ -95,7 +98,7 @@ export function QuotaTab() {
       {error && <ErrorBanner msg={error} onRetry={reload} />}
       {loading && quotas.length === 0 && <div className="faint" style={{ padding: 8 }}>loading…</div>}
       {!loading && quotas.length === 0 && !error && (
-        <Empty>no providers expose usage windows yet — connect Command Code under Providers</Empty>
+        <Empty>no providers expose usage yet — connect Command Code or DeepSeek under Providers</Empty>
       )}
       {quotas.map((g) => (
         <div className="card" key={g.source} style={{ marginBottom: 16 }}>

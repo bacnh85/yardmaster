@@ -342,6 +342,8 @@ func TestQuotaSourceMatcher(t *testing.T) {
 		"https://api.commandcode.ai/provider/v1": "commandcode",
 		"https://api.commandcode.ai/other/path":  "commandcode",
 		"http://API.commandcode.ai":              "commandcode", // host match is case-insensitive
+		"https://api.deepseek.com":               "deepseek",
+		"https://api.deepseek.com/anthropic":     "deepseek",
 		"https://api.example.com/v1":             "",
 		"not a url":                              "",
 	}
@@ -374,5 +376,106 @@ func TestQuotaFetchError(t *testing.T) {
 	quotaClient = bad.Client()
 	if _, err := fetchCommandCodeQuota(context.Background(), bad.URL, "k"); err == nil {
 		t.Error("want decode error, got nil")
+	}
+}
+
+const dsBalanceJSON = `{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"88.00","granted_balance":"0.00","topped_up_balance":"88.00"},{"currency":"USD","total_balance":"12.34","granted_balance":"2.00","topped_up_balance":"10.34"}]}`
+
+func TestQuotaDeepSeekBalance(t *testing.T) {
+	hits := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user/balance" {
+			t.Errorf("upstream path %s", r.URL.Path)
+		}
+		switch strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		case "ds-good":
+			w.Write([]byte(dsBalanceJSON))
+		default:
+			w.WriteHeader(401)
+			w.Write([]byte("Unauthorized"))
+		}
+	}))
+	defer up.Close()
+	resetQuotaCache(t, &hits, up.URL)
+
+	dbPath := t.TempDir() + "/test.db"
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	dsBase := "https://api.deepseek.com"
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "deepseek", BaseURL: dsBase, Wire: "openai", Preset: "deepseek",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"ds-good", "ds-bad"}, KeyLabels: []string{"Main"}}},
+			{Name: "deepseek-claude", BaseURL: dsBase + "/anthropic", Wire: "anthropic", Preset: "deepseek",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"ds-good"}}},
+		},
+	}
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	reg := provider.New(cfg)
+	p := proxy.NewProxy(reg, st, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, "", "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/admin/api/quota", nil)
+	req.SetBasicAuth("x", "secretpw")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("quota fetch: %d %v", resp.StatusCode, err)
+	}
+	var out struct {
+		Quotas []ProviderQuota `json:"quotas"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, b)
+	}
+	if len(out.Quotas) != 1 || out.Quotas[0].Source != "deepseek" {
+		t.Fatalf("quotas: %+v", out.Quotas)
+	}
+	g := out.Quotas[0]
+	if len(g.Providers) != 2 || g.Providers[0] != "deepseek" || g.Providers[1] != "deepseek-claude" {
+		t.Errorf("providers %v", g.Providers)
+	}
+	if len(g.Accounts) != 2 {
+		t.Fatalf("want 2 accounts (ds-good deduped across wires), got %d: %s", len(g.Accounts), b)
+	}
+	a := g.Accounts[0]
+	if a.Label != "Main" || a.MonthlyCredits == nil || *a.MonthlyCredits != 12.34 {
+		t.Errorf("account: label=%q credits=%v want Main/12.34", a.Label, a.MonthlyCredits)
+	}
+	if a.Currency != "USD" || a.Limited {
+		t.Errorf("currency=%q limited=%v, want USD/false (CNY entry must not win)", a.Currency, a.Limited)
+	}
+	if g.Accounts[1].Err == "" || !strings.Contains(g.Accounts[1].Err, "401") {
+		t.Errorf("bad-key account err %q, want HTTP 401", g.Accounts[1].Err)
+	}
+	// hits counts upstream fetches (redirectRT): 2 distinct keys, ds-good
+	// deduped across the two wire entries; a second call must serve from cache
+	if hits != 2 {
+		t.Errorf("upstream fetches %d, want 2 (dedup)", hits)
+	}
+	req2, _ := http.NewRequest("GET", ts.URL+"/admin/api/quota", nil)
+	req2.SetBasicAuth("x", "secretpw")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if hits != 2 {
+		t.Errorf("cache miss: fetches %d, want 2", hits)
 	}
 }

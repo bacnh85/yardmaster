@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +32,8 @@ type QuotaAccount struct {
 	Suffix         string       `json:"suffix"`
 	FiveHour       *QuotaWindow `json:"five_hour,omitempty"`
 	Weekly         *QuotaWindow `json:"weekly,omitempty"`
-	MonthlyCredits *float64     `json:"monthly_credits,omitempty"` // USD remaining
+	MonthlyCredits *float64     `json:"monthly_credits,omitempty"` // USD remaining, or balance per Currency
+	Currency       string       `json:"currency,omitempty"`        // balance currency when not USD (e.g. DeepSeek CNY accounts)
 	MonthlyTotal   float64      `json:"monthly_total,omitempty"`   // plan allowance; 0 = unknown plan
 	Limited        bool         `json:"limited,omitempty"`
 	Err            string       `json:"err,omitempty"`
@@ -50,14 +52,25 @@ type ProviderQuota struct {
 // quotaSource reports which billing API a provider uses ("" = none). Matched
 // by upstream host so custom providers pointing at the same gateway count too.
 func quotaSource(baseURL string) string {
-	if u, err := url.Parse(baseURL); err == nil && strings.EqualFold(u.Host, "api.commandcode.ai") {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	switch strings.ToLower(u.Host) {
+	case "api.commandcode.ai":
 		return "commandcode"
+	case "api.deepseek.com":
+		return "deepseek"
 	}
 	return ""
 }
 
-// billingPath is appended to the provider origin to reach its usage endpoint.
-const billingPath = "/alpha/billing/credits"
+// billingPaths map a quota source to its usage endpoint, appended to the
+// provider origin.
+var billingPaths = map[string]string{
+	"commandcode": "/alpha/billing/credits",
+	"deepseek":    "/user/balance",
+}
 
 // quotaClient fetches usage windows; var so tests can redirect upstream.
 var quotaClient = &http.Client{Timeout: 7 * time.Second}
@@ -141,6 +154,59 @@ func fetchCommandCodeQuota(ctx context.Context, quotaURL, key string) (*QuotaAcc
 		acct.MonthlyTotal = ccMonthlyTotal(acct.FiveHour.Cap, acct.Weekly.Cap)
 	}
 	return acct, nil
+}
+
+// fetchDeepSeekQuota reads the prepaid balance for one DeepSeek API key via
+// GET /user/balance (https://api-docs.deepseek.com/api/get-user-balance/).
+// DeepSeek exposes no usage windows — only the remaining balance (string
+// amounts, USD or CNY).
+type dsBalance struct {
+	IsAvailable  bool `json:"is_available"`
+	BalanceInfos []struct {
+		Currency     string `json:"currency"`
+		TotalBalance string `json:"total_balance"`
+	} `json:"balance_infos"`
+}
+
+func fetchDeepSeekQuota(ctx context.Context, quotaURL, key string) (*QuotaAccount, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, quotaURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := quotaClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var body dsBalance
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	if len(body.BalanceInfos) == 0 {
+		return nil, fmt.Errorf("no balance entries")
+	}
+	info := body.BalanceInfos[0]
+	for _, b := range body.BalanceInfos {
+		if b.Currency == "USD" {
+			info = b
+			break
+		}
+	}
+	total, err := strconv.ParseFloat(strings.TrimSpace(info.TotalBalance), 64)
+	if err != nil {
+		return nil, fmt.Errorf("balance %q: %w", info.TotalBalance, err)
+	}
+	return &QuotaAccount{
+		MonthlyCredits: &total,
+		Currency:       info.Currency,
+		Limited:        !body.IsAvailable,
+	}, nil
 }
 
 const quotaTTL = 60 * time.Second
@@ -235,13 +301,20 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 		if err != nil || u.Host == "" {
 			continue
 		}
-		origin := u.Scheme + "://" + u.Host + billingPath
+		origin := u.Scheme + "://" + u.Host + billingPaths[src]
 		for i, key := range p.Auth.Keys {
 			if g.fetched[key] {
 				continue
 			}
 			g.fetched[key] = true
-			acct, err := fetchCommandCodeQuota(context.Background(), origin, key)
+			var acct *QuotaAccount
+			var err error
+			switch src {
+			case "deepseek":
+				acct, err = fetchDeepSeekQuota(context.Background(), origin, key)
+			default:
+				acct, err = fetchCommandCodeQuota(context.Background(), origin, key)
+			}
 			if acct == nil {
 				acct = &QuotaAccount{}
 			}

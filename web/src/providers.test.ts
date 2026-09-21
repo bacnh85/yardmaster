@@ -94,6 +94,13 @@ describe("registry", () => {
     expect(cc.entries).toHaveLength(2);
     expect(new Set(cc.entries.map((e) => e.base_url)).size).toBe(1);
     expect(cc.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat"]);
+    // DeepSeek serves all three wires from one API key (docs 2026-09-21):
+    // /chat/completions, /anthropic/v1/messages, /responses — one entry per family
+    const ds = REGISTRY.find((r) => r.id === "deepseek")!;
+    expect(ds.entries).toHaveLength(3);
+    expect(ds.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat", "responses"]);
+    expect(new Set(ds.entries.map((e) => e.base_url)).size).toBe(2); // /anthropic base differs
+    expect(ds.entries.find((e) => e.wire === "anthropic")!.base_url).toBe("https://api.deepseek.com/anthropic");
   });
 
   it("classifies CommandCode models per plan (live catalog ids)", () => {
