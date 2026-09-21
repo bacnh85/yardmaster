@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { get, post, del, KeyCreated, KeyRow } from "../api";
+import { get, post, put, del, KeyCreated, KeyRow } from "../api";
 import { useApi } from "../hooks";
 import { Confirm, CopyBtn, Empty, ErrorBanner, Modal, PageHead, toast } from "../components";
 import { IconPlus } from "../icons";
@@ -9,6 +9,7 @@ const ENDPOINTS: [string, string, string][] = [
   ["POST", "/v1/messages", "Anthropic wire (streaming supported)"],
   ["POST", "/v1/messages/count_tokens", "Anthropic token count"],
   ["GET", "/v1/models", "models routable by your key"],
+  ["GET", "/v1/usage", "upstream provider usage for your key (?provider=<prefix>)"],
   ["GET", "/healthz", "liveness (no auth)"],
 ];
 
@@ -17,6 +18,7 @@ export function EndpointsTab() {
   const keys = data?.keys ?? [];
   const [name, setName] = useState("");
   const [allow, setAllow] = useState("*");
+  const [allowUsage, setAllowUsage] = useState(true);
   const [created, setCreated] = useState<KeyCreated | null>(null);
   const [err, setErr] = useState("");
   const [revoking, setRevoking] = useState<KeyRow | null>(null);
@@ -31,7 +33,7 @@ export function EndpointsTab() {
     setBusy(true);
     try {
       const allowList = allow.split(",").map((s) => s.trim()).filter(Boolean);
-      const r = (await post("keys", { name: name.trim(), allow: allowList })) as KeyCreated;
+      const r = (await post("keys", { name: name.trim(), allow: allowList, usage: allowUsage })) as KeyCreated;
       setCreated(r);
       setShowAdd(false);
       setName("");
@@ -50,6 +52,16 @@ export function EndpointsTab() {
       await del(`keys/${encodeURIComponent(k.name)}`);
       reload();
       toast(`key "${k.name}" revoked`);
+    } catch (e2) {
+      toast(String(e2), "err");
+    }
+  };
+
+  const setUsage = async (k: KeyRow, usage: boolean) => {
+    try {
+      await put(`keys/${encodeURIComponent(k.name)}`, { usage });
+      reload();
+      toast(`usage ${usage ? "allowed" : "revoked"} for "${k.name}"`);
     } catch (e2) {
       toast(String(e2), "err");
     }
@@ -102,7 +114,7 @@ export function EndpointsTab() {
           : keys.length === 0 ? <Empty>no keys configured</Empty> : (
             <div className="table-wrap" style={{ marginTop: 12 }}>
               <table>
-                <thead><tr><th>name</th><th>key</th><th>allowed models</th><th className="n">rpm limit</th><th /></tr></thead>
+                <thead><tr><th>name</th><th>key</th><th>allowed models</th><th className="n">rpm limit</th><th>usage api</th><th /></tr></thead>
                 <tbody>
                   {keys.map((k) => (
                     <tr key={k.name}>
@@ -110,6 +122,16 @@ export function EndpointsTab() {
                       <td className="mono">{k.key_suffix}</td>
                       <td className="mono">{k.allow.join(", ")}</td>
                       <td className="n">{k.rpm > 0 ? k.rpm.toLocaleString() : "–"}</td>
+                      <td>
+                        <select
+                          value={k.usage === false ? "revoked" : "allowed"}
+                          onChange={(e) => setUsage(k, e.target.value === "allowed")}
+                          aria-label={`usage permission for ${k.name}`}
+                        >
+                          <option value="allowed">allowed</option>
+                          <option value="revoked">revoked</option>
+                        </select>
+                      </td>
                       <td><button className="btn sm danger" onClick={() => setRevoking(k)}>revoke</button></td>
                     </tr>
                   ))}
@@ -132,6 +154,10 @@ export function EndpointsTab() {
               onChange={(e) => setName(e.target.value)} aria-label="API key name" />
             <input placeholder="allowed models, e.g. glm-* or * (optional)" value={allow}
               onChange={(e) => setAllow(e.target.value)} aria-label="allowed models" />
+            <label className="row" style={{ gap: 8, alignItems: "center" }}>
+              <input type="checkbox" checked={allowUsage} onChange={(e) => setAllowUsage(e.target.checked)} />
+              allow usage reporting (GET /v1/usage)
+            </label>
             {err && <div className="form-error">{err}</div>}
             <div className="row end">
               <button type="button" className="btn" onClick={closeAdd}>Cancel</button>

@@ -317,25 +317,24 @@ var (
 
 // handleQuota serves GET /admin/api/quota — one group per quota source, one
 // account row per distinct key. ?refresh=1 bypasses the 60s cache.
-//
-// Builds run detached from the request context (context.Background) so an
-// aborted dashboard request can never write "context canceled" errors into
-// the shared 60s cache, and concurrent viewers wait on the single in-flight
-// build instead of serializing behind each other's upstream I/O.
 func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
-	writeJSON := func(v any) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(v)
-	}
+	rep := s.cachedQuotaReport(r.URL.Query().Get("refresh") == "1")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"quotas": rep})
+}
 
+// cachedQuotaReport returns the shared 60s-cached upstream quota report,
+// rebuilding it (detached from any request context — an aborted caller must
+// never write "context canceled" into the shared cache) when stale. Concurrent
+// callers wait on the single in-flight build instead of serializing upstream I/O.
+func (s *Server) cachedQuotaReport(refresh bool) []ProviderQuota {
 	for {
-		if r.URL.Query().Get("refresh") != "1" {
+		if !refresh {
 			quotaMu.Lock()
 			rep, fresh := quotaReport, time.Now().Before(quotaUntil)
 			quotaMu.Unlock()
 			if rep != nil && fresh {
-				writeJSON(map[string]any{"quotas": rep})
-				return
+				return rep
 			}
 		}
 		quotaMu.Lock()
@@ -368,8 +367,7 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 	quotaReport = rep
 	quotaUntil = time.Now().Add(quotaTTL)
 	quotaMu.Unlock()
-
-	writeJSON(map[string]any{"quotas": rep})
+	return rep
 }
 
 // buildQuotaReport fetches every quota source's accounts. Called WITHOUT the

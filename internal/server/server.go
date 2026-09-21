@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -53,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.wrap(s.Proxy.ServeMessages))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.wrap(s.wrapCountTokens))
 	mux.HandleFunc("GET /v1/models", s.wrap(s.handleModels))
+	mux.HandleFunc("GET /v1/usage", s.wrap(s.handleUsage))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
@@ -66,7 +68,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) wrap(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		keyName, allow, ok := s.authenticate(r)
+		k, ok := s.authenticate(r)
 		if !ok {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(401)
@@ -76,13 +78,22 @@ func (s *Server) wrap(h http.HandlerFunc) http.HandlerFunc {
 		}
 		ctx := r.Context()
 		ctx = proxy.WithStartTime(ctx, start)
-		ctx = proxy.WithInboundKey(ctx, keyName)
-		ctx = proxy.WithInboundAllow(ctx, allow)
+		ctx = proxy.WithInboundKey(ctx, k.Name)
+		ctx = proxy.WithInboundAllow(ctx, k.Allow)
+		ctx = context.WithValue(ctx, inboundKeyCtx{}, k) // full key config for e.g. GET /v1/usage
 		h(w, r.WithContext(ctx))
 	}
 }
 
-func (s *Server) authenticate(r *http.Request) (name string, allow []string, ok bool) {
+type inboundKeyCtx struct{}
+
+// inboundKey returns the authenticated *config.Key from wrap's context.
+func inboundKey(r *http.Request) *config.Key {
+	k, _ := r.Context().Value(inboundKeyCtx{}).(*config.Key)
+	return k
+}
+
+func (s *Server) authenticate(r *http.Request) (*config.Key, bool) {
 	key := ""
 	if ah := r.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
 		key = strings.TrimPrefix(ah, "Bearer ")
@@ -91,13 +102,9 @@ func (s *Server) authenticate(r *http.Request) (name string, allow []string, ok 
 		key = r.Header.Get("x-api-key")
 	}
 	if key == "" {
-		return "", nil, false
+		return nil, false
 	}
-	k, ok := s.Keys.Check(key)
-	if !ok {
-		return "", nil, false
-	}
-	return k.Name, k.Allow, true
+	return s.Keys.Check(key)
 }
 
 func (s *Server) wrapCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -296,6 +303,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		for _, k := range s.Proxy.Reg.Config().Keys {
 			out = append(out, map[string]any{
 				"name": k.Name, "key_suffix": suffix(k.Key), "allow": k.Allow, "rpm": k.RPM,
+				"usage": k.Usage, // nil = allowed (default ON)
 			})
 		}
 		writeJSON(map[string]any{"keys": out})
@@ -332,6 +340,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			Name  string   `json:"name"`
 			Allow []string `json:"allow"`
 			RPM   int      `json:"rpm"`
+			Usage *bool    `json:"usage"`
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil || req.Name == "" {
 			http.Error(w, "name required", 400)
@@ -348,13 +357,58 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			if len(allow) == 0 {
 				allow = []string{"*"}
 			}
-			c.Keys = append(c.Keys, &config.Key{Key: raw, Name: req.Name, Allow: allow, RPM: req.RPM})
+			c.Keys = append(c.Keys, &config.Key{Key: raw, Name: req.Name, Allow: allow, RPM: req.RPM, Usage: req.Usage})
 			return nil
 		}) {
 			return
 		}
 		// the raw key is shown exactly once, in this response
 		writeJSON(map[string]any{"ok": true, "key": raw})
+	case strings.HasPrefix(path, "keys/") && r.Method == "PUT":
+		// edit a key: {name?, allow?, rpm?, usage?} — nil pointers keep stored values
+		name := strings.TrimPrefix(path, "keys/")
+		var req struct {
+			Name  *string  `json:"name"`
+			Allow *[]string `json:"allow"`
+			RPM   *int     `json:"rpm"`
+			Usage *bool    `json:"usage"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			for _, k := range c.Keys {
+				if k.Name != name {
+					continue
+				}
+				if req.Name != nil && *req.Name != "" && *req.Name != name {
+					for _, other := range c.Keys {
+						if other.Name == *req.Name {
+							return fmt.Errorf("key %q already exists", *req.Name)
+						}
+					}
+					k.Name = *req.Name
+				}
+				if req.Allow != nil {
+					k.Allow = *req.Allow
+					if len(k.Allow) == 0 {
+						k.Allow = []string{"*"}
+					}
+				}
+				if req.RPM != nil {
+					k.RPM = *req.RPM
+				}
+				if req.Usage != nil {
+					k.Usage = req.Usage
+				}
+				return nil
+			}
+			return fmt.Errorf("no key named %q", name)
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "keys/") && r.Method == "DELETE":
 		name := strings.TrimPrefix(path, "keys/")
 		if !s.mutate(w, func(c *config.Config) error {

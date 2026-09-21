@@ -53,7 +53,9 @@ func matchRoute(pattern, model string) bool {
 	return pattern == model
 }
 
-func keyAllowed(patterns []string, model string) bool {
+// KeyAllowed reports whether any pattern admits the model id — the same
+// matcher Registry.Resolve applies to a key's Allow list (exact or "prefix*").
+func KeyAllowed(patterns []string, model string) bool {
 	for _, p := range patterns {
 		if matchRoute(p, model) {
 			return true
@@ -87,7 +89,7 @@ func SplitPrefix(cfg *config.Config, model string) (prefix, bare string, matched
 func (r *Registry) Resolve(model string, allow []string) []*Target {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if !keyAllowed(allow, model) {
+	if !KeyAllowed(allow, model) {
 		return nil
 	}
 	prefix, bare, prefixed := SplitPrefix(r.cfg, model)

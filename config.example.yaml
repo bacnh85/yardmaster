@@ -151,6 +151,8 @@ routes:
   #   chain: [claude-sub, opencode-go-claude, cmdcode-claude]   # subscription first, then API-key fallback
 
 # keys CLI agents authenticate with (yardmaster key add NAME generates one)
+# usage: false revokes the key's access to GET /v1/usage (upstream provider
+# usage report); unset/true = allowed (default).
 keys:
   - key: "ar-REPLACE_ME"
     name: pi-laptop
