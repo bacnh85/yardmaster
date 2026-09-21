@@ -619,16 +619,14 @@ func TestAnthropicClientUpstreamDropsWithoutDone(t *testing.T) {
 // openai client → Responses-wire upstream: chat request converted, chat SSE
 // chunks come back as responses events.
 func TestOpenAIClientToResponsesUpstream(t *testing.T) {
-	var gotModel any
-	var gotInput any
+	gotCh := make(chan map[string]any, 1) // handler goroutine → test goroutine
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			t.Errorf("upstream path: %s", r.URL.Path)
 		}
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
-		gotModel = req["model"]
-		gotInput = req["input"]
+		gotCh <- req
 		w.Header().Set("Content-Type", "text/event-stream")
 		f := w.(http.Flusher)
 		fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n")
@@ -653,10 +651,11 @@ func TestOpenAIClientToResponsesUpstream(t *testing.T) {
 	defer resp.Body.Close()
 	got, _ := io.ReadAll(resp.Body)
 	s := string(got)
-	if gotModel != "gpt-test" {
-		t.Fatalf("upstream model: %v", gotModel)
+	gotReq := <-gotCh // happens-after the handler wrote the body
+	if gotReq["model"] != "gpt-test" {
+		t.Fatalf("upstream model: %v", gotReq["model"])
 	}
-	if gotInput == nil {
+	if gotReq["input"] == nil {
 		t.Fatalf("upstream input missing (responses shape expected)")
 	}
 	// an openai client gets chat chunks (responses upstream normalized to chat)

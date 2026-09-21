@@ -350,14 +350,6 @@ func WithInboundAllow(ctx context.Context, allow []string) context.Context {
 	return context.WithValue(ctx, inboundAllowCtx, allow)
 }
 
-func retryableStatus(code int) bool {
-	switch code {
-	case 408, 409, 425, 429, 500, 502, 503, 504, 529:
-		return true
-	}
-	return false
-}
-
 // buildUpstream constructs the upstream request. For openai upstreams the
 // client body may need translation; for anthropic upstreams likewise.
 func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientWire, upModel string, req map[string]any, rawBody []byte, strictJSON bool, clientSession string) (*http.Request, error) {
