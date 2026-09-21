@@ -14,5 +14,4 @@ web/dist/*
 .zcode/
 .pi/
 .private/
-docs/
 *.log

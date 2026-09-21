@@ -28,6 +28,10 @@ routing, honest stats, and isolated auth adapters.
 - **OpenCode Go support**: `session: opencode` providers send the required
   `x-opencode-session`/`x-opencode-client` headers (stable per key; a client
   header is forwarded when present).
+- **DeepSeek API support**: all three wires from one key (chat / Anthropic at
+  `…/anthropic` / Responses), models `deepseek-flash` (vision) + `deepseek-v4-pro`,
+  1M context, cache-hit tokens priced at the cache rate, and the prepaid balance
+  in the Quota tab.
 - **Provider presets, model catalog & playground**: the dashboard's
   Providers tab ships one-click presets (OpenCode Go, DeepSeek, Z.AI,
   Command Code), pulls each provider's live model catalog (`/models` +
@@ -94,10 +98,29 @@ routes:
     chain: [zai]
   - match: "deepseek-v4-flash"
     chain: [opencode-go, deepseek]   # subscription first, platform fallback
+  - match: "deepseek*"
+    chain: [deepseek, openrouter]
+    strategy: weighted-rr            # spread across mirrors (default: priority)
+    weights: [3, 1]                  # index-aligned with chain
+
+# per-provider key handling:
+#   rotation: round_robin  — rotate the starting key/account each request
+#   (default first = config order)
+# cooldowns are automatic: 429 cools provider+key for Retry-After (default
+# 30s); 3×5xx in 60s cools 30s. See docs/routing.md for the full model.
 
 keys:
   - { key: "ar-...", name: pi-laptop, allow: ["*"], rpm: 0 }
 ```
+
+## Routing
+
+Routes match models (exact or `prefix*`) to an ordered provider chain — first
+match wins, failover walks the chain on retryable errors. A global default
+(`routing.strategy` / `routing.rotation`) is inherited by every route and
+provider; per-route `strategy:`/`weights:` and per-provider `rotation:`
+override it. Cooldowns after 429/5xx are automatic. See
+[docs/routing.md](docs/routing.md) for the research behind these choices.
 
 ## OAuth subscription upstreams (Phase 4)
 

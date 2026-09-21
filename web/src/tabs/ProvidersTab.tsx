@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult, QuotaGroup } from "../api";
+import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult, QuotaGroup, CooldownRow } from "../api";
 import { useApi, usePoll } from "../hooks";
 import { Confirm, Empty, ErrorBanner, Modal, PageHead, toast } from "../components";
 import { QuotaTable, isQuotaProvider } from "./QuotaTab";
@@ -7,13 +7,13 @@ import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPla
 
 interface ProviderForm {
   name: string; wire: string; base_url: string; models: string; prefix: string;
-  keys: string; session: string;
+  keys: string; session: string; rotation: string;
   dispatch_interval_ms: number;
   adaptive_thinking: boolean; inject_cache_control: boolean;
 }
 
 export const EMPTY_FORM: ProviderForm = {
-  name: "", wire: "openai", base_url: "", models: "", prefix: "", keys: "", session: "",
+  name: "", wire: "openai", base_url: "", models: "", prefix: "", keys: "", session: "", rotation: "",
   dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
 };
 
@@ -25,7 +25,7 @@ const stateBadge = (state: string) =>
   state === "ok" ? "badge ok" : state === "cooldown" ? "badge warn" : state === "error" ? "badge danger" : "badge muted";
 
 export interface ProviderBody {
-  name: string; wire: string; base_url: string; models: string[]; prefix: string; session: string;
+  name: string; wire: string; base_url: string; models: string[]; prefix: string; session: string; rotation: string;
   keys?: string[];
   preset?: string; disabled?: boolean;
   dispatch_interval_ms: number; adaptive_thinking: boolean; inject_cache_control: boolean;
@@ -37,6 +37,7 @@ export const providerBody = (form: ProviderForm): ProviderBody => ({
   models: form.models.split(",").map((s) => s.trim()).filter(Boolean),
   prefix: form.prefix.trim().toLowerCase(),
   session: form.session,
+  rotation: form.rotation,
   ...(form.keys.trim() ? { keys: form.keys.split("\n").map((s) => s.trim()).filter(Boolean) } : {}),
   dispatch_interval_ms: Number(form.dispatch_interval_ms) || 0, // type=number inputs yield strings; Go rejects string→int
   adaptive_thinking: form.adaptive_thinking,
@@ -51,6 +52,7 @@ export const rowToForm = (p: ProviderRow): ProviderForm => ({
   prefix: p.prefix ?? "",
   keys: "", // blank = keep existing keys (server keeps them when omitted)
   session: p.session ?? "",
+  rotation: p.rotation ?? "",
   dispatch_interval_ms: p.dispatch_interval_ms,
   adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
 });
@@ -119,19 +121,22 @@ export function ProvidersTab({ detail, onOpenDetail, onCloseDetail }: {
   detail: string; onOpenDetail: (id: string) => void; onCloseDetail: () => void;
 }) {
   const { data, error, loading, reload } = useApi<{ providers: ProviderRow[] }>("providers");
+  const cdReq = useApi<CooldownRow[]>("cooldowns");
+  usePoll(cdReq.reload, 15000); // cooling badges stay fresh; noop when server is old
   const provs = data?.providers ?? [];
+  const cooling = new Set((cdReq.data ?? []).map((c) => c.provider));
 
   if (detail) {
     const r = REGISTRY.find((x) => x.id === detail);
     if (r) return <ProviderDetail r={r} provs={provs} error={error} loading={loading} reload={reload} onBack={onCloseDetail} />;
   }
-  return <ProviderList provs={provs} error={error} loading={loading} reload={reload} onOpenDetail={onOpenDetail} />;
+  return <ProviderList provs={provs} error={error} loading={loading} reload={reload} onOpenDetail={onOpenDetail} cooling={cooling} />;
 }
 
 /* ---------------- list: registry cards + custom providers ---------------- */
 
-function ProviderList({ provs, error, loading, reload, onOpenDetail }: {
-  provs: ProviderRow[]; error: string; loading: boolean; reload: () => void; onOpenDetail: (id: string) => void;
+function ProviderList({ provs, error, loading, reload, onOpenDetail, cooling }: {
+  provs: ProviderRow[]; error: string; loading: boolean; reload: () => void; onOpenDetail: (id: string) => void; cooling: Set<string>;
 }) {
   // only preset-matched providers are managed by their registry detail page;
   // legacy name-matched ones (preset "") stay here so they remain editable/deletable
@@ -168,7 +173,7 @@ function ProviderList({ provs, error, loading, reload, onOpenDetail }: {
       </div>
 
       <h3 style={{ margin: "24px 0 8px" }}>Custom providers</h3>
-      <CustomProviders provs={custom} reload={reload} />
+      <CustomProviders provs={custom} reload={reload} cooling={cooling} />
       {loading && provs.length === 0 && <div className="faint" style={{ padding: 12 }}>loading…</div>}
     </>
   );
@@ -176,7 +181,7 @@ function ProviderList({ provs, error, loading, reload, onOpenDetail }: {
 
 /* ---------------- custom providers (non-registry): legacy cards + form ---------------- */
 
-function CustomProviders({ provs, reload }: { provs: ProviderRow[]; reload: () => void }) {
+function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; reload: () => void; cooling: Set<string> }) {
   const [form, setForm] = useState<ProviderForm | null>(null);
   const [editName, setEditName] = useState("");
   const [err, setErr] = useState("");
@@ -247,6 +252,14 @@ function CustomProviders({ provs, reload }: { provs: ProviderRow[]; reload: () =
                 <option value="opencode">opencode</option>
               </select>
             </div>
+            <div className="field">
+              <label htmlFor="pf-rotation">key rotation</label>
+              <select id="pf-rotation" value={form.rotation} onChange={set("rotation")}>
+                <option value="">inherit (global default)</option>
+                <option value="first">first (config order)</option>
+                <option value="round_robin">round robin</option>
+              </select>
+            </div>
             <div className="field full">
               <label htmlFor="pf-url">base URL</label>
               <input id="pf-url" value={form.base_url} required onChange={set("base_url")} placeholder="https://api.example.com/v1" aria-invalid={urlBad} />
@@ -290,6 +303,8 @@ function CustomProviders({ provs, reload }: { provs: ProviderRow[]; reload: () =
               {p.name} <span className="badge muted">{p.wire}</span>
               {p.auth_type === "oauth" && <span className="badge ok">oauth</span>}
               {p.session === "opencode" && <span className="badge muted">opencode session</span>}
+              {p.rotation === "round_robin" && <span className="badge muted">round robin</span>}
+              {cooling.has(p.name) && <span className="badge warn" title="rate-limited; cooling down before retry">cooling</span>}
               {p.disabled && <span className="badge warn">disabled</span>}
             </h3>
             <div className="row">
@@ -464,6 +479,21 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     reload();
   };
 
+  /** Key rotation override for one provider entry; omitted fields are preserved server-side. */
+  const setRotation = async (p: ProviderRow, rotation: string) => {
+    try {
+      await put(`providers/${encodeURIComponent(p.name)}`, {
+        name: p.name, wire: p.wire, base_url: p.base_url, models: p.models,
+        prefix: p.prefix ?? "", session: p.session ?? "", rotation,
+        preset: p.preset, disabled: p.disabled,
+        dispatch_interval_ms: p.dispatch_interval_ms,
+        adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
+      });
+      reload();
+      toast(`${p.name} key rotation: ${rotation || "inherit (global default)"}`);
+    } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
+  };
+
   /** Retest: one-shot ping on this provider's first model. */
   const retest = async (p: ProviderRow) => {
     if (p.models.length === 0) { toast("no models configured for a test", "err"); return; }
@@ -632,6 +662,26 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
             </div>
           );
         })}
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3>Routing</h3>
+        <div className="faint" style={{ marginBottom: 8 }}>
+          key rotation picks which API key/account starts each request. inherit = use the global default
+          (Settings → Global routing). cooldowns apply automatically after 429s.
+        </div>
+        <div className="form-grid">
+          {group.map((p) => (
+            <div className="field" key={p.name}>
+              <label htmlFor={`rot-${p.name}`}>{group.length > 1 ? p.name : "key rotation"}</label>
+              <select id={`rot-${p.name}`} value={p.rotation ?? ""} onChange={(e) => setRotation(p, e.target.value)}>
+                <option value="">inherit (global default)</option>
+                <option value="first">first (config order)</option>
+                <option value="round_robin">round robin</option>
+              </select>
+            </div>
+          ))}
+        </div>
       </div>
 
       {quotaSupported && quotaReq.error && (

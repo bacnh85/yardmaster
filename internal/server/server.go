@@ -19,6 +19,7 @@ import (
 
 	"github.com/bacnh85/yardmaster/internal/auth"
 	"github.com/bacnh85/yardmaster/internal/config"
+	"github.com/bacnh85/yardmaster/internal/provider"
 	"github.com/bacnh85/yardmaster/internal/proxy"
 	"github.com/bacnh85/yardmaster/internal/store"
 	"github.com/bacnh85/yardmaster/internal/translate"
@@ -312,6 +313,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				"preset":            p.Preset,
 				"disabled":          p.Disabled,
 				"session":           p.Session,
+				"rotation":          p.Rotation,
 				"auth_type":         p.Auth.Type,
 				"adaptive_thinking": p.AdaptiveThinking, "inject_cache_control": p.InjectCacheControl,
 				"connections": conns,
@@ -507,6 +509,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					if f.Session == nil {
 						p.Session = x.Session // omitted field keeps the stored session headers
 					}
+					if f.Rotation == nil {
+						p.Rotation = x.Rotation // omitted field keeps the stored rotation
+					}
 					if f.Preset == "" {
 						p.Preset = x.Preset
 					}
@@ -543,17 +548,25 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("no provider named %q", name)
 			}
 			c.Providers = kept
-			// scrub routes that pointed at the removed provider
+			// scrub routes that pointed at the removed provider — weights stay
+			// index-aligned with the chain so a weighted-rr route survives
 			routes := c.Routes[:0]
 			for _, rt := range c.Routes {
 				chain := rt.Chain[:0]
-				for _, n := range rt.Chain {
+				weights := rt.Weights[:0]
+				for i, n := range rt.Chain {
 					if n != name {
 						chain = append(chain, n)
+						if i < len(rt.Weights) {
+							weights = append(weights, rt.Weights[i])
+						}
 					}
 				}
 				if len(chain) > 0 {
 					rt.Chain = chain
+					if len(rt.Weights) > 0 {
+						rt.Weights = weights
+					}
 					routes = append(routes, rt)
 				}
 			}
@@ -585,6 +598,43 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			"listen": cfg.Listen, "db_path": cfg.DBPath,
 			"providers": provs, "routes": cfg.Routes,
 		})
+	case path == "routes" && r.Method == "PUT":
+		// replaces the whole routes list: [{match, chain, strategy, weights}]
+		var routes []*config.Route
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&routes); err != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			c.Routes = routes
+			return nil
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
+	case path == "cooldowns" && r.Method == "GET":
+		var out []provider.CooldownEntry
+		if s.Proxy.Cd != nil {
+			out = s.Proxy.Cd.Snapshot()
+		}
+		if out == nil {
+			out = []provider.CooldownEntry{}
+		}
+		writeJSON(out)
+	case path == "routing" && r.Method == "PUT":
+		// global routing defaults: {strategy, rotation}; "" = built-in default
+		var in config.Routing
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			c.Routing = in
+			return nil
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
 	default:
 		http.NotFound(w, r)
 	}
@@ -640,8 +690,9 @@ type providerForm struct {
 	Models             []string `json:"models"`
 	Keys               []string `json:"keys"`
 	KeyLabels          []string `json:"keyLabels"`
-	Prefix             *string  `json:"prefix"`  // nil = omitted (keep stored); "" = none; else routing prefix
-	Session            *string  `json:"session"` // nil = omitted (keep stored); "" = none; "opencode" = session headers
+	Prefix             *string  `json:"prefix"`   // nil = omitted (keep stored); "" = none; else routing prefix
+	Session            *string  `json:"session"`  // nil = omitted (keep stored); "" = none; "opencode" = session headers
+	Rotation           *string  `json:"rotation"` // nil = omitted (keep stored); first | round_robin
 	Preset             string   `json:"preset"`
 	Disabled           *bool    `json:"disabled"` // nil = omitted (keep stored)
 	DispatchIntervalMS int      `json:"dispatch_interval_ms"`
@@ -671,6 +722,13 @@ func (f providerForm) provider() (*config.Provider, error) {
 			return nil, fmt.Errorf("session must be empty or opencode")
 		}
 	}
+	rotation := ""
+	if f.Rotation != nil {
+		rotation = *f.Rotation
+		if rotation != "" && rotation != "first" && rotation != "round_robin" {
+			return nil, fmt.Errorf("rotation must be first or round_robin")
+		}
+	}
 	disabled := false
 	if f.Disabled != nil {
 		disabled = *f.Disabled
@@ -684,6 +742,7 @@ func (f providerForm) provider() (*config.Provider, error) {
 		Models:             f.Models,
 		Session:            session,
 		Preset:             f.Preset,
+		Rotation:           rotation,
 		Disabled:           disabled,
 		DispatchIntervalMS: f.DispatchIntervalMS,
 		AdaptiveThinking:   f.AdaptiveThinking,

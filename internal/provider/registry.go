@@ -4,6 +4,7 @@ package provider
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bacnh85/yardmaster/internal/auth"
@@ -23,6 +24,8 @@ type Registry struct {
 	mu       sync.RWMutex
 	cfg      *config.Config
 	limiters sync.Map // "provider:key" -> *auth.Limiter
+	wrr      sync.Map // route match -> *uint64 (weighted-rr pick counter)
+	rr       sync.Map // provider name -> *uint64 (round_robin key counter)
 }
 
 func New(cfg *config.Config) *Registry {
@@ -92,12 +95,34 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 	matched := false
 	for _, rt := range r.cfg.Routes {
 		if matchRoute(rt.Match, model) {
-			for _, name := range rt.Chain {
+			var chainPos []int
+			for i, name := range rt.Chain {
 				for _, p := range r.cfg.Providers {
 					if p.Name == name {
 						provs = append(provs, p)
+						chainPos = append(chainPos, i)
 						break
 					}
+				}
+			}
+			// weighted-rr: pick the chain head proportionally, keep the rest as
+			// fallbacks in chain order (OpenRouter's LB-then-fallback shape)
+			eff := rt.Strategy // empty inherits the global routing default
+			if eff == "" {
+				eff = r.cfg.Routing.Strategy
+			}
+			if eff == "weighted-rr" && len(provs) > 1 {
+				head := wrrPick(&r.wrr, rt.Match, rt.Weights, len(rt.Chain))
+				for i, cp := range chainPos {
+					if cp != head {
+						continue
+					}
+					re := make([]*config.Provider, 0, len(provs))
+					re = append(re, provs[i])
+					re = append(re, provs[:i]...)
+					re = append(re, provs[i+1:]...)
+					provs = re
+					break
 				}
 			}
 			matched = true
@@ -135,13 +160,24 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 		}
 		switch p.Auth.Type {
 		case "oauth":
+			var accts []*config.OAuthAcct
 			for _, a := range p.Auth.OAuth {
 				if !a.Disabled {
-					targets = append(targets, &Target{Provider: p, AuthType: "oauth", AcctName: a.Name})
+					accts = append(accts, a)
 				}
 			}
+			if effectiveRotation(p, r.cfg.Routing.Rotation) == "round_robin" {
+				accts = rotate(accts, nextCount(&r.rr, p.Name))
+			}
+			for _, a := range accts {
+				targets = append(targets, &Target{Provider: p, AuthType: "oauth", AcctName: a.Name})
+			}
 		default: // static
-			for _, k := range p.Auth.Keys {
+			keys := append([]string(nil), p.Auth.Keys...)
+			if effectiveRotation(p, r.cfg.Routing.Rotation) == "round_robin" {
+				keys = rotate(keys, nextCount(&r.rr, p.Name))
+			}
+			for _, k := range keys {
 				targets = append(targets, &Target{Provider: p, APIKey: k, AuthType: "static"})
 			}
 		}
@@ -183,6 +219,59 @@ func UpstreamModel(p *config.Provider, model string) string {
 		}
 	}
 	return model
+}
+
+// nextCount returns the request index (0-based) for key — shared per-route /
+// per-provider selection counters.
+func nextCount(m *sync.Map, key string) uint64 {
+	var c *uint64
+	if v, ok := m.Load(key); ok {
+		c = v.(*uint64)
+	} else {
+		c = new(uint64)
+		actual, _ := m.LoadOrStore(key, c)
+		c = actual.(*uint64)
+	}
+	return atomic.AddUint64(c, 1) - 1
+}
+
+// wrrPick maps the route's request counter through cumulative weights:
+// weights [3,1] over 2 chain entries → heads 0,0,0,1,0,0,0,1,… proportionally
+// over time. Missing/short weights default to an equal spread over n entries.
+func wrrPick(m *sync.Map, route string, weights []int, n int) int {
+	if len(weights) != n {
+		equal := make([]int, n)
+		for i := range equal {
+			equal[i] = 1
+		}
+		weights = equal
+	}
+	total := 0
+	for _, w := range weights {
+		total += w
+	}
+	if total <= 0 {
+		return 0
+	}
+	x := nextCount(m, route) % uint64(total)
+	for i, w := range weights {
+		if x < uint64(w) {
+			return i
+		}
+		x -= uint64(w)
+	}
+	return 0
+}
+
+// rotate shifts s left by n; s with fewer than 2 entries is unchanged.
+func rotate[T any](s []T, n uint64) []T {
+	if len(s) < 2 {
+		return s
+	}
+	off := int(n % uint64(len(s)))
+	out := make([]T, 0, len(s))
+	out = append(out, s[off:]...)
+	return append(out, s[:off]...)
 }
 
 // Limiter returns the per-provider-key dispatch limiter (nil = unthrottled).
@@ -238,4 +327,16 @@ func advertised(prefix, m string) []string {
 		return []string{m}
 	}
 	return []string{prefix + "/" + m}
+}
+
+// effectiveRotation resolves the provider's key-rotation setting: an explicit
+// provider rotation wins, then the global routing default, then "first".
+func effectiveRotation(p *config.Provider, global string) string {
+	if p.Rotation != "" {
+		return p.Rotation
+	}
+	if global != "" {
+		return global
+	}
+	return "first"
 }

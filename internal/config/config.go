@@ -15,10 +15,19 @@ type Config struct {
 	Listen        string           `yaml:"listen"`
 	AdminPassword string           `yaml:"admin_password"`
 	DBPath        string           `yaml:"db_path"`
+	Routing       Routing          `yaml:"routing"`
 	Providers     []*Provider      `yaml:"providers"`
 	Routes        []*Route         `yaml:"routes"`
 	Keys          []*Key           `yaml:"keys"`
 	Costs         map[string]*Cost `yaml:"costs"` // $ per 1M tokens, overrides defaults
+}
+
+// Routing holds fleet-wide defaults; empty fields inherit the built-in
+// defaults (priority / first). Route.Strategy and Provider.Rotation override
+// these per route/provider.
+type Routing struct {
+	Strategy string `yaml:"strategy" json:"strategy"` // priority | weighted-rr
+	Rotation string `yaml:"rotation" json:"rotation"` // first | round_robin
 }
 
 type Provider struct {
@@ -38,6 +47,7 @@ type Provider struct {
 	AdaptiveThinking   bool              `yaml:"adaptive_thinking"`    // zai-style thinking:{type:adaptive}+output_config.effort
 	InjectCacheControl bool              `yaml:"inject_cache_control"` // add ephemeral markers when translating to anthropic wire
 	HeadersTimeoutS    int               `yaml:"headers_timeout_s"`    // max wait for upstream response headers (default 300)
+	Rotation           string            `yaml:"rotation"`             // first (default) | round_robin — starting key/account per request
 }
 
 type AuthConf struct {
@@ -68,8 +78,10 @@ type OAuthAcct struct {
 }
 
 type Route struct {
-	Match string   `yaml:"match"` // exact model id or "prefix*"
-	Chain []string `yaml:"chain"` // provider names, tried in order
+	Match    string   `yaml:"match" json:"match"`       // exact model id or "prefix*"
+	Chain    []string `yaml:"chain" json:"chain"`       // provider names, tried in order
+	Strategy string   `yaml:"strategy" json:"strategy"` // priority (default) | weighted-rr
+	Weights  []int    `yaml:"weights" json:"weights"`   // weighted-rr only; index-aligned with Chain
 }
 
 type Key struct {
@@ -117,21 +129,26 @@ type Cost struct {
 
 // DefaultCosts are rough published-rate estimates ($/Mtok); config `costs` overrides.
 // ponytail: coarse estimates on purpose — override per model in config for exact billing.
+// DeepSeek entries use published peak prices (off-peak = half; peak 01–04 + 06–10
+// UTC Mon–Fri); deepseek-v4-flash/-vision-exp are retired ids still served by
+// V4.1-Flash at Flash price.
 var DefaultCosts = map[string]*Cost{
-	"deepseek":         {Input: 0.30, Output: 1.20, CacheRead: 0.03},
-	"deepseek-flash":   {Input: 0.30, Output: 1.20, CacheRead: 0.03},
-	"deepseek-v4-pro":  {Input: 0.60, Output: 2.20, CacheRead: 0.06},
-	"glm-5.3":          {Input: 1.00, Output: 3.20, CacheRead: 0.10},
-	"glm-5.3-flash":    {Input: 0.30, Output: 1.00, CacheRead: 0.03},
-	"glm-5.2":          {Input: 0.60, Output: 2.20, CacheRead: 0.06},
-	"claude-sonnet-5":  {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
-	"claude-opus-5":    {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},
-	"claude-haiku-4.5": {Input: 1.00, Output: 5.00, CacheRead: 0.10},
-	"gpt-5.5":          {Input: 1.25, Output: 10.00, CacheRead: 0.12},
-	"kimi-k3":          {Input: 0.60, Output: 2.50, CacheRead: 0.06},
-	"minimax-m3":       {Input: 0.30, Output: 1.20, CacheRead: 0.03},
-	"qwen3.7-max":      {Input: 0.60, Output: 2.40, CacheRead: 0.06},
-	"grok-4.5":         {Input: 3.00, Output: 15.00, CacheRead: 0.30},
+	"deepseek":                     {Input: 0.30, Output: 1.20, CacheRead: 0.006},
+	"deepseek-flash":               {Input: 0.30, Output: 1.20, CacheRead: 0.006},
+	"deepseek-v4-flash":            {Input: 0.30, Output: 1.20, CacheRead: 0.006},
+	"deepseek-v4-flash-vision-exp": {Input: 0.30, Output: 1.20, CacheRead: 0.006},
+	"deepseek-v4-pro":              {Input: 1.32, Output: 3.96, CacheRead: 0.044},
+	"glm-5.3":                      {Input: 1.00, Output: 3.20, CacheRead: 0.10},
+	"glm-5.3-flash":                {Input: 0.30, Output: 1.00, CacheRead: 0.03},
+	"glm-5.2":                      {Input: 0.60, Output: 2.20, CacheRead: 0.06},
+	"claude-sonnet-5":              {Input: 3.00, Output: 15.00, CacheRead: 0.30, CacheWrite: 3.75},
+	"claude-opus-5":                {Input: 15.00, Output: 75.00, CacheRead: 1.50, CacheWrite: 18.75},
+	"claude-haiku-4.5":             {Input: 1.00, Output: 5.00, CacheRead: 0.10},
+	"gpt-5.5":                      {Input: 1.25, Output: 10.00, CacheRead: 0.12},
+	"kimi-k3":                      {Input: 0.60, Output: 2.50, CacheRead: 0.06},
+	"minimax-m3":                   {Input: 0.30, Output: 1.20, CacheRead: 0.03},
+	"qwen3.7-max":                  {Input: 0.60, Output: 2.40, CacheRead: 0.06},
+	"grok-4.5":                     {Input: 3.00, Output: 15.00, CacheRead: 0.30},
 }
 
 func Load(path string) (*Config, error) {
@@ -192,6 +209,9 @@ func (c *Config) Validate() error {
 		if p.HeadersTimeoutS == 0 {
 			p.HeadersTimeoutS = 300
 		}
+		if p.Rotation != "" && p.Rotation != "first" && p.Rotation != "round_robin" {
+			return fmt.Errorf("provider %s: rotation must be first|round_robin", p.Name)
+		}
 		if p.Wire == "responses" && p.Auth.Type == "" {
 			p.Auth.Type = "static"
 		}
@@ -221,11 +241,48 @@ func (c *Config) Validate() error {
 		if r.Match == "" {
 			return fmt.Errorf("route missing match")
 		}
+		if len(r.Chain) == 0 {
+			return fmt.Errorf("route %q needs at least one provider", r.Match)
+		}
 		for _, n := range r.Chain {
 			if !pnames[n] {
 				return fmt.Errorf("route %q references unknown provider %q", r.Match, n)
 			}
 		}
+		// weights are legal whenever the EFFECTIVE strategy is weighted-rr —
+		// an empty route strategy inherits routing.strategy, so a route may
+		// carry weights while inheriting a global weighted-rr. Missing weights
+		// under weighted-rr are fine too: Resolve spreads equally.
+		eff := r.Strategy
+		if eff == "" {
+			eff = c.Routing.Strategy
+		}
+		if eff != "weighted-rr" && len(r.Weights) > 0 {
+			return fmt.Errorf("route %q: weights require strategy weighted-rr (route or routing.strategy)", r.Match)
+		}
+		if eff == "weighted-rr" && len(r.Weights) > 0 {
+			if len(r.Weights) != len(r.Chain) {
+				return fmt.Errorf("route %q: weights (%d) must match chain length (%d)", r.Match, len(r.Weights), len(r.Chain))
+			}
+			for _, w := range r.Weights {
+				if w <= 0 {
+					return fmt.Errorf("route %q: weights must be > 0", r.Match)
+				}
+			}
+		}
+		if r.Strategy != "" && r.Strategy != "priority" && r.Strategy != "weighted-rr" {
+			return fmt.Errorf("route %q: strategy must be priority|weighted-rr", r.Match)
+		}
+	}
+	switch c.Routing.Strategy {
+	case "", "priority", "weighted-rr":
+	default:
+		return fmt.Errorf("routing.strategy must be priority|weighted-rr")
+	}
+	switch c.Routing.Rotation {
+	case "", "first", "round_robin":
+	default:
+		return fmt.Errorf("routing.rotation must be first|round_robin")
 	}
 	seen := map[string]bool{}
 	for _, k := range c.Keys {

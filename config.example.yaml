@@ -4,12 +4,27 @@ db_path: "yardmaster.db"
 admin_password: "change-me"        # dashboard + admin API
 
 providers:
-  # --- DeepSeek (OpenAI wire; models: deepseek-flash = V4.1 Flash, deepseek-v4-pro) ---
+  # --- DeepSeek (models: deepseek-flash = V4.1-Flash, deepseek-v4-pro) ---
+  # 1M context / 384K max output; vision on flash only. Context caching is
+  # automatic — leave inject_cache_control off. Live prepaid balance shows in
+  # the dashboard Quota tab.
   - name: deepseek
     base_url: https://api.deepseek.com
     wire: openai
     auth: { type: static, keys: ["sk-..."] }
     models: [deepseek-flash, deepseek-v4-pro]
+  # DeepSeek also serves the anthropic and responses wires from the same key —
+  # byte-exact passthrough for Claude Code / Codex clients (dashboard preset adds these):
+  # - name: deepseek-claude
+  #   base_url: https://api.deepseek.com/anthropic
+  #   wire: anthropic
+  #   auth: { type: static, keys: ["sk-..."] }
+  #   models: [deepseek-flash, deepseek-v4-pro]
+  # - name: deepseek-gpt
+  #   base_url: https://api.deepseek.com
+  #   wire: responses
+  #   auth: { type: static, keys: ["sk-..."] }
+  #   models: [deepseek-flash, deepseek-v4-pro]
 
   # --- Z.ai GLM Coding Plan (Anthropic wire; maximizes subscription usage) ---
   # - cache_control injection → cache reads ~0.1x input
@@ -25,6 +40,8 @@ providers:
     inject_cache_control: true
     extra_headers: { anthropic-beta: "fast-mode-2026-02-01" }
     body_overrides: { speed: fast }
+    # rotation: round_robin        # rotate starting key/account per request
+    #                              # (default first = config order; spreads quota)
 
   # --- OpenRouter (OpenAI wire, model ids like "deepseek/deepseek-chat") ---
   - name: openrouter
@@ -101,11 +118,19 @@ providers:
   #       - { name: codex-main, kind: codex, refresh_token: "...", account_id: "..." }
   #   models: [gpt-5.5]
 
+# -*- optional global routing defaults: every route/provider inherits these;
+# per-route `strategy:` and per-provider `rotation:` override them.
+# routing:
+#   strategy: priority     # priority | weighted-rr
+#   rotation: first        # first | round_robin
+
 routes:
   - match: "glm-*"
     chain: [zai]
   - match: "deepseek*"
     chain: [deepseek, openrouter]
+    # strategy: inherit (default) | priority | weighted-rr — empty inherits global
+    # weights: [3, 1]        # weighted-rr only, index-aligned with chain
   # Claude routing needs an active anthropic-wire provider — cmdcode-claude
   # (Pro/Max plans) and/or claude-sub. Uncomment one above, then:
   # - match: "claude-*"
@@ -119,4 +144,4 @@ keys:
 
 # optional per-model cost overrides ($/Mtok); built-in defaults cover common models
 costs:
-  deepseek-flash: { input: 0.30, output: 1.20, cache_read: 0.03 }
+  deepseek-flash: { input: 0.30, output: 1.20, cache_read: 0.006 }

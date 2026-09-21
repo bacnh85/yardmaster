@@ -40,6 +40,7 @@ type Proxy struct {
 	Version string
 	Cost    func(model string) config.Cost
 	Pool    *auth.OAuthPool
+	Cd      *provider.Cooldowns
 
 	Active   Active
 	inflight atomic.Int64
@@ -57,6 +58,7 @@ func NewProxy(reg *provider.Registry, st *store.Store, costFn func(string) confi
 		Client: &http.Client{Transport: t},
 		Store:  st,
 		Cost:   costFn,
+		Cd:     provider.NewCooldowns(),
 	}
 }
 
@@ -220,6 +222,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 				lastErr = fmt.Sprintf("%s: account %s cooling down", tgt.Provider.Name, tgt.AcctName)
 				continue
 			}
+		} else if p.Cd != nil && p.Cd.Cooling(tgt.Provider.Name, limKey) {
+			// rate-limited / breaker-tripped static keys are skipped too
+			lastErr = fmt.Sprintf("%s: key cooling down", tgt.Provider.Name)
+			continue
 		}
 		if lim := p.Reg.Limiter(tgt.Provider, limKey); lim != nil {
 			if err := lim.Wait(r.Context()); err != nil {
@@ -256,12 +262,22 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			if tgt.AuthType == "oauth" && p.Pool != nil {
 				p.Pool.MarkResult(tgt.Provider.Name, tgt.AcctName, resp.StatusCode, string(b))
 			}
+			if p.Cd != nil {
+				if resp.StatusCode == 429 {
+					p.Cd.Mark429(tgt.Provider.Name, limKey, resp.Header.Get("Retry-After"))
+				} else if resp.StatusCode == 500 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504 || resp.StatusCode == 529 {
+					p.Cd.MarkFail(tgt.Provider.Name, limKey)
+				}
+			}
 			continue
 		}
 
 		// success — stream or translate
 		if tgt.AuthType == "oauth" && p.Pool != nil {
 			p.Pool.MarkResult(tgt.Provider.Name, tgt.AcctName, 200, "") // reset cooldown ladder
+		}
+		if p.Cd != nil {
+			p.Cd.Reset(tgt.Provider.Name, limKey)
 		}
 		rec.Provider = tgt.Provider.Name
 		rec.Attempts = attempt + 1
@@ -783,10 +799,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 		tr := translate.NewChat2RespStream(req["model"].(string))
 		feedChat := func(chunk map[string]any) bool {
 			if u := asUsageMap(chunk["usage"]); u != nil {
-				usage.In = num(u["prompt_tokens"])
-				usage.Out = num(u["completion_tokens"])
-				usage.CacheR = num(u["cache_read_tokens"])
-				usage.CacheW = num(u["cache_write_tokens"])
+				applyOpenAIUsage(&usage, u)
 			}
 			for _, e := range tr.Chunk(chunk) {
 				if writeEvent(e.Name, e.Data) != nil {
@@ -894,10 +907,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 				continue
 			}
 			if u := asUsageMap(chunk["usage"]); u != nil {
-				usage.In = num(u["prompt_tokens"])
-				usage.Out = num(u["completion_tokens"])
-				usage.CacheR = num(u["cache_read_tokens"])
-				usage.CacheW = num(u["cache_write_tokens"])
+				applyOpenAIUsage(&usage, u)
 			}
 			for _, ev := range tr.Chunk(chunk) {
 				if writeEvent(ev.Name, ev.Data) != nil {
@@ -921,10 +931,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 				continue
 			}
 			if u := asUsageMap(chunk["usage"]); u != nil {
-				usage.In = num(u["prompt_tokens"])
-				usage.Out = num(u["completion_tokens"])
-				usage.CacheR = num(u["cache_read_tokens"])
-				usage.CacheW = num(u["cache_write_tokens"])
+				applyOpenAIUsage(&usage, u)
 			}
 			if writeEvent("", chunk) != nil {
 				return usage, sinceT(r, *firstTouch)

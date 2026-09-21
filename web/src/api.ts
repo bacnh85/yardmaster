@@ -47,12 +47,19 @@ export interface ProviderRow {
   name: string; wire: string; base_url: string; models: string[];
   prefix?: string; // absent from older servers → prefill degrades to ""
   session?: string; // absent from older servers → prefill degrades to ""
+  rotation?: string; // absent from older servers → "first"
   preset: string; disabled: boolean;
   dispatch_interval_ms: number; auth_type: string;
   adaptive_thinking: boolean; inject_cache_control: boolean;
   connections: { label: string; suffix: string }[];
   accounts: { name: string; kind: string; disabled: boolean; expires_at: number; state?: string; last_error?: string }[];
 }
+export interface RouteRow {
+  match: string; chain: string[];
+  strategy?: string; // "priority" (default) | "weighted-rr"
+  weights?: number[]; // weighted-rr only, index-aligned with chain
+}
+export interface CooldownRow { provider: string; key: string; until: string }
 export interface CatalogModel {
   id: string; name?: string; family: string; context?: number; max_output?: number;
   input: number; output: number; cache_read: number; cache_write: number;
@@ -71,8 +78,10 @@ export interface KeyCreated { ok: boolean; key: string }
 
 export const fmtN = (n: number | null | undefined) =>
   n == null ? "–" : n.toLocaleString("en-US", { maximumFractionDigits: 0 });
-export const fmtUSD = (n: number) =>
-  n === 0 ? "$0" : n < 0.01 ? "<$0.01" : "$" + n.toFixed(2);
+export const fmtUSD = (n: number, currency?: string) => {
+  const sym = currency === "CNY" ? "¥" : "$";
+  return n === 0 ? sym + "0" : n < 0.01 ? "<" + sym + "0.01" : sym + n.toFixed(2);
+};
 export const fmtMs = (n: number | null | undefined) =>
   n == null ? "–" : n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${Math.round(n)}ms`; // seconds ≥1s: mixed units on adjacent cards read worse
 export const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
@@ -95,6 +104,6 @@ export interface QuotaWindow { used: number; cap: number; exceeded?: boolean; re
 export interface QuotaAccount {
   label: string; suffix: string;
   five_hour?: QuotaWindow; weekly?: QuotaWindow;
-  monthly_credits?: number; monthly_total?: number; limited?: boolean; err?: string;
+  monthly_credits?: number; monthly_total?: number; limited?: boolean; err?: string; currency?: string;
 }
 export interface QuotaGroup { source: string; providers: string[]; accounts: QuotaAccount[]; fetched_at: number }
