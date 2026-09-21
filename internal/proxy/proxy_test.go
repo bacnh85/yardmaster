@@ -615,3 +615,105 @@ func TestAnthropicClientUpstreamDropsWithoutDone(t *testing.T) {
 		t.Fatalf("message_stop is not last: %q", s[len(s)-80:])
 	}
 }
+
+// openai client → Responses-wire upstream: chat request converted, chat SSE
+// chunks come back as responses events.
+func TestOpenAIClientToResponsesUpstream(t *testing.T) {
+	var gotModel any
+	var gotInput any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path: %s", r.URL.Path)
+		}
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		gotModel = req["model"]
+		gotInput = req["input"]
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n")
+		fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"usage\":{\"input_tokens\":9,\"output_tokens\":2}}}\n\n")
+		f.Flush()
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "cx", BaseURL: up.URL, Wire: "responses", Models: []string{"gpt-test"},
+			Auth: config.AuthConf{Keys: []string{"k"}}}}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(
+		`{"model":"gpt-test","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	s := string(got)
+	if gotModel != "gpt-test" {
+		t.Fatalf("upstream model: %v", gotModel)
+	}
+	if gotInput == nil {
+		t.Fatalf("upstream input missing (responses shape expected)")
+	}
+	// an openai client gets chat chunks (responses upstream normalized to chat)
+	if !strings.Contains(s, `"content":"hello"`) {
+		t.Fatalf("text missing: %q", s)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(s), "[DONE]") {
+		t.Fatalf("stream must end with [DONE]: %q", s[len(s)-60:])
+	}
+}
+
+// Responses client → openai upstream: responses request normalized to chat,
+// chat SSE translated back to responses events.
+func TestResponsesClientToOpenAIUpstream(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("upstream path: %s", r.URL.Path)
+		}
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		if req["model"] != "gpt-test" {
+			t.Errorf("model: %v", req["model"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		c1, _ := json.Marshal(oaiChunk(map[string]any{"role": "assistant", "content": ""}, nil))
+		c2, _ := json.Marshal(oaiChunk(map[string]any{"content": "hey"}, nil))
+		cu, _ := json.Marshal(map[string]any{"id": "c", "object": "chat.completion.chunk", "model": "m",
+			"choices": []any{}, "usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 1}})
+		for _, c := range []string{string(c1), string(c2), string(cu)} {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			f.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		f.Flush()
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "ox", BaseURL: up.URL, Wire: "openai", Models: []string{"gpt-test"},
+			Auth: config.AuthConf{Keys: []string{"k"}}}}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeResponses))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(
+		`{"model":"gpt-test","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	s := string(got)
+	if !strings.Contains(s, "response.created") || !strings.Contains(s, "response.output_text.delta") {
+		t.Fatalf("responses events missing: %q", s)
+	}
+	if !strings.Contains(s, "hey") || !strings.Contains(s, "response.completed") {
+		t.Fatalf("text/completed missing: %q", s)
+	}
+}

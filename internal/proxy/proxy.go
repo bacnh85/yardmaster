@@ -789,6 +789,9 @@ func WithStartTime(ctx context.Context, t time.Time) context.Context {
 
 // forwardTranslateStream: upstream streams in provider wire, client expects the other wire.
 func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, touch func(), firstTouch *time.Time) (Usage, time.Duration) {
+	// model may be absent (e.g. matched via a "*" catch-all route) — never
+	// type-assert directly or a missing key panics mid-stream
+	clientModel, _ := req["model"].(string)
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -833,7 +836,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 
 	if clientWire == WireResponses {
 		// any non-responses upstream (chat-hub format) → client responses SSE
-		tr := translate.NewChat2RespStream(req["model"].(string))
+		tr := translate.NewChat2RespStream(clientModel)
 		feedChat := func(chunk map[string]any) bool {
 			if u := asUsageMap(chunk["usage"]); u != nil {
 				applyOpenAIUsage(&usage, u)
@@ -847,7 +850,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 		}
 		if tgt.Provider.Wire == WireAnthropic {
 			// anthropic upstream → chat chunks (Anth2OAI) → responses events
-			a2o := translate.NewAnth2OAIStream(req["model"].(string))
+			a2o := translate.NewAnth2OAIStream(clientModel)
 			eventName := ""
 			done := false
 			for sc.Scan() {
@@ -924,7 +927,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 
 	if clientWire == WireAnthropic {
 		// upstream openai → client anthropic
-		tr := translate.NewOAI2AnthStream(req["model"].(string))
+		tr := translate.NewOAI2AnthStream(clientModel)
 		done := false
 		for sc.Scan() {
 			line := sc.Bytes()
@@ -988,7 +991,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 		writeDone(w)
 	} else {
 		// upstream anthropic → client openai
-		tr := translate.NewAnth2OAIStream(req["model"].(string))
+		tr := translate.NewAnth2OAIStream(clientModel)
 		eventName := ""
 		done := false
 		for sc.Scan() {
