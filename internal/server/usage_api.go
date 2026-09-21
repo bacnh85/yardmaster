@@ -28,8 +28,8 @@ type usageCredits struct {
 }
 
 type usageReport struct {
-	Provider  string                  `json:"provider"`          // routing prefix/slug; "" = aggregate
-	Windows   map[string]*usageWindow `json:"windows,omitempty"` // "session" | "weekly"
+	Provider string                  `json:"provider"`          // routing prefix/slug; "" = aggregate
+	Windows  map[string]*usageWindow `json:"windows,omitempty"` // "session" | "weekly"
 	// Credits are deterministic, never config-order-arbitrary: scoped reports
 	// use the named source's lowest-balance account; aggregates use the source
 	// that contributed the worst session window, else the single source with a

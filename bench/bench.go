@@ -21,10 +21,10 @@ import (
 )
 
 type Options struct {
-	Streams int   // concurrent streams
-	Rate    int   // tokens/sec per stream
-	Toks    int   // tokens per stream
-	TTFTms  int   // simulated upstream time-to-first-byte
+	Streams int // concurrent streams
+	Rate    int // tokens/sec per stream
+	Toks    int // tokens per stream
+	TTFTms  int // simulated upstream time-to-first-byte
 	Verbose bool
 }
 

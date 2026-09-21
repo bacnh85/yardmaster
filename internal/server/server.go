@@ -368,10 +368,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		// edit a key: {name?, allow?, rpm?, usage?} — nil pointers keep stored values
 		name := strings.TrimPrefix(path, "keys/")
 		var req struct {
-			Name  *string  `json:"name"`
+			Name  *string   `json:"name"`
 			Allow *[]string `json:"allow"`
-			RPM   *int     `json:"rpm"`
-			Usage *bool    `json:"usage"`
+			RPM   *int      `json:"rpm"`
+			Usage *bool     `json:"usage"`
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
 			http.Error(w, "bad json", 400)

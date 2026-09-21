@@ -88,8 +88,8 @@ type Route struct {
 type Key struct {
 	Key   string   `yaml:"key"`
 	Name  string   `yaml:"name"`
-	Allow []string `yaml:"allow"` // route/model patterns; ["*"] = all
-	RPM   int      `yaml:"rpm"`   // inbound requests-per-minute limit; 0 = unlimited
+	Allow []string `yaml:"allow"`           // route/model patterns; ["*"] = all
+	RPM   int      `yaml:"rpm"`             // inbound requests-per-minute limit; 0 = unlimited
 	Usage *bool    `yaml:"usage,omitempty"` // nil = may read GET /v1/usage (default ON); false = revoked
 }
 

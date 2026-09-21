@@ -296,13 +296,13 @@ func TestUsageAllowScoped(t *testing.T) {
 		Providers: []*config.Provider{
 			{Name: "cmdcode", Prefix: "cmd", BaseURL: "https://api.commandcode.ai/provider/v1", Wire: "openai", Preset: "cmdcode",
 				Models: []string{"deepseek-v4-flash"},
-				Auth: config.AuthConf{Type: "static", Keys: []string{"k1-secret"}}},
+				Auth:   config.AuthConf{Type: "static", Keys: []string{"k1-secret"}}},
 			// same gateway, wildcard model list — must NOT broaden visibility
 			{Name: "cmdcode-claude", Prefix: "cmd", BaseURL: "https://api.commandcode.ai/anthropic", Wire: "anthropic",
 				Auth: config.AuthConf{Type: "static", Keys: []string{"k1-secret"}}},
-		{Name: "deepseek", Prefix: "ds", BaseURL: "https://api.deepseek.com", Wire: "openai", Preset: "deepseek",
-			Models: []string{"deepseek-flash"},
-			Auth: config.AuthConf{Type: "static", Keys: []string{"ds-key"}}},
+			{Name: "deepseek", Prefix: "ds", BaseURL: "https://api.deepseek.com", Wire: "openai", Preset: "deepseek",
+				Models: []string{"deepseek-flash"},
+				Auth:   config.AuthConf{Type: "static", Keys: []string{"ds-key"}}},
 		},
 	}
 	cfg.Defaults()
