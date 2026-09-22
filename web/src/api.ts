@@ -48,6 +48,7 @@ export interface ProviderRow {
   prefix?: string; // absent from older servers → prefill degrades to ""
   session?: string; // absent from older servers → prefill degrades to ""
   rotation?: string; // absent from older servers → "first"
+  subscription?: string; // absent from older servers → "" (no plan tier)
   preset: string; disabled: boolean;
   dispatch_interval_ms: number; auth_type: string;
   adaptive_thinking: boolean; inject_cache_control: boolean;

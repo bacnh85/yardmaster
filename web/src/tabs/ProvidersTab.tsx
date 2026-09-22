@@ -8,7 +8,7 @@ import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPla
 
 interface ProviderForm {
   name: string; wire: string; base_url: string; models: string; prefix: string;
-  keys: string; session: string; rotation: string;
+  keys: string; session: string; rotation: string; subscription: string;
   dispatch_interval_ms: number;
   adaptive_thinking: boolean; inject_cache_control: boolean;
   zcode_signing: boolean;
@@ -16,7 +16,7 @@ interface ProviderForm {
 }
 
 export const EMPTY_FORM: ProviderForm = {
-  name: "", wire: "openai", base_url: "", models: "", prefix: "", keys: "", session: "", rotation: "",
+  name: "", wire: "openai", base_url: "", models: "", prefix: "", keys: "", session: "", rotation: "", subscription: "",
   dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
   zcode_signing: false, extra_headers: "", body_overrides: "",
 };
@@ -30,6 +30,7 @@ const stateBadge = (state: string) =>
 
 export interface ProviderBody {
   name: string; wire: string; base_url: string; models: string[]; prefix: string; session: string; rotation: string;
+  subscription?: string;
   keys?: string[];
   preset?: string; disabled?: boolean;
   dispatch_interval_ms: number; adaptive_thinking: boolean; inject_cache_control: boolean;
@@ -52,6 +53,7 @@ export const providerBody = (form: ProviderForm): ProviderBody => ({
   prefix: form.prefix.trim().toLowerCase(),
   session: form.session,
   rotation: form.rotation,
+  subscription: form.subscription,
   ...(form.keys.trim() ? { keys: form.keys.split("\n").map((s) => s.trim()).filter(Boolean) } : {}),
   dispatch_interval_ms: Number(form.dispatch_interval_ms) || 0, // type=number inputs yield strings; Go rejects string→int
   adaptive_thinking: form.adaptive_thinking,
@@ -68,6 +70,7 @@ export const providerBody = (form: ProviderForm): ProviderBody => ({
 export const providerUpdateBody = (p: ProviderRow, models: string[]): ProviderBody => ({
   name: p.name, wire: p.wire, base_url: p.base_url, models,
   prefix: p.prefix ?? "", session: p.session ?? "", rotation: p.rotation ?? "",
+  subscription: p.subscription ?? "",
   preset: p.preset, disabled: p.disabled,
   dispatch_interval_ms: p.dispatch_interval_ms,
   adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
@@ -85,6 +88,7 @@ export const rowToForm = (p: ProviderRow): ProviderForm => ({
   keys: "", // blank = keep existing keys (server keeps them when omitted)
   session: p.session ?? "",
   rotation: p.rotation ?? "",
+  subscription: p.subscription ?? "",
   dispatch_interval_ms: p.dispatch_interval_ms,
   adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
   zcode_signing: p.zcode_signing ?? false,
@@ -142,6 +146,40 @@ const prefixedId = (prefix: string, id: string): string => (prefix ? `${prefix}/
  *  which must never happen without an explicit confirm. */
 export const serveTargetModels = (sub: Pick<ProviderRow, "models">, id: string): { models: string[]; confirm: boolean } =>
   sub.models.length === 0 ? { models: [id], confirm: true } : { models: [...sub.models, id], confirm: false };
+
+/** Next models list for the bulk show/hide toggle over one provider entry, or
+ *  null to refuse. Hiding the last visible model yields [] — and in config an
+ *  empty models list means WILDCARD (serve everything), so a "hide all" on a
+ *  curated entry would silently expand it to every model. The on path can
+ *  never produce [] (union with the existing list), so only off can refuse.
+ *  shownIds: ids visible on screen (may span wire families — only ids inside
+ *  familyIds are ever added); familyIds: the FAMILY catalog of this entry's
+ *  wire — the addition universe (callers pass it tier-capped) and the
+ *  complement source for wildcard hides (same semantics as the per-row box:
+ *  unchecking materializes "family minus unchecked", never narrower). */
+export const bulkNextModels = (cur: string[], shownIds: string[], familyIds: string[], on: boolean): string[] | null => {
+  if (on) {
+    if (cur.length === 0) return cur; // wildcard stays wildcard
+    const universe = new Set(familyIds); // never curate outside this entry's family/tier universe
+    return Array.from(new Set([...cur, ...shownIds.filter((id) => universe.has(id))]));
+  }
+  const next = cur.length === 0 ? familyIds.filter((id) => !shownIds.includes(id)) : cur.filter((id) => !shownIds.includes(id));
+  return next.length > 0 ? next : null; // hiding the last model = wildcard: refuse
+};
+
+/** Plan-tier cap for expose-all/bulk-toggle sweeps: the stored subscription
+ *  bounds what any sweep can add — the user's filter can only narrow within
+ *  it (tier order goat < pro < max). "" on either side = uncapped by it. */
+export const effectiveCap = (planFilter: "all" | CmdPlan, subscription: string): CmdPlan => {
+  const tier = (p: string) => ({ goat: 0, pro: 1, max: 2 } as Record<string, number>)[p] ?? -1;
+  if (planFilter === "all") return (subscription as CmdPlan) || "";
+  if (!subscription) return planFilter;
+  return tier(planFilter) <= tier(subscription) ? planFilter : (subscription as CmdPlan);
+};
+
+/** Ids allowed under a plan cap: "" = all, else only that tier's models. */
+export const capIds = (ids: string[], cap: CmdPlan): string[] =>
+  cap === "" ? ids : ids.filter((id) => cmdPlan(id) === cap);
 
 /** Effective family of a catalog model within a preset group: curation wins —
  *  a model curated on a responses-wire entry is "responses" even when models.dev
@@ -307,6 +345,15 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
                 <option value="round_robin">round robin</option>
               </select>
             </div>
+            <div className="field">
+              <label htmlFor="pf-subscription">subscription plan</label>
+              <select id="pf-subscription" value={form.subscription} onChange={set("subscription")}>
+                <option value="">none</option>
+                <option value="goat">goat</option>
+                <option value="pro">pro</option>
+                <option value="max">max</option>
+              </select>
+            </div>
             <div className="field full">
               <label htmlFor="pf-url">base URL</label>
               <input id="pf-url" value={form.base_url} required onChange={set("base_url")} placeholder="https://api.example.com/v1" aria-invalid={urlBad} />
@@ -366,6 +413,7 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
               {p.auth_type === "oauth" && <span className="badge ok">oauth</span>}
               {p.session === "opencode" && <span className="badge muted">opencode session</span>}
               {p.rotation === "round_robin" && <span className="badge muted">round robin</span>}
+              {p.subscription && <span className="badge muted" title="curation guardrail: model lists and expose-alls cap to this plan tier">{p.subscription} plan</span>}
               {cooling.has(p.name) && <span className="badge warn" title="rate-limited; cooling down before retry">cooling</span>}
               {p.disabled && <span className="badge warn">disabled</span>}
             </h3>
@@ -452,19 +500,36 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   const [adding, setAdding] = useState(false);
   const [label, setLabel] = useState("");
   const [key, setKey] = useState("");
+  const [subPlan, setSubPlan] = useState<"" | CmdPlan>("");
   const [addBusy, setAddBusy] = useState(false);
   // per-model playground result
   const [test, setTest] = useState<null | { model: string; busy: boolean; err: string; res: ProbeResult | null }>(null);
   const [catalog, setCatalog] = useState<null | { loading: boolean; err: string; models: CatalogModel[] }>(null);
   const catReq = useRef(0);
   const [familyFilter, setFamilyFilter] = useState<"all" | "exposed" | "free" | "paid">("all");
-  // plan tier filter (plan-capable presets only); persists per preset, defaults
-  // to the common plan so paid-tier models never sneak into expose-alls
+  // plan tier filter (plan-capable presets only); a stored subscription wins,
+  // then the persisted choice, then the common plan — so paid-tier models never
+  // sneak into expose-alls/toggle-alls on a lower-tier connection. Sweeps also
+  // read the stored tier at use time (effectiveCap), so a filter narrowed wider
+  // than the subscription can never lift the guardrail.
   const [planFilter, setPlanFilter] = useState<"all" | CmdPlan>(() => {
     if (!r.plans) return "all";
+    const sub = group.find((p) => p.subscription)?.subscription;
+    if (sub === "goat" || sub === "pro" || sub === "max") return sub;
     const v = localStorage.getItem(`plan-${r.id}`);
     return v === "goat" || v === "pro" || v === "max" || v === "all" ? v : "goat";
   });
+  // re-sync when the group's subscription changes (add-connection form, dashboard
+  // edit elsewhere): the initializer above only runs at mount
+  const groupSub = group.find((p) => p.subscription)?.subscription || "";
+  const lastSub = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastSub.current === null) { lastSub.current = groupSub; return; } // skip the mount run
+    if (groupSub !== lastSub.current) {
+      lastSub.current = groupSub;
+      if (r.plans) pickPlan(groupSub === "" ? "all" : (groupSub as "all" | CmdPlan));
+    }
+  }, [groupSub]); // eslint-disable-line react-hooks/exhaustive-deps
   const pickPlan = (v: "all" | CmdPlan) => {
     setPlanFilter(v);
     if (r.plans) localStorage.setItem(`plan-${r.id}`, v);
@@ -516,6 +581,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
             models: [], session: entry.session ?? "", preset: r.id, prefix: r.prefix,
             dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
             zcode_signing: false,
+            ...(subPlan ? { subscription: subPlan } : {}),
             ...entry.defaults, // preset tricks (zai: cache injection, fast mode, zcode signing)
             keys: [key.trim()],
             ...(stored ? { keyLabels: [stored] } : {}),
@@ -580,21 +646,18 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     // responses-only model onto the chat wire. "expose all <family>" collects them.
     const sub = modelsOf(familyFor(group, m));
     if (!sub) { toast("unknown wire for this model — pick one in its family column", "err"); return; }
-    const wildcard = sub.models.length === 0;
-    let next: string[];
-    if (wildcard) {
-      // unchecking a wildcard row curates to the family catalog minus that id —
-      // never silently restrict an "any model" provider to a single model
-      const familyIds = (catalog?.models ?? []).filter((x) => familyFor(group, x) === familyFor(group, m)).map((x) => x.id);
-      if (familyIds.length === 0) { toast("load the catalog first (refresh)", "err"); return; }
-      next = familyIds.filter((x) => x !== m.id);
-    } else {
-      next = sub.models.includes(m.id) ? sub.models.filter((x) => x !== m.id) : [...sub.models, m.id];
+    const familyIds = (catalog?.models ?? []).filter((x) => familyFor(group, x) === familyFor(group, m)).map((x) => x.id);
+    if (familyIds.length === 0) { toast("load the catalog first (refresh)", "err"); return; }
+    const on = !isVisible(m);
+    const next = bulkNextModels(sub.models, [m.id], familyIds, on);
+    if (next === null) {
+      toast(`cannot hide ${prefixedId(r.prefix, m.id)} — "${sub.name}" would have no visible models left (an empty list means "serve everything")`, "err");
+      return;
     }
     try {
       await put(`providers/${encodeURIComponent(sub.name)}`, providerUpdateBody(sub, next));
       reload();
-      toast(`${prefixedId(r.prefix, m.id)} ${wildcard || sub.models.includes(m.id) ? "hidden" : "visible"}`);
+      toast(`${prefixedId(r.prefix, m.id)} ${next.includes(m.id) ? "visible" : "hidden"}`);
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
   };
 
@@ -635,12 +698,14 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     const sub = group.find((p) => p.name === e.name);
     if (!sub) { toast(`add a connection first — ${e.name} does not exist yet`, "err"); return; }
     // strict: unknown-family models are never swept onto a guessed wire — they
-    // get an explicit per-row "serve on…" picker instead
-    const ids = catalog.models
-      .filter((m) => familyFor(group, m) === e.family)
-      .filter((m) => planFilter === "all" || cmdPlan(m.id) === planFilter)
-      .map((m) => m.id);
-    if (ids.length === 0) { toast(`no ${e.family} models${planFilter !== "all" ? ` on ${planFilter}` : ""}`, "err"); return; }
+    // get an explicit per-row "serve on…" picker instead. Sweeps are capped by
+    // the stored subscription; the plan filter can only narrow within it.
+    const cap = effectiveCap(planFilter, sub.subscription || "");
+    const ids = capIds(
+      catalog.models.filter((m) => familyFor(group, m) === e.family).map((m) => m.id),
+      cap,
+    );
+    if (ids.length === 0) { toast(`no ${e.family} models${cap ? ` on ${cap}` : ""}`, "err"); return; }
     const next = Array.from(new Set([...sub.models, ...ids]));
     try {
       await put(`providers/${encodeURIComponent(sub.name)}`, providerUpdateBody(sub, next));
@@ -653,6 +718,50 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     (planFilter === "all" || cmdPlan(m.id) === planFilter) &&
     (familyFilter === "all" || (familyFilter === "exposed" ? isVisible(m) : familyFilter === "free" ? m.free : !m.free)) &&
     (!filter || prefixedId(r.prefix, m.id).includes(filter)));
+  // rows without a resolvable wire ("serve on…", no checkbox) can never be
+  // toggled — the bulk toggle's state and click must ignore them, or the
+  // button reads "[ ] show all" forever and clicking it looks dead
+  const toggleableShown = shown.filter((m) => !!modelsOf(familyFor(group, m)));
+
+  /** Bulk show/hide every shown model: one PUT per wire family, refusing
+   *  (whole batch aborts, nothing applied) when hiding would empty any entry's
+   *  curated list — an empty models list means wildcard (serve everything). */
+  const toggleAll = async () => {
+    if (!catalog?.models.length) { toast("load the catalog first", "err"); return; }
+    const on = !(toggleableShown.length > 0 && toggleableShown.every((m) => isVisible(m)));
+    // resolve every target entry first: a refusal aborts the whole batch
+    const updates: { p: ProviderRow; models: string[] }[] = [];
+    for (const m of shown) {
+      const fam = familyFor(group, m);
+      const sub = modelsOf(fam);
+      if (!sub || updates.some((u) => u.p.name === sub.name)) continue; // unknown wire — per-row picker only
+      // family universe: additions stay family- and tier-capped (guardrail);
+      // wildcard hides materialize the UNcapped family complement — the exact
+      // per-row checkbox semantics (hiding can only narrow a wildcard)
+      const famIds = catalog.models.filter((x) => familyFor(group, x) === fam).map((x) => x.id);
+      const universe = on ? capIds(famIds, effectiveCap(planFilter, sub.subscription || "")) : famIds;
+      const shownIds = shown.filter((x) => familyFor(group, x) === fam).map((x) => x.id);
+      const next = bulkNextModels(sub.models, shownIds, universe, on);
+      if (next === null) {
+        toast(`cannot hide all — "${sub.name}" would have no visible models left (an empty list means "serve everything"). Uncheck models individually, or keep at least one.`, "err");
+        return;
+      }
+      if (next.length !== sub.models.length || next.some((id, i) => id !== sub.models[i])) {
+        updates.push({ p: sub, models: next }); // skip no-ops
+      }
+    }
+    for (const { p, models } of updates) {
+      try {
+        await put(`providers/${encodeURIComponent(p.name)}`, providerUpdateBody(p, models));
+      } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
+    }
+    reload();
+    if (updates.length > 0) {
+      const skipped = shown.length - toggleableShown.length;
+      toast(`${on ? "showing" : "hiding"} ${toggleableShown.length} models across ${updates.length} ${updates.length === 1 ? "entry" : "entries"}${skipped > 0 ? ` · ${skipped} row${skipped === 1 ? "" : "s"} need a wire (use "serve on…")` : ""}`);
+    }
+  };
+  const allShownVisible = toggleableShown.length > 0 && toggleableShown.every((m) => isVisible(m));
 
   return (
     <>
@@ -668,7 +777,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
       <div className="card">
         <div className="row spread baseline">
           <h3>Connections</h3>
-          <button className="btn primary sm" onClick={() => setAdding((a) => !a)}>{adding ? "close" : "+ add"}</button>
+          <button className="btn primary sm" onClick={() => { setSubPlan((group.find((p) => p.subscription)?.subscription as "" | CmdPlan) || ""); setAdding((a) => !a); }}>{adding ? "close" : "+ add"}</button>
         </div>
         {adding && (
           <form className="form-grid" onSubmit={addConnection} aria-label="add connection" style={{ margin: "12px 0" }}>
@@ -681,6 +790,17 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
               <label htmlFor="conn-key">API key</label>
               <input id="conn-key" type="password" value={key} required onChange={(e) => setKey(e.target.value)} placeholder="sk-…" />
             </div>
+            {r.plans && (
+              <div className="field">
+                <label htmlFor="conn-subscription">subscription plan</label>
+                <select id="conn-subscription" value={subPlan} onChange={(e) => setSubPlan(e.target.value as "" | CmdPlan)}>
+                  <option value="">none</option>
+                  <option value="goat">goat</option>
+                  <option value="pro">pro</option>
+                  <option value="max">max</option>
+                </select>
+              </div>
+            )}
             <div className="field full">
               <button className="btn primary" type="submit" disabled={addBusy || !key.trim()}>
                 {addBusy ? "saving…" : "add connection"}
@@ -772,6 +892,13 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
             </div>
             <input className="grow" aria-label="filter models" placeholder="filter…" value={filter} onChange={(e) => setFilter(e.target.value)} />
             <span className="spacer" />
+            {catalogSource && (
+              <button className="btn sm" title="show or hide every model currently listed"
+                disabled={toggleableShown.length === 0}
+                onClick={toggleAll}>
+                {allShownVisible ? "[x] hide all" : "[ ] show all"}
+              </button>
+            )}
             {r.entries.filter((e) => e.family !== "gemini").map((e) => (
               <button key={e.name} className="btn sm" title={`expose every ${e.familyLabel} model on ${e.name}`}
                 onClick={() => exposeAll(e)}>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels } from "./tabs/ProvidersTab";
+import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels, bulkNextModels, effectiveCap, capIds } from "./tabs/ProvidersTab";
 import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan } from "./presets";
 import type { ProviderRow } from "./api";
 
@@ -54,6 +54,20 @@ describe("providerBody", () => {
     expect(blank.zcode_signing).toBe(false);
     expect(blank.extra_headers).toBeUndefined();
     expect(blank.body_overrides).toBeUndefined();
+  });
+  it("round-trips subscription on add/edit (Go PUT: omitted = keep, \"\" = clear)", () => {
+    expect(providerBody({ ...EMPTY_FORM, subscription: "goat" }).subscription).toBe("goat");
+    expect(providerBody({ ...EMPTY_FORM, subscription: "" }).subscription).toBe("");
+    const prow = rowToForm({ ...baseRow, subscription: "pro" });
+    expect(prow.subscription).toBe("pro");
+    expect(providerBody(prow).subscription).toBe("pro");
+    // old servers without the field degrade to "" (PUT clears the tier, harmless)
+    expect(providerBody(rowToForm(baseRow)).subscription).toBe("");
+  });
+  it("providerUpdateBody never drops the stored subscription (row actions)", () => {
+    const body = providerUpdateBody({ ...baseRow, subscription: "max" }, ["m"]);
+    expect(body.subscription).toBe("max");
+    expect(providerUpdateBody(baseRow, ["m"]).subscription).toBe("");
   });
   it("rejects non-object JSON in override fields (save() surfaces the error)", () => {
     expect(() => providerBody({ ...EMPTY_FORM, extra_headers: "[1,2]" })).toThrow();
@@ -251,6 +265,56 @@ describe("registry", () => {
     // silently un-serves every other model on that wire
     expect(serveTargetModels({ models: [] }, "omen-alpha")).toEqual({ models: ["omen-alpha"], confirm: true });
     expect(serveTargetModels({ models: ["a", "b"] }, "c")).toEqual({ models: ["a", "b", "c"], confirm: false });
+  });
+
+  describe("bulkNextModels (bulk visibility toggle)", () => {
+    it("show on a curated entry unions the shown ids", () => {
+      expect(bulkNextModels(["a"], ["b", "c"], ["a", "b", "c", "d"], true)).toEqual(["a", "b", "c"]);
+    });
+    it("show on a wildcard stays wildcard (no-op)", () => {
+      expect(bulkNextModels([], ["b", "c"], ["a", "b", "c"], true)).toEqual([]);
+    });
+    it("show never curates ids outside the entry's family/tier universe (cross-wire guard)", () => {
+      // shownIds may span wire families on screen; only ids in familyIds land
+      expect(bulkNextModels(["a"], ["b", "r1"], ["a", "b"], true)).toEqual(["a", "b"]);
+    });
+    it("hide on a curated entry removes only the shown ids", () => {
+      expect(bulkNextModels(["a", "b", "c"], ["b"], ["a", "b", "c"], false)).toEqual(["a", "c"]);
+    });
+    it("hide on a wildcard materializes the family complement of the shown ids", () => {
+      expect(bulkNextModels([], ["b"], ["a", "b", "c"], false)).toEqual(["a", "c"]);
+    });
+    it("hide on a wildcard materializes the UNcapped family complement (per-row semantics: hiding only narrows)", () => {
+      // "hide these" on a wildcard = serve the family rest — incl. ids the cap
+      // would forbid ADDING; a narrowing of the wildcard can't expose anything new
+      expect(bulkNextModels([], ["a"], ["a", "b", "c"], false)).toEqual(["b", "c"]);
+    });
+    it("refuses (null) when hiding the LAST model of a curated entry (per-row single uncheck too)", () => {
+      expect(bulkNextModels(["a"], ["a"], ["a"], false)).toBeNull();
+    });
+    it("refuses (null) when hiding would empty a CURATED entry — [] means wildcard=serve-everything", () => {
+      expect(bulkNextModels(["a", "b"], ["a", "b"], ["a", "b"], false)).toBeNull();
+    });
+    it("refuses (null) when hiding would empty a WILDCARD entry", () => {
+      expect(bulkNextModels([], ["a", "b"], ["a", "b"], false)).toBeNull();
+    });
+  });
+
+  describe("effectiveCap + capIds (subscription guardrail)", () => {
+    it("stored subscription bounds the sweep — user filter can only narrow within it", () => {
+      expect(effectiveCap("pro", "goat")).toBe("goat"); // filter above stored tier → capped down
+      expect(effectiveCap("max", "pro")).toBe("pro");
+      expect(effectiveCap("all", "goat")).toBe("goat"); // "all plans" still sweeps only the stored tier
+      expect(effectiveCap("goat", "max")).toBe("goat"); // narrower choice allowed
+      expect(effectiveCap("all", "")).toBe(""); // no subscription = uncapped
+      expect(effectiveCap("pro", "")).toBe("pro");
+    });
+    it("capIds keeps only the capped tier's models (case-insensitive cmdPlan)", () => {
+      const ids = ["claude-opus-5", "zai-org/GLM-5.3", "claude-sonnet-5"];
+      expect(capIds(ids, "")).toEqual(ids);
+      expect(capIds(ids, "goat")).toEqual(["zai-org/GLM-5.3"]);
+      expect(capIds(ids, "max")).toEqual(["claude-opus-5"]);
+    });
   });
 
   it("maps wires to catalog families", () => {

@@ -322,6 +322,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				"disabled":          p.Disabled,
 				"session":           p.Session,
 				"rotation":          p.Rotation,
+				"subscription":      p.Subscription,
 				"auth_type":         p.Auth.Type,
 				"adaptive_thinking": p.AdaptiveThinking, "inject_cache_control": p.InjectCacheControl,
 				"zcode_signing": p.ZcodeSigning,
@@ -568,6 +569,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					if f.Rotation == nil {
 						p.Rotation = x.Rotation // omitted field keeps the stored rotation
 					}
+					if f.Subscription == nil {
+						p.Subscription = x.Subscription // omitted field keeps the stored subscription
+					}
 					if f.Preset == "" {
 						p.Preset = x.Preset
 					}
@@ -778,6 +782,7 @@ type providerForm struct {
 	Prefix             *string           `json:"prefix"`   // nil = omitted (keep stored); "" = none; else routing prefix
 	Session            *string           `json:"session"`  // nil = omitted (keep stored); "" = none; "opencode" = session headers
 	Rotation           *string           `json:"rotation"` // nil = omitted (keep stored); first | round_robin
+	Subscription       *string           `json:"subscription"` // nil = omitted (keep stored); "" = none; goat|pro|max
 	Preset             string            `json:"preset"`
 	Disabled           *bool             `json:"disabled"`             // nil = omitted (keep stored)
 	DispatchIntervalMS *int              `json:"dispatch_interval_ms"` // nil = omitted (keep stored)
@@ -825,6 +830,13 @@ func (f providerForm) provider() (*config.Provider, error) {
 			return nil, fmt.Errorf("rotation must be first or round_robin")
 		}
 	}
+	subscription := ""
+	if f.Subscription != nil {
+		subscription = strings.ToLower(strings.TrimSpace(*f.Subscription))
+		if !config.ValidSubscription(subscription) {
+			return nil, fmt.Errorf("subscription must be empty, goat, pro, or max")
+		}
+	}
 	disabled := false
 	if f.Disabled != nil {
 		disabled = *f.Disabled
@@ -839,6 +851,7 @@ func (f providerForm) provider() (*config.Provider, error) {
 		Session:            session,
 		Preset:             f.Preset,
 		Rotation:           rotation,
+		Subscription:       subscription,
 		Disabled:           disabled,
 		DispatchIntervalMS: derefInt(f.DispatchIntervalMS),
 		AdaptiveThinking:   derefBool(f.AdaptiveThinking),

@@ -47,6 +47,7 @@ type Provider struct {
 	AdaptiveThinking   bool              `yaml:"adaptive_thinking"`    // zai-style thinking:{type:adaptive}+output_config.effort
 	InjectCacheControl bool              `yaml:"inject_cache_control"` // add ephemeral markers when translating to anthropic wire
 	ZcodeSigning       bool              `yaml:"zcode_signing"`        // zai: ZCode desktop parity (identity headers + Client-Signing V4)
+	Subscription       string            `yaml:"subscription"`         // curation guardrail: ""|goat|pro|max — dashboard filters/expose-alls cap to this plan tier
 	HeadersTimeoutS    int               `yaml:"headers_timeout_s"`    // max wait for upstream response headers (default 300)
 	Rotation           string            `yaml:"rotation"`             // first (default) | round_robin — starting key/account per request
 }
@@ -111,6 +112,16 @@ func AuthKindDefaults(kind string) (endpoint, clientID string, ok bool) {
 			"app_EMoamEEZ73f0CkXaXp7hrann", true
 	}
 	return "", "", false
+}
+
+// ValidSubscription reports whether s is an acceptable provider subscription
+// plan tier: "" (none) | goat | pro | max.
+func ValidSubscription(s string) bool {
+	switch s {
+	case "", "goat", "pro", "max":
+		return true
+	}
+	return false
 }
 
 // ValidPrefix reports whether s is an acceptable routing prefix.
@@ -223,6 +234,9 @@ func (c *Config) Validate() error {
 		}
 		if p.Rotation != "" && p.Rotation != "first" && p.Rotation != "round_robin" {
 			return fmt.Errorf("provider %s: rotation must be first|round_robin", p.Name)
+		}
+		if !ValidSubscription(p.Subscription) {
+			return fmt.Errorf("provider %s: subscription must be empty|goat|pro|max", p.Name)
 		}
 		if p.Wire == "responses" && p.Auth.Type == "" {
 			p.Auth.Type = "static"

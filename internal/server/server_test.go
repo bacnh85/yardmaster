@@ -503,6 +503,102 @@ func TestProviderPutPreservesOAuth(t *testing.T) {
 	}
 }
 
+// Subscription plan tier: set on create/PUT, kept when PUT omits it, cleared
+// with "", rejected on unknown values. GET exposes it for the dashboard.
+func TestProviderSubscriptionField(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "cc", BaseURL: "https://api.commandcode.ai/provider/v1", Wire: "openai", Subscription: "goat"},
+		},
+	}
+	b, _ := yaml.Marshal(cfg)
+	if err := os.WriteFile(cfgPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p := proxy.NewProxy(provider.New(cfg), st, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, cfgPath, "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	admin := func(method, path string, body io.Reader) (int, []byte) {
+		req, _ := http.NewRequest(method, ts.URL+"/admin/api/"+path, body)
+		req.SetBasicAuth("", "secretpw")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+
+	// GET exposes the stored tier
+	code, body := admin("GET", "providers", nil)
+	if code != 200 || !strings.Contains(string(body), `"subscription":"goat"`) {
+		t.Fatalf("GET providers missing subscription: %d %s", code, body)
+	}
+
+	// PUT omitting subscription keeps the stored tier
+	code, body = admin("PUT", "providers/cc", strings.NewReader(`{"wire":"openai","base_url":"https://api.commandcode.ai/provider/v1","models":["m"]}`))
+	if code != 200 {
+		t.Fatalf("PUT without subscription: %d %s", code, body)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Providers[0].Subscription != "goat" {
+		t.Fatalf("PUT without subscription lost stored tier: %q", loaded.Providers[0].Subscription)
+	}
+
+	// PUT with a tier updates it; "" clears
+	code, body = admin("PUT", "providers/cc", strings.NewReader(`{"wire":"openai","base_url":"https://api.commandcode.ai/provider/v1","models":["m"],"subscription":"pro"}`))
+	if code != 200 {
+		t.Fatalf("PUT subscription=pro: %d %s", code, body)
+	}
+	if loaded, _ = config.Load(cfgPath); loaded.Providers[0].Subscription != "pro" {
+		t.Fatalf("subscription not updated: %q", loaded.Providers[0].Subscription)
+	}
+	code, _ = admin("PUT", "providers/cc", strings.NewReader(`{"wire":"openai","base_url":"https://api.commandcode.ai/provider/v1","models":["m"],"subscription":""}`))
+	if code != 200 {
+		t.Fatalf("PUT subscription=\"\": %d", code)
+	}
+	if loaded, _ = config.Load(cfgPath); loaded.Providers[0].Subscription != "" {
+		t.Fatalf("subscription not cleared: %q", loaded.Providers[0].Subscription)
+	}
+
+	// unknown tier rejected (form validation, then config validation)
+	code, body = admin("PUT", "providers/cc", strings.NewReader(`{"wire":"openai","base_url":"https://api.commandcode.ai/provider/v1","models":["m"],"subscription":"platinum"}`))
+	if code != 400 {
+		t.Fatalf("bad subscription accepted: %d %s", code, body)
+	}
+
+	// POST create with a tier works
+	code, body = admin("POST", "providers", strings.NewReader(`{"name":"cc2","wire":"openai","base_url":"https://api.commandcode.ai/provider/v1","models":["m"],"subscription":"max"}`))
+	if code != 200 {
+		t.Fatalf("POST with subscription: %d %s", code, body)
+	}
+	if loaded, _ = config.Load(cfgPath); loaded.Providers[1].Subscription != "max" {
+		t.Fatalf("created provider subscription lost: %+v", loaded.Providers[1])
+	}
+	code, _ = admin("DELETE", "providers/cc2", nil)
+	if code != 200 {
+		t.Fatalf("cleanup delete: %d", code)
+	}
+}
+
 // models.dev enrichment: npm → wire family mapping + cost/context merge.
 func TestCatalogEnrichment(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
