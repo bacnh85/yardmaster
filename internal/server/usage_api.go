@@ -46,8 +46,7 @@ func slugFor(source string) string {
 	return source // zai, deepseek
 }
 
-// sourceForSlug maps a ?provider= slug back to a quota source ("" = unknown —
-// includes opencode-go, which has no upstream usage API at all).
+// sourceForSlug maps a ?provider= slug back to a quota source ("" = unknown).
 func sourceForSlug(slug string) string {
 	switch slug {
 	case "zai":
@@ -56,6 +55,8 @@ func sourceForSlug(slug string) string {
 		return "commandcode"
 	case "ds", "deepseek":
 		return "deepseek"
+	case "ocg", "opencode-go", "opencode":
+		return "opencode"
 	}
 	return ""
 }
@@ -86,7 +87,7 @@ func toUsageWindow(w *QuotaWindow) *usageWindow {
 // rule; accounts within a source virtually never mix currencies).
 func sourceUsage(pq *ProviderQuota, providers []string) usageReport {
 	out := usageReport{Provider: slugFor(pq.Source), Providers: providers}
-	var session, weekly *QuotaWindow
+	var session, weekly, monthly *QuotaWindow
 	for i := range pq.Accounts {
 		a := pq.Accounts[i]
 		if a.FiveHour != nil && (session == nil || windowUsedPct(a.FiveHour) > windowUsedPct(session)) {
@@ -94,6 +95,9 @@ func sourceUsage(pq *ProviderQuota, providers []string) usageReport {
 		}
 		if a.Weekly != nil && (weekly == nil || windowUsedPct(a.Weekly) > windowUsedPct(weekly)) {
 			weekly = a.Weekly
+		}
+		if a.Monthly != nil && (monthly == nil || windowUsedPct(a.Monthly) > windowUsedPct(monthly)) {
+			monthly = a.Monthly
 		}
 		if a.MonthlyCredits != nil && (out.Credits == nil || *a.MonthlyCredits < out.Credits.Balance) {
 			cur := a.Currency
@@ -103,13 +107,16 @@ func sourceUsage(pq *ProviderQuota, providers []string) usageReport {
 			out.Credits = &usageCredits{Currency: cur, Balance: *a.MonthlyCredits}
 		}
 	}
-	if session != nil || weekly != nil {
+	if session != nil || weekly != nil || monthly != nil {
 		out.Windows = map[string]*usageWindow{}
 		if session != nil {
 			out.Windows["session"] = toUsageWindow(session)
 		}
 		if weekly != nil {
 			out.Windows["weekly"] = toUsageWindow(weekly)
+		}
+		if monthly != nil {
+			out.Windows["monthly"] = toUsageWindow(monthly)
 		}
 	}
 	return out
@@ -131,7 +138,7 @@ func aggregateUsage(rep []ProviderQuota, providers []string) usageReport {
 	var creditsSources []*usageCredits
 	for i := range srcs {
 		su := sourceUsage(&srcs[i], providers)
-		for _, kind := range []string{"session", "weekly"} {
+		for _, kind := range []string{"session", "weekly", "monthly"} {
 			w := su.Windows[kind]
 			if w == nil {
 				continue
@@ -161,14 +168,33 @@ func aggregateUsage(rep []ProviderQuota, providers []string) usageReport {
 }
 
 // providerReachable reports whether the key could route ANY request to p —
-// the same matching semantics as Registry.Resolve: bare or prefixed forms of
-// p's curated models (direct or via routes). A provider without a model list
-// catches every bare id, so it is reachable only by patterns that can name a
-// bare id — "*" or anything not fully claimed by a known prefix ("zai/*"
-// forces all matches into zai's namespace; "cm*" does not).
-func providerReachable(cfg *config.Config, p *config.Provider, allow []string) bool {
+// the same matching semantics as Registry.Resolve: routes first (the first
+// route whose Match pattern can hit a model the key is allowed must name p in
+// its chain), then bare or prefixed forms of p's curated models. A provider
+// without a model list catches every bare id, so it is reachable only by
+// patterns that can name a bare id — "*" or anything not fully claimed by a
+// known prefix ("zai/*" forces all matches into zai's namespace; "cm*" does
+// not). Route checks are additive-only: they can make an upstream visible,
+// never hide one the legacy model rules already admit (Resolve applies the
+// same provs filter either way, so anything routable through a route is also
+// routable when the provider list it feeds contains p by direct rules).
+func (s *Server) providerReachable(cfg *config.Config, p *config.Provider, allow []string) bool {
 	if p.Disabled {
 		return false
+	}
+	// Routes are matched BEFORE prefix resolution and their chain replaces the
+	// provider selection wholesale (the wildcard-curation filter still applies
+	// per provider). If the first matching route can admit any allowed model
+	// and names p, the key can genuinely hit p through that chain.
+	for _, rt := range cfg.Routes {
+		if !routeAdmitsAllow(rt.Match, allow) {
+			continue
+		}
+		for _, name := range rt.Chain {
+			if name == p.Name {
+				return true
+			}
+		}
 	}
 	if len(p.Models) == 0 {
 		for _, pat := range allow {
@@ -188,6 +214,24 @@ func providerReachable(cfg *config.Config, p *config.Provider, allow []string) b
 	}
 	for bare := range p.ModelMap {
 		if check(bare) {
+			return true
+		}
+	}
+	return false
+}
+
+// routeAdmitsAllow mirrors Resolve's model filter for one route: the route
+// fires when ANY model id it can match is admitted by the key's allow list.
+// Match patterns are exact ids or suffix-"*" prefixes (matchRoute), so the
+// set overlap test is: prefix candidates by pattern length (a longer pattern
+// cannot match inside a shorter one's extent), then prefix-match either way.
+func routeAdmitsAllow(match string, allow []string) bool {
+	for _, pat := range allow {
+		a, b := match, pat
+		if len(b) > len(a) {
+			a, b = b, a
+		}
+		if strings.HasPrefix(a, b) {
 			return true
 		}
 	}
@@ -233,7 +277,7 @@ func (s *Server) scopedQuotaReport(allow []string) []ProviderQuota {
 	out := make([]ProviderQuota, 0, len(rep))
 	for i := range rep {
 		for _, name := range rep[i].Providers {
-			if p := provs[name]; p != nil && providerReachable(cfg, p, allow) {
+			if p := provs[name]; p != nil && s.providerReachable(cfg, p, allow) {
 				out = append(out, rep[i])
 				break
 			}

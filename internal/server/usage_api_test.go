@@ -24,7 +24,8 @@ func TestUsageSlugMap(t *testing.T) {
 	cases := map[string]string{
 		"zai": "zai", "command-code": "commandcode", "cmd": "commandcode",
 		"commandcode": "commandcode", "ds": "deepseek", "deepseek": "deepseek",
-		"ocg": "", "opencode-go": "", "glm-5.3-flash": "", "": "",
+		"ocg": "opencode", "opencode-go": "opencode", "opencode": "opencode",
+		"glm-5.3-flash": "", "": "",
 	}
 	for in, want := range cases {
 		if got := sourceForSlug(in); got != want {
@@ -84,6 +85,41 @@ func TestUsageSourceProjection(t *testing.T) {
 	if out.Windows != nil || out.Credits == nil || out.Credits.Currency != "CNY" || out.Credits.Balance != 88 {
 		t.Errorf("deepseek projection: windows=%v credits=%+v", out.Windows, out.Credits)
 	}
+
+	// opencode: all three pct windows project (live API reports monthly)
+	oc := &ProviderQuota{Source: "opencode", Accounts: []QuotaAccount{
+		{FiveHour: &QuotaWindow{Used: 1, Cap: 100, Unit: "pct"}, Weekly: &QuotaWindow{Used: 100, Cap: 100, Unit: "pct"}, Monthly: &QuotaWindow{Used: 80, Cap: 100, Unit: "pct"}},
+	}}
+	out = sourceUsage(oc, prov)
+	if w := out.Windows["monthly"]; w == nil || w.RemainingPct != 20 {
+		t.Errorf("monthly %+v, want 20 remaining", out.Windows["monthly"])
+	}
+	// commandcode carries no explicit Monthly — no monthly window may appear
+	cc := &ProviderQuota{Source: "commandcode", Accounts: []QuotaAccount{
+		{FiveHour: &QuotaWindow{Used: 5, Cap: 100, Unit: "pct"}, MonthlyCredits: ptrF(69.99)},
+	}}
+	out = sourceUsage(cc, prov)
+	if out.Windows["monthly"] != nil {
+		t.Errorf("commandcode monthly %+v, want none", out.Windows["monthly"])
+	}
+
+	// monthly-only account (oc API omitted rolling/weekly → ocPctWindow nil):
+	// monthly must still project, never be dropped for lack of session/weekly
+	only := &ProviderQuota{Source: "opencode", Accounts: []QuotaAccount{
+		{Monthly: &QuotaWindow{Used: 80, Cap: 100, Unit: "pct"}},
+	}}
+	out = sourceUsage(only, prov)
+	if w := out.Windows["monthly"]; w == nil || w.RemainingPct != 20 {
+		t.Errorf("monthly-only %+v, want 20 remaining", out.Windows["monthly"])
+	}
+	if out.Windows["session"] != nil || out.Windows["weekly"] != nil {
+		t.Errorf("monthly-only fabricated windows: %+v", out.Windows)
+	}
+	// and the aggregate must surface it too
+	agg := aggregateUsage([]ProviderQuota{*only}, prov)
+	if w := agg.Windows["monthly"]; w == nil || w.RemainingPct != 20 {
+		t.Errorf("aggregate monthly-only %+v, want 20", agg.Windows["monthly"])
+	}
 }
 
 func TestUsageAggregateWorstCase(t *testing.T) {
@@ -99,6 +135,12 @@ func TestUsageAggregateWorstCase(t *testing.T) {
 	}
 	if w := out.Windows["weekly"]; w == nil || w.RemainingPct != 10 {
 		t.Errorf("aggregate weekly %+v, want 10", out.Windows["weekly"])
+	}
+	// monthly: only opencode carries one → worst = its own
+	rep[0].Accounts[0].Monthly = &QuotaWindow{Used: 20, Cap: 100, Unit: "pct"}
+	out = aggregateUsage(rep, prov)
+	if w := out.Windows["monthly"]; w == nil || w.RemainingPct != 80 {
+		t.Errorf("aggregate monthly %+v, want 80", out.Windows["monthly"])
 	}
 	if out.Credits == nil || out.Credits.Balance != 69.99 {
 		t.Errorf("aggregate credits %+v", out.Credits)
@@ -385,6 +427,41 @@ func TestUsageAllowScoped(t *testing.T) {
 	if code, _ := get("?provider=command-code"); code != 404 {
 		t.Errorf("claimed prefix ds vs command-code: want 404")
 	}
+
+	// ── routes: visibility mirrors Resolve's routes-first chain selection ──
+	// A route "cmd/ds*" → [cmdcode-claude] (wildcard member) is genuinely
+	// routable by a key allowed "cmd/ds*" — the wildcard member must surface
+	// the commandcode source even though its Models list is empty.
+	cfg.Routes = []*config.Route{{Match: "cmd/ds*", Chain: []string{"cmdcode-claude"}}}
+	cfg.Keys[0].Allow = []string{"cmd/ds*"}
+	reg.Reload(cfg)
+	code, rep = get("?provider=command-code")
+	if code != 200 || rep.Provider != "command-code" {
+		t.Errorf("route chain wildcard member: %d %+v", code, rep)
+	}
+	// key NOT allowed any model the route matches → still 404
+	cfg.Keys[0].Allow = []string{"ds/*"}
+	reg.Reload(cfg)
+	if code, _ := get("?provider=command-code"); code != 404 {
+		t.Errorf("route exists but key out of route scope: want 404")
+	}
+	// chain NOT naming the queried source's provider (deepseek) → invisible
+	cfg.Routes = []*config.Route{{Match: "cmd/ds*", Chain: []string{"cmdcode"}}}
+	cfg.Keys[0].Allow = []string{"cmd/ds*"}
+	reg.Reload(cfg)
+	if code, _ := get("?provider=deepseek"); code != 404 {
+		t.Errorf("route chains other provider: deepseek want 404")
+	}
+	// route to a DISABLED provider → not reachable
+	cfg.Routes = []*config.Route{{Match: "cmd/ds*", Chain: []string{"cmdcode-claude"}}}
+	cfg.Providers[1].Disabled = true
+	reg.Reload(cfg)
+	if code, _ := get("?provider=command-code"); code != 404 {
+		t.Errorf("route to disabled provider: want 404")
+	}
+	cfg.Providers[1].Disabled = false
+	cfg.Routes = nil
+	reg.Reload(cfg)
 }
 
 func TestUsagePermissionEdit(t *testing.T) {
