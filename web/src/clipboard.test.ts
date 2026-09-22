@@ -1,3 +1,6 @@
+// @vitest-environment node
+// (suite stubs document/navigator itself; the repo-default jsdom env defines
+// document as a getter-only global the plain assignment below cannot overwrite)
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { copyText } from "./clipboard";
 
