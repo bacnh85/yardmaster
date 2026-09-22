@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { get, fmtN, fmtMs, fmtUSD, BreakdownRow, Summary } from "../api";
 import { useApi, usePoll, useSorted } from "../hooks";
 import { TimeChart } from "../Chart";
-import { cacheHitPct, Empty, ErrorBanner, PageHead, SkeletonCards, StatCard } from "../components";
+import { cacheHitPct, totalInput, Empty, ErrorBanner, PageHead, SkeletonCards, StatCard } from "../components";
 
 function useSummary(hours: number): { sum: Summary | null; error: string; loading: boolean; reload: () => void } {
   const { data, error, loading, reload } = useApi<{ summary: Summary }>(`summary?hours=${hours}&bucket=hour`);
@@ -43,7 +43,7 @@ export function UsageTab() {
           <div className="grid stats">
             <StatCard label="Requests" value={fmtN(sum.requests)} sub={`${fmtN(sum.errors)} errors`} tone={sum.errors > 0 ? "warn" : undefined} />
             <StatCard label="Cost" value={fmtUSD(sum.cost_usd)} />
-            <StatCard label="Tokens in" value={fmtN(sum.tok_in)} sub={`${cacheHitPct(sum)}% cache read`} />
+            <StatCard label="Tokens in" value={fmtN(totalInput(sum))} sub={`${cacheHitPct(sum)}% cache read`} />
             <StatCard label="Tokens out" value={fmtN(sum.tok_out)} />
           </div>
           <div className="card">
@@ -70,8 +70,11 @@ export function UsageTab() {
   );
 }
 
-function BreakTable({ rows }: { rows: BreakdownRow[] }) {
-  const { sorted, th } = useSorted(rows, "requests");
+export function BreakTable({ rows }: { rows: BreakdownRow[] }) {
+  // sort key must match the displayed value: "tok in" shows TOTAL input, so
+  // derive it onto the row instead of sorting by the uncached raw field
+  const withTotals = rows.map((r) => ({ ...r, tok_total: totalInput(r) }));
+  const { sorted, th } = useSorted(withTotals, "requests");
   if (rows.length === 0) return <Empty>no data in range</Empty>;
   return (
     <div className="table-wrap">
@@ -80,7 +83,7 @@ function BreakTable({ rows }: { rows: BreakdownRow[] }) {
           {th("name", "name")}
           {th("requests", "reqs", true)}
           {th("errors", "errors", true)}
-          {th("tok_in", "tok in", true)}
+          {th("tok_total", "tok in", true)}
           {th("tok_out", "tok out", true)}
           {th("cache_read", "cache rd", true, "col-md")}
           {th("cost", "cost", true)}
@@ -92,7 +95,7 @@ function BreakTable({ rows }: { rows: BreakdownRow[] }) {
               <td>{r.name}</td>
               <td className="n">{fmtN(r.requests)}</td>
               <td className="n">{r.errors > 0 ? <span className="err">{fmtN(r.errors)}</span> : 0}</td>
-              <td className="n">{fmtN(r.tok_in)}</td>
+              <td className="n">{fmtN(r.tok_total)}</td>
               <td className="n">{fmtN(r.tok_out)}</td>
               <td className="n col-md">{fmtN(r.cache_read)}</td>
               <td className="n">{fmtUSD(r.cost)}</td>

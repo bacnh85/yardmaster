@@ -76,6 +76,21 @@ func jsonMust(v any) string {
 	return string(b)
 }
 
+// A misreporting upstream (cached > prompt) must not leave tok_in
+// cache-INCLUSIVE — the store invariant is tok_in excludes cache_read.
+func TestUsageOpenAIMisreportedCachedClamped(t *testing.T) {
+	u := ParseUsageJSON("openai", []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":300}}}`))
+	if u.In != 0 || u.CacheR != 300 {
+		t.Fatalf("got in=%d cacheR=%d, want 0/300 (clamped, not 100 inclusive)", u.In, u.CacheR)
+	}
+	u2 := teeUsage(t, "responses",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":50,"output_tokens":4,"input_tokens_details":{"cached_tokens":80}}}}`)
+	if u2.In != 0 || u2.CacheR != 80 {
+		t.Fatalf("got in=%d cacheR=%d, want 0/80 (clamped, not 50 inclusive)", u2.In, u2.CacheR)
+	}
+}
+
 // Z.ai shape: cache fields arrive only in message_delta, never message_start.
 func TestUsageAnthropicZaiStreamCacheInDelta(t *testing.T) {
 	u := teeUsage(t, "anthropic",

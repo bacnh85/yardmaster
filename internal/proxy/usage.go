@@ -127,9 +127,11 @@ func (t *UsageTee) parse(m map[string]any) {
 				t.usage.CacheR = num(d["cached_tokens"])
 			}
 			// input_tokens includes cached tokens — report cache-exclusive so
-			// cost = In*input + CacheR*cache_read doesn't double-count them
-			if t.usage.CacheR > 0 && t.usage.In >= t.usage.CacheR {
-				t.usage.In -= t.usage.CacheR
+			// cost = In*input + CacheR*cache_read doesn't double-count them.
+			// Unconditional with a 0-clamp: a misreporting upstream (cached > input)
+			// must not leave tok_in cache-inclusive and break the store invariant.
+			if t.usage.CacheR > 0 {
+				t.usage.In = max(0, t.usage.In-t.usage.CacheR)
 			}
 		}
 		return
@@ -165,9 +167,10 @@ func applyOpenAIUsage(usage *Usage, u map[string]any) {
 	}
 	usage.CacheR = openaiCacheRead(u)
 	// prompt_tokens includes cached tokens (OpenAI/DeepSeek) — report
-	// cache-exclusive so cost accounting doesn't double-count them
-	if usage.CacheR > 0 && usage.In >= usage.CacheR {
-		usage.In -= usage.CacheR
+	// cache-exclusive so cost accounting doesn't double-count them. Unconditional
+	// with a 0-clamp: misreported cached > prompt must not leave tok_in inclusive.
+	if usage.CacheR > 0 {
+		usage.In = max(0, usage.In-usage.CacheR)
 	}
 	usage.CacheW = num(u["cache_write_tokens"])
 }

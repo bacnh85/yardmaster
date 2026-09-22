@@ -157,7 +157,14 @@ export const ErrCell = ({ err }: { err: string }) =>
   err ? <span className="err mono" title={err}>{err.slice(0, 60)}{err.length > 60 ? "…" : ""}</span> : null;
 
 export const fmtPct = (n: number, d: number) => (d > 0 ? `${Math.round((n / d) * 100)}%` : "–");
-export const cacheHitPct = (s: { cache_read: number; tok_in: number }) =>
-  s.tok_in > 0 ? Math.round((s.cache_read / s.tok_in) * 100) : 0;
+// tok_in is stored cache-EXCLUSIVE (anthropic reports input_tokens as the uncached
+// remainder; the openai path subtracts cached for cost accounting) — total input
+// adds the cached parts back. Single source for card, tables and the ratio.
+export const totalInput = (s: { tok_in: number; cache_read: number; cache_write?: number }) =>
+  s.tok_in + s.cache_read + (s.cache_write ?? 0);
+export const cacheHitPct = (s: { cache_read: number; tok_in: number; cache_write?: number }) => {
+  const total = totalInput(s);
+  return total > 0 ? Math.round((s.cache_read / total) * 100) : 0;
+};
 
 export { fmtN };
