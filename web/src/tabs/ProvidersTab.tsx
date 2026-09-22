@@ -190,6 +190,50 @@ export const familyFor = (group: ProviderRow[], m: { id: string; family: string 
   return curated ? wireFamily(curated.wire) : m.family;
 };
 
+/** Canonical model identity for cross-source comparison — mirrors the server's
+ *  canonModelID: upstream and curated spellings may differ in case and dot vs
+ *  dash notation (claude-haiku-4-5 vs claude-haiku-4.5) for the same model. */
+export const canonModelId = (id: string): string => id.toLowerCase().replaceAll(".", "-");
+
+/** Catalog rows + synthetic rows for curated ids the catalog doesn't list
+ *  (manually added models). The server enriches curated ids too, so its rows
+ *  already carry metadata + manual:true; this stays as a fallback for older
+ *  servers that don't (rows then render "—" for unknown metadata).
+ *  Ids are deduped against the catalog AND across group entries (one id curated
+ *  on two wires — e.g. after a partially failed move — must yield one row, not
+ *  duplicate React keys), canonically on both sides. */
+export const withCurated = (catalog: CatalogModel[], group: ProviderRow[]): CatalogModel[] => {
+  const known = new Set(catalog.map((m) => canonModelId(m.id)));
+  const extra: CatalogModel[] = [];
+  for (const p of group) {
+    for (const id of p.models) {
+      const key = canonModelId(id);
+      if (known.has(key)) continue; // already a catalog row, or emitted for another entry
+      known.add(key);
+      extra.push({ id, family: wireFamily(p.wire), input: -1, output: -1, cache_read: 0, cache_write: 0, manual: true });
+    }
+  }
+  return [...catalog, ...extra];
+};
+
+/** Curated ids are the ones actually served — they get the wire picker (the
+ *  entry holding them IS their family). Catalog-only rows don't. */
+export const isCuratedModel = (group: ProviderRow[], id: string): boolean =>
+  group.some((p) => p.models.includes(id));
+
+/** Next models list for one row's checkbox. Curated removal uses the entry's own
+ *  list as the universe so bulkNextModels still refuses (null) when the hide
+ *  would empty a curated entry ([] = wildcard serve-everything); show and
+ *  wildcard-hide keep the catalog-universe semantics. The toggled id is always
+ *  unioned into the show universe: a manually added id is by definition absent
+ *  from the catalog, and without this its re-check would no-op (silent delete,
+ *  no undo) instead of re-curating it on the row's wire. */
+export const toggleModels = (sub: Pick<ProviderRow, "models">, id: string, familyIds: string[], on: boolean): string[] | null =>
+  on ? bulkNextModels(sub.models, [id], familyIds.includes(id) ? familyIds : [...familyIds, id], true)
+     : sub.models.includes(id)
+       ? bulkNextModels(sub.models, [id], sub.models, false) // curated removal — emptying hide refuses
+       : bulkNextModels(sub.models, [id], familyIds, false); // wildcard hide
+
 export function ProvidersTab({ detail, onOpenDetail, onCloseDetail }: {
   detail: string; onOpenDetail: (id: string) => void; onCloseDetail: () => void;
 }) {
@@ -201,7 +245,9 @@ export function ProvidersTab({ detail, onOpenDetail, onCloseDetail }: {
 
   if (detail) {
     const r = REGISTRY.find((x) => x.id === detail);
-    if (r) return <ProviderDetail r={r} provs={provs} error={error} loading={loading} reload={reload} onBack={onCloseDetail} />;
+    // keyed by preset: a pending add-model form (or test result) must never
+    // survive navigation onto another provider
+    if (r) return <ProviderDetail key={r.id} r={r} provs={provs} error={error} loading={loading} reload={reload} onBack={onCloseDetail} />;
   }
   return <ProviderList provs={provs} error={error} loading={loading} reload={reload} onOpenDetail={onOpenDetail} cooling={cooling} />;
 }
@@ -535,8 +581,10 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     if (r.plans) localStorage.setItem(`plan-${r.id}`, v);
   };
   const [filter, setFilter] = useState("");
-  const [serveWildcard, setServeWildcard] = useState<null | { m: CatalogModel; sub: ProviderRow }>(null);
+  const [serveWildcard, setServeWildcard] = useState<null | { m: Pick<CatalogModel, "id">; sub: ProviderRow; from?: ProviderRow }>(null);
   const [removing, setRemoving] = useState<ConnRow | null>(null);
+  // manual model add: id the upstream catalog doesn't list (new/private models)
+  const [manual, setManual] = useState<null | { id: string; family: string }>(null);
 
   const catalogSource = group.find((p) => !p.disabled) || group[0];
 
@@ -646,10 +694,13 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     // responses-only model onto the chat wire. "expose all <family>" collects them.
     const sub = modelsOf(familyFor(group, m));
     if (!sub) { toast("unknown wire for this model — pick one in its family column", "err"); return; }
-    const familyIds = (catalog?.models ?? []).filter((x) => familyFor(group, x) === familyFor(group, m)).map((x) => x.id);
-    if (familyIds.length === 0) { toast("load the catalog first (refresh)", "err"); return; }
     const on = !isVisible(m);
-    const next = bulkNextModels(sub.models, [m.id], familyIds, on);
+    // curated ids need no catalog universe — toggleModels removes them against
+    // the entry's own list, so a manually added model stays removable offline
+    const curated = !on && sub.models.includes(m.id);
+    const familyIds = (catalog?.models ?? []).filter((x) => familyFor(group, x) === familyFor(group, m)).map((x) => x.id);
+    if (!curated && familyIds.length === 0) { toast("load the catalog first (refresh)", "err"); return; }
+    const next = toggleModels(sub, m.id, familyIds, on);
     if (next === null) {
       toast(`cannot hide ${prefixedId(r.prefix, m.id)} — "${sub.name}" would have no visible models left (an empty list means "serve everything")`, "err");
       return;
@@ -657,27 +708,65 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     try {
       await put(`providers/${encodeURIComponent(sub.name)}`, providerUpdateBody(sub, next));
       reload();
-      toast(`${prefixedId(r.prefix, m.id)} ${next.includes(m.id) ? "visible" : "hidden"}`);
+      // a hidden model with no catalog row leaves the table entirely (nothing
+      // stays greyed out) — name the way back instead of claiming "hidden".
+      // True for manual rows and for providers whose /models is unavailable
+      // (the server then serves the curated list itself).
+      const vanishes = !(catalog?.models ?? []).some((c) => canonModelId(c.id) === canonModelId(m.id));
+      toast(`${prefixedId(r.prefix, m.id)} ${next.includes(m.id) ? "visible" : vanishes ? "removed — re-add with + add model" : "hidden"}`);
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
   };
 
   /** Curate an unknown-family model onto an explicitly chosen wire. On a
    *  wildcard entry (empty models = serves everything) adding one model would
-   *  silently un-serve the rest — require an explicit confirm first. */
-  const serveOn = (m: CatalogModel, family: string) => {
+   *  silently un-serve the rest — require an explicit confirm first.
+   *  Takes a bare id too: manually added models never had catalog metadata. */
+  const serveOn = (m: Pick<CatalogModel, "id">, family: string, from?: ProviderRow) => {
     const entry = r.entries.find((e) => e.family === family);
     const sub = entry && group.find((p) => p.name === entry.name);
     if (!sub) { toast(`no ${family} connection to serve it on`, "err"); return; }
     const { models, confirm } = serveTargetModels(sub, m.id);
-    if (confirm) { setServeWildcard({ m, sub }); return; }
-    doServe(m, sub, models, family);
+    if (confirm) { setServeWildcard({ m, sub, from }); return; }
+    doServe(m, sub, models, family, from);
   };
-  const doServe = async (m: CatalogModel, sub: ProviderRow, models: string[], family: string) => {
+  const doServe = async (m: Pick<CatalogModel, "id">, sub: ProviderRow, models: string[], family: string, from?: ProviderRow) => {
     try {
+      // target first: a failed add leaves the model served on both wires
+      // (harmless duplication) rather than lost from the source
       await put(`providers/${encodeURIComponent(sub.name)}`, providerUpdateBody(sub, models));
+      if (from && from.name !== sub.name) {
+        await put(`providers/${encodeURIComponent(from.name)}`, providerUpdateBody(from, from.models.filter((x) => x !== m.id)));
+      }
       reload();
-      toast(`${prefixedId(r.prefix, m.id)} exposed on ${family}`);
+      toast(`${prefixedId(r.prefix, m.id)} ${from ? `moved to ${family}` : `exposed on ${family}`}`);
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
+  };
+
+  /** Move a curated model to another wire entry. Refuses when the source would
+   *  be left empty ([] = wildcard serve-everything), mirroring toggleModels. */
+  const moveModel = (m: CatalogModel, family: string) => {
+    const src = modelsOf(familyFor(group, m));
+    if (!src || src.name === r.entries.find((e) => e.family === family)?.name) return;
+    if (src.models.length <= 1) {
+      toast(`cannot move ${prefixedId(r.prefix, m.id)} — "${src.name}" would have no visible models left (an empty list means "serve everything")`, "err");
+      return;
+    }
+    serveOn(m, family, src);
+  };
+
+  /** Manually add a model id the catalog doesn't list. Curates it onto the
+   *  chosen wire through the same path as "serve on…" (wildcard confirm incl.). */
+  const addManualModel = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manual) return;
+    const id = manual.id.trim();
+    if (!id) return;
+    const already = group.find((p) => p.models.includes(id));
+    if (already) { toast(`${prefixedId(r.prefix, id)} is already exposed on ${already.name}`, "err"); return; }
+    const family = manual.family || r.entries[0]?.family || "";
+    if (!r.entries.some((en) => en.family === family)) { toast("pick the wire this model serves on", "err"); return; }
+    setManual(null);
+    serveOn({ id }, family);
   };
 
   const testModel = async (entry: RegistryEntry | undefined, m: CatalogModel) => {
@@ -714,9 +803,9 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
   };
 
-  const shown = (catalog?.models ?? []).filter((m) =>
-    (planFilter === "all" || cmdPlan(m.id) === planFilter) &&
-    (familyFilter === "all" || (familyFilter === "exposed" ? isVisible(m) : familyFilter === "free" ? m.free : !m.free)) &&
+  const shown = withCurated(catalog?.models ?? [], group).filter((m) =>
+    (m.manual || planFilter === "all" || cmdPlan(m.id) === planFilter) &&
+    (familyFilter === "all" || (familyFilter === "exposed" ? isVisible(m) : m.manual ? false : familyFilter === "free" ? m.free : !m.free)) &&
     (!filter || prefixedId(r.prefix, m.id).includes(filter)));
   // rows without a resolvable wire ("serve on…", no checkbox) can never be
   // toggled — the bulk toggle's state and click must ignore them, or the
@@ -870,10 +959,41 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
       <div className="card" style={{ marginTop: 16 }}>
         <div className="row spread baseline">
           <h3>Available Models</h3>
-          <button className="btn sm primary" onClick={fetchCatalog} disabled={!catalogSource || catalog?.loading}>
-            {catalog?.loading ? "fetching…" : catalog ? "refresh" : "load catalog"}
-          </button>
+          <div className="row">
+            <button className="btn sm" aria-label="add model" title="expose a model the provider's catalog doesn't list"
+              onClick={() => setManual((v) => (v ? null : { id: "", family: r.entries[0]?.family ?? "" }))}
+              disabled={!catalogSource}>+ add model</button>
+            <button className="btn sm primary" onClick={fetchCatalog} disabled={!catalogSource || catalog?.loading}>
+              {catalog?.loading ? "fetching…" : catalog ? "refresh" : "load catalog"}
+            </button>
+          </div>
         </div>
+        {manual && (
+          <form className="form-grid" onSubmit={addManualModel} aria-label="add model" style={{ margin: "12px 0" }}>
+            <div className="field">
+              <label htmlFor="mm-id">model id</label>
+              <input id="mm-id" className="mono" value={manual.id} required autoFocus
+                onChange={(e) => setManual({ ...manual, id: e.target.value })}
+                placeholder={r.plans ? "vendor/model-id" : "model-id"} />
+              <div className="field-hint">sent upstream as typed — use the provider's catalog id{r.prefix ? `; agents see it as ${r.prefix}/<model>` : ""}</div>
+            </div>
+            <div className="field">
+              <label htmlFor="mm-wire">serve on</label>
+              <select id="mm-wire" value={manual.family}
+                onChange={(e) => setManual({ ...manual, family: e.target.value })}>
+                {r.entries.filter((e) => e.family !== "gemini").map((e) => (
+                  <option key={e.family} value={e.family}>{e.familyLabel || e.family} ({e.wire})</option>
+                ))}
+              </select>
+            </div>
+            <div className="field full">
+              <div className="row">
+                <button className="btn primary" type="submit" disabled={!manual.id.trim()}>add model</button>
+                <button className="btn" type="button" onClick={() => setManual(null)}>Cancel</button>
+              </div>
+            </div>
+          </form>
+        )}
         {catalog && !catalog.loading && !catalog.err && (
           <div className="toolbar">
             {r.plans && (
@@ -915,7 +1035,9 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
         {!catalogSource && <Empty>this provider has no connections yet — add one above, then load its catalog</Empty>}
         {catalog?.loading && <div className="faint" style={{ padding: 8 }}>fetching model catalog…</div>}
         {catalog?.err && <div className="form-error">{catalog.err}</div>}
-        {catalog && !catalog.loading && !catalog.err && (
+        {/* curated rows (manual models incl.) stay reachable when the catalog
+            can't load — the upstream may be down while its models still work */}
+        {catalog && !catalog.loading && (!catalog.err || shown.length > 0) && (
           <>
             {shown.length === 0 ? <Empty>no models match</Empty> : (
               <div className="table-wrap" style={{ maxHeight: 480 }}>
@@ -943,18 +1065,31 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                           <td className="col-lg">
                             {m.family === "gemini"
                               ? <span className="badge muted" title="gemini-native wire is not served yet">gemini</span>
-                              : familyFor(group, m)
-                                ? <span className="badge muted">{familyFor(group, m)}</span>
-                                : <select aria-label={`serve ${prefixedId(r.prefix, m.id)} on`} value=""
-                                    title="models.dev has no family metadata yet — pick the wire to serve it on"
-                                    onChange={(e) => e.target.value && serveOn(m, e.target.value)} style={{ width: 110 }}>
-                                    <option value="">serve on…</option>
-                                    {r.entries.map((en) => <option key={en.family} value={en.family}>{en.family}</option>)}
-                                  </select>}
+                              : isCuratedModel(group, m.id)
+                                ? (
+                                  // served models: the wire is a curation choice, not
+                                  // metadata — changing it MOVES the model across entries
+                                  <select aria-label={`wire for ${prefixedId(r.prefix, m.id)}`} value={familyFor(group, m)}
+                                    title="wire this model is served on — changing it moves the model"
+                                    onChange={(e) => moveModel(m, e.target.value)} style={{ width: 110 }}>
+                                    {r.entries.filter((en) => en.family !== "gemini").map((en) => (
+                                      <option key={en.family} value={en.family}>{en.family}</option>
+                                    ))}
+                                  </select>
+                                )
+                                : familyFor(group, m)
+                                  ? <span className="badge muted" title="not served yet — tick “visible” to expose it">{familyFor(group, m)}</span>
+                                  : <select aria-label={`serve ${prefixedId(r.prefix, m.id)} on`} value=""
+                                      title="models.dev has no family metadata yet — pick the wire to serve it on"
+                                      onChange={(e) => e.target.value && serveOn(m, e.target.value)} style={{ width: 110 }}>
+                                      <option value="">serve on…</option>
+                                      {r.entries.map((en) => <option key={en.family} value={en.family}>{en.family}</option>)}
+                                    </select>}
                             {m.reasoning && <span className="badge muted" title="extended thinking">think</span>}
                             {m.tool_call && <span className="badge muted" title="tool calling">tools</span>}
                             {m.image && <span className="badge muted" title="image input">img</span>}
-                            {r.plans && <span className="badge muted" title={cmdPlan(m.id) ? `${cmdPlan(m.id)} plan` : "new model — plan tier not yet classified"}>{cmdPlan(m.id) || "?"}</span>}
+                            {m.manual && <span className="badge muted" title="added by hand — not in the provider's catalog; metadata comes from models.dev when known">manual</span>}
+                            {r.plans && !m.manual && <span className="badge muted" title={cmdPlan(m.id) ? `${cmdPlan(m.id)} plan` : "new model — plan tier not yet classified"}>{cmdPlan(m.id) || "?"}</span>}
                           </td>
                           <td className="num">{m.context ? fmtTok(m.context) : "—"}</td>
                           <td className="num col-md">{m.max_output ? fmtTok(m.max_output) : "—"}</td>
@@ -997,7 +1132,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
       {serveWildcard && (
         <Confirm title={`Serve ${prefixedId(r.prefix, serveWildcard.m.id)} on ${serveWildcard.sub.name}?`} action="Serve only this model"
           body={<>{serveWildcard.sub.name} currently serves <b>every</b> model on its wire (no curated list). Serving just this one stops the others — prefer "expose all {wireFamily(serveWildcard.sub.wire)}" to keep them.</>}
-          onDone={(ok) => { const { m, sub } = serveWildcard; setServeWildcard(null); if (ok) doServe(m, sub, serveTargetModels(sub, m.id).models, wireFamily(sub.wire)); }} />
+          onDone={(ok) => { const { m, sub, from } = serveWildcard; setServeWildcard(null); if (ok) doServe(m, sub, serveTargetModels(sub, m.id).models, wireFamily(sub.wire), from); }} />
       )}
     </>
   );

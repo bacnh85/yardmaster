@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels, bulkNextModels, effectiveCap, capIds } from "./tabs/ProvidersTab";
+import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels, bulkNextModels, effectiveCap, capIds, withCurated, toggleModels, isCuratedModel, canonModelId } from "./tabs/ProvidersTab";
 import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan } from "./presets";
-import type { ProviderRow } from "./api";
+import type { CatalogModel, ProviderRow } from "./api";
 
 describe("providerBody", () => {
   it("coerces dispatch spacing to a number (type=number inputs yield strings)", () => {
@@ -322,6 +322,118 @@ describe("registry", () => {
     expect(wireFamily("anthropic")).toBe("anthropic");
     expect(wireFamily("responses")).toBe("responses");
     expect(presetToForm(REGISTRY[0].entries[0]).session).toBe("opencode");
+  });
+});
+
+describe("withCurated (manual models in the catalog table)", () => {
+  const cat = (id: string, family = "chat"): CatalogModel => ({ id, family, input: 1, output: 2, cache_read: 0, cache_write: 0 });
+  const prow = (over: Partial<ProviderRow>): ProviderRow => ({ ...baseRow, ...over });
+
+  it("appends curated ids the catalog doesn't list as synthetic rows (family from wire, unknown pricing)", () => {
+    const rows = withCurated([cat("a"), cat("b")], [prow({ name: "p1", models: ["a", "test-manual-1"] })]);
+    expect(rows.map((m) => m.id)).toEqual(["a", "b", "test-manual-1"]); // catalog first, extras after
+    expect(rows[2]).toEqual({ id: "test-manual-1", family: "chat", input: -1, output: -1, cache_read: 0, cache_write: 0, manual: true });
+    // input/-1 renders "—" via fmtPrice — the existing unknown-pricing convention
+  });
+
+  it("never duplicates ids the catalog already lists", () => {
+    expect(withCurated([cat("a")], [prow({ name: "p1", models: ["a"] })])).toHaveLength(1);
+  });
+
+  it("derives each synthetic row's family from the curating entry's wire", () => {
+    const rows = withCurated([], [
+      prow({ name: "p1", wire: "anthropic", models: ["m1"] }),
+      prow({ name: "p2", wire: "responses", models: ["m2"] }),
+    ]);
+    expect(rows.map((m) => [m.id, m.family])).toEqual([["m1", "anthropic"], ["m2", "responses"]]);
+  });
+
+  it("leaves the catalog untouched for an empty group (unconfigured provider)", () => {
+    const catalog = [cat("a")];
+    expect(withCurated(catalog, [])).toEqual(catalog);
+  });
+
+  it("emits one row for an id curated on TWO group entries (partially failed move)", () => {
+    // doServe adds to the target then removes from the source; if the second
+    // PUT fails the id sits on both wires — duplicate rows would collide keys
+    const rows = withCurated([], [
+      prow({ name: "a", models: ["x"] }),
+      prow({ name: "b", wire: "anthropic", models: ["x"] }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("x");
+  });
+
+  it("dedupes canonically: a curated 'gpt-5.5' is not re-synthesized against catalog 'gpt-5-5'", () => {
+    // the server suppresses the manual extra via canonModelID; the client must
+    // agree or the same model renders twice with two spellings
+    expect(withCurated([cat("gpt-5-5")], [prow({ name: "p", models: ["gpt-5.5"] })])).toHaveLength(1);
+    expect(withCurated([cat("GPT-5-5")], [prow({ name: "p", models: ["gpt-5.5"] })])).toHaveLength(1);
+  });
+
+  it("canonModelId mirrors the server's canonModelID (case + dot/dash)", () => {
+    expect(canonModelId("Claude-Haiku-4.5")).toBe("claude-haiku-4-5");
+    expect(canonModelId("gpt-5-5")).toBe(canonModelId("GPT-5.5"));
+  });
+});
+
+describe("isCuratedModel (wire picker scope)", () => {
+  const prow = (over: Partial<ProviderRow>): ProviderRow => ({ ...baseRow, ...over });
+
+  it("is true for models served by any entry — the family cell shows the move picker", () => {
+    const group = [prow({ name: "zai", models: ["glm-5.3-flashx"] })];
+    expect(isCuratedModel(group, "glm-5.3-flashx")).toBe(true);
+  });
+
+  it("is false for catalog-only rows — they keep the read-only badge / serve-on picker", () => {
+    expect(isCuratedModel([prow({ name: "zai", models: [] })], "glm-5.3-flash")).toBe(false);
+  });
+
+  it("covers curated ids on ANY entry of the group", () => {
+    const group = [prow({ name: "ocg", models: [] }), prow({ name: "ocg-claude", wire: "anthropic", models: ["omen-alpha"] })];
+    expect(isCuratedModel(group, "omen-alpha")).toBe(true);
+  });
+});
+
+describe("toggleModels (row checkbox incl. manual models)", () => {
+  it("hide of a SINGLE-model curated entry refuses (null) — never [] = wildcard serve-everything", () => {
+    expect(toggleModels({ models: ["only"] }, "only", ["only"], false)).toBeNull();
+  });
+
+  it("hide of a curated id filters it out of the entry's list", () => {
+    expect(toggleModels({ models: ["a", "manual-1"] }, "manual-1", [], false)).toEqual(["a"]);
+  });
+
+  it("hide works for curated ids even with an empty catalog universe (manual models offline)", () => {
+    expect(toggleModels({ models: ["a", "b"] }, "a", [], false)).toEqual(["b"]);
+  });
+
+  it("hide on a wildcard still materializes the family complement", () => {
+    expect(toggleModels({ models: [] }, "a", ["a", "b", "c"], false)).toEqual(["b", "c"]);
+  });
+
+  it("show re-curates a manually added id the catalog never lists (no silent delete)", () => {
+    // the catalog universe can't contain a manual id; without unioning the id
+    // itself, re-checking a hidden manual model would PUT an unchanged list
+    // while toasting "visible" — an irreversible vanish from the table
+    expect(toggleModels({ models: ["a"] }, "manual-1", ["a", "b"], true)).toEqual(["a", "manual-1"]);
+    // a wildcard entry (empty list = serves everything) stays wildcard on show:
+    // there is nothing to re-curate, the model is already served
+    expect(toggleModels({ models: [] }, "manual-1", [], true)).toEqual([]);
+  });
+
+  it("show unions the toggled id into the universe — the per-row guard is the ROW's wire, not the catalog list", () => {
+    // The row's entry is resolved before the call (modelsOf(familyFor(...))), so
+    // the id belongs on that wire by construction; a manual id is absent from
+    // the catalog list only because the upstream never listed it. The
+    // cross-wire guard that DOES matter lives in bulkNextModels and is tested
+    // there for multi-id sweeps.
+    expect(toggleModels({ models: ["a"] }, "other-wire", ["a", "b"], true)).toEqual(["a", "other-wire"]);
+  });
+
+  it("show delegates to bulkNextModels (unions, no duplicates)", () => {
+    expect(toggleModels({ models: ["a"] }, "b", ["a", "b", "c"], true)).toEqual(["a", "b"]);
+    expect(toggleModels({ models: ["a", "b"] }, "b", ["a", "b"], true)).toEqual(["a", "b"]); // idempotent
   });
 });
 

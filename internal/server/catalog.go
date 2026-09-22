@@ -31,6 +31,9 @@ type ModelMeta struct {
 	ToolCall   bool    `json:"tool_call,omitempty"`
 	Image      bool    `json:"image,omitempty"`
 	Free       bool    `json:"free,omitempty"`
+	// Manual marks a curated id the upstream /models did not list (added by
+	// hand in the dashboard) — the UI badges it and skips plan-tier filters.
+	Manual bool `json:"manual,omitempty"`
 }
 
 // modelsDevURL is a var so tests can stub it.
@@ -155,6 +158,17 @@ func modelsDevSnapshot() (map[string]modelsDevProvider, map[string]modelsDevMode
 	return modelsDevData, modelsDevFlat
 }
 
+// modelsDevCached returns whatever models.dev data is already loaded WITHOUT
+// fetching — for hot paths (/v1/models) that must never block on a network
+// round trip. A cold/stale snapshot yields nil (callers degrade to un-enriched
+// ids); loadModelsDev has no negative cache, so triggering it here would retry
+// a 15s fetch on every request, serialized behind modelsDevMu.
+func modelsDevCached() (map[string]modelsDevProvider, map[string]modelsDevModel) {
+	modelsDevMu.Lock()
+	defer modelsDevMu.Unlock()
+	return modelsDevData, modelsDevFlat
+}
+
 // applyDev merges one models.dev entry into a ModelMeta. withFamily=false is
 // the cross-provider fallback: newer models are filed under their vendor, not
 // the router's provider — take limits/pricing/flags but NEVER family, which
@@ -200,8 +214,10 @@ type catalogEntry struct {
 var catalogCache sync.Map // provider base_url -> catalogEntry
 
 // catalog returns the model catalog for one provider: upstream /models ids
-// enriched with models.dev metadata. Never fails hard — falls back to the
-// provider's configured model list when /models is unavailable.
+// enriched with models.dev metadata, plus the provider's curated ids the
+// upstream omits (manually added models) enriched the same way. Never fails
+// hard — falls back to the provider's configured model list when /models is
+// unavailable.
 func (s *Server) catalog(ctx context.Context, name string) ([]ModelMeta, error) {
 	var pv *config.Provider
 	for _, x := range s.Proxy.Reg.Config().Providers {
@@ -213,24 +229,83 @@ func (s *Server) catalog(ctx context.Context, name string) ([]ModelMeta, error) 
 	if pv == nil {
 		return nil, fmt.Errorf("no provider %q", name)
 	}
+	var cached []ModelMeta
 	if e, ok := catalogCache.Load(pv.BaseURL); ok {
 		ce := e.(catalogEntry)
 		if time.Now().Before(ce.until) {
-			return ce.models, nil
+			cached = ce.models
 		}
 	}
-	ups := s.upstreamModels(ctx, pv)
-	if len(ups) == 0 {
-		// last resort when /models and models.dev both fail; fresh slice —
-		// enrichCatalog sorts in place and the config Models list is live
-		ups = make([]ModelMeta, 0, len(pv.Models))
-		for _, id := range pv.Models {
-			ups = append(ups, ModelMeta{ID: id})
+	if cached == nil {
+		ups := s.upstreamModels(ctx, pv)
+		if len(ups) == 0 {
+			// last resort when /models and models.dev both fail; fresh slice —
+			// enrichCatalog sorts in place and the config Models list is live
+			ups = make([]ModelMeta, 0, len(pv.Models))
+			for _, id := range pv.Models {
+				ups = append(ups, ModelMeta{ID: id})
+			}
+		}
+		enrichCatalog(pv.BaseURL, ups)
+		out, _ := catalogCache.Load(pv.BaseURL)
+		cached = out.(catalogEntry).models
+	}
+	// curated ids missing from the cached catalog: appended at read time, not
+	// cached — the cache is keyed by base_url and SHARED by providers over one
+	// gateway (cmdcode + cmdcode-claude), so per-provider curation must stay out
+	// of it. Copy before appending: never grow the cached array in place.
+	dev, devFlat := modelsDevSnapshot()
+	extra := curatedMetas(pv, cached, dev, devFlat)
+	if len(extra) == 0 {
+		return cached, nil
+	}
+	metas := make([]ModelMeta, 0, len(cached)+len(extra))
+	metas = append(metas, cached...)
+	return append(metas, extra...), nil
+}
+
+// curatedMetas enriches the provider's curated ids that the cached catalog
+// doesn't list — manually added models get the same models.dev metadata
+// (context, pricing, capabilities) as upstream-listed ones. Family is never
+// taken from models.dev here: the curating entry's wire decides it.
+func curatedMetas(pv *config.Provider, cached []ModelMeta, dev map[string]modelsDevProvider, devFlat map[string]modelsDevModel) []ModelMeta {
+	known := make(map[string]bool, len(cached))
+	for _, m := range cached {
+		known[canonModelID(m.ID)] = true
+	}
+	var prov modelsDevProvider
+	if dev != nil {
+		prov = dev[modelsDevProviderID(pv.BaseURL)]
+	}
+	byID := make(map[string]modelsDevModel, len(prov.Models))
+	for id, raw := range prov.Models {
+		var m modelsDevModel
+		if json.Unmarshal(raw, &m) == nil {
+			byID[canonModelID(id)] = m
 		}
 	}
-	enrichCatalog(pv.BaseURL, ups)
-	out, _ := catalogCache.Load(pv.BaseURL)
-	return out.(catalogEntry).models, nil
+	var out []ModelMeta
+	for _, id := range pv.Models {
+		if known[canonModelID(id)] {
+			continue // upstream already lists it (or the curated list repeats it)
+		}
+		known[canonModelID(id)] = true
+		// -1 = unknown pricing, never 0 (fmtPrice renders 0 as "free"): a cold
+		// models.dev snapshot must degrade to "—", not to a free claim
+		mm := ModelMeta{ID: id, Manual: true, Input: -1, Output: -1}
+		if dm, ok := byID[canonModelID(id)]; ok {
+			applyDev(&mm, dm, false)
+		} else if dm, ok := devFlat[canonModelID(id)]; ok {
+			applyFlat(&mm, dm)
+		} else if i := strings.LastIndex(id, "/"); i >= 0 {
+			// vendor-namespaced id: price via the bare id under any vendor
+			if dm, ok := devFlat[canonModelID(id[i+1:])]; ok {
+				applyFlat(&mm, dm)
+			}
+		}
+		out = append(out, mm)
+	}
+	return out
 }
 
 // upstreamModels GETs {base}/models with the first key (tolerates failure).

@@ -171,15 +171,30 @@ func lookupMeta(metas map[string]ModelMeta, id string) (ModelMeta, bool) {
 }
 
 // cachedCatalogMetas merges the providers' in-cache catalogs into one
-// canon-id → meta map. Cache-hit only — never triggers an upstream fetch.
+// canon-id → meta map, plus each provider's curated ids the catalog omits
+// (manually added models) enriched from the ALREADY-LOADED models.dev snapshot.
+// Cache-hit only on both counts — this runs on the agent-facing /v1/models
+// path, so it must never fetch upstream OR models.dev (modelsDevCached, not
+// modelsDevSnapshot: the latter would retry a 15s fetch per request when
+// models.dev is down, serialized behind modelsDevMu).
 func cachedCatalogMetas(providers []*config.Provider) map[string]ModelMeta {
 	out := map[string]ModelMeta{}
+	dev, devFlat := modelsDevCached()
 	for _, p := range providers {
 		e, ok := catalogCache.Load(p.BaseURL)
-		if !ok {
-			continue
+		var cached []ModelMeta
+		if ok {
+			cached = e.(catalogEntry).models
+			for _, mm := range cached {
+				k := canonModelID(mm.ID)
+				if _, dup := out[k]; !dup {
+					out[k] = mm
+				}
+			}
 		}
-		for _, mm := range e.(catalogEntry).models {
+		// curated ids the catalog omits — same enrichment the detail page gets,
+		// so /v1/models advertises context/capabilities for manual models too
+		for _, mm := range curatedMetas(p, cached, dev, devFlat) {
 			k := canonModelID(mm.ID)
 			if _, dup := out[k]; !dup {
 				out[k] = mm

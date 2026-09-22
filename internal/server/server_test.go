@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -753,6 +754,168 @@ func TestCatalogDoesNotMutateConfigModels(t *testing.T) {
 	}
 	if got := cfg.Providers[0].Models; got[0] != "zz-model" || got[1] != "aa-model" {
 		t.Fatalf("live config Models slice was reordered: %v", got)
+	}
+}
+
+// curated ids the upstream /models omits (manually added models, e.g.
+// zai/glm-5.3-flashx) must still appear in the detail-page catalog and carry
+// models.dev metadata — appended at READ time, never into the shared cache.
+func TestCatalogManualModelsEnriched(t *testing.T) {
+	dev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"zai":{"models":{"glm-5.3-flashx":{
+			"reasoning":true,"tool_call":true,"limit":{"context":1000000,"output":131072},
+			"cost":{"input":0.37,"output":1.25,"cache_read":0.075},
+			"modalities":{"input":["text","image"]}}}}}`)
+	}))
+	defer dev.Close()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// upstream lists only the flash variant — flashx is curated by hand
+		fmt.Fprintf(w, `{"object":"list","data":[{"id":"glm-5.3-flash","context_length":1000000}]}`)
+	}))
+	defer up.Close()
+	oldURL := modelsDevURL
+	modelsDevURL = dev.URL
+	resetModelsDevCache()
+	t.Cleanup(func() { modelsDevURL = oldURL; resetModelsDevCache() })
+
+	buildCfg := func() *config.Config {
+		c := &config.Config{
+			Listen: ":0",
+			Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+			Providers: []*config.Provider{
+				{Name: "zai", Prefix: "zai", BaseURL: up.URL, Wire: "anthropic",
+					Models: []string{"glm-5.3-flash", "glm-5.3-flashx"},
+					Auth:   config.AuthConf{Type: "static", Keys: []string{"sk-z"}}},
+			},
+		}
+		c.Defaults()
+		c.Validate()
+		return c
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := buildCfg()
+	srv := New(proxy.NewProxy(provider.New(cfg), st, cfg.CostFor), auth.NewKeyStore(cfg.Keys), st, "", "pw", "test")
+
+	metas, err := srv.catalog(context.Background(), "zai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]ModelMeta{}
+	for _, mm := range metas {
+		byID[mm.ID] = mm
+	}
+	fx, ok := byID["glm-5.3-flashx"]
+	if !ok {
+		t.Fatalf("curated id missing from catalog: %+v", metas)
+	}
+	if !fx.Manual {
+		t.Fatalf("curated id must be flagged manual: %+v", fx)
+	}
+	if fx.Context != 1000000 || fx.MaxOutput != 131072 || fx.Input != 0.37 || fx.Output != 1.25 || fx.CacheRead != 0.075 {
+		t.Fatalf("manual model not enriched from models.dev: %+v", fx)
+	}
+	if !fx.Reasoning || !fx.ToolCall || !fx.Image {
+		t.Fatalf("manual model capabilities: %+v", fx)
+	}
+	if fx.Family != "" {
+		t.Fatalf("models.dev must never set family for a curated id (the entry's wire decides): %+v", fx)
+	}
+	if byID["glm-5.3-flash"].Manual {
+		t.Fatal("upstream-listed model flagged manual")
+	}
+
+	// the cache is keyed by base_url and shared by providers over one gateway —
+	// curation must never leak into it
+	e, _ := catalogCache.Load(up.URL)
+	for _, mm := range e.(catalogEntry).models {
+		if mm.ID == "glm-5.3-flashx" {
+			t.Fatalf("curated id leaked into the shared catalog cache: %+v", e.(catalogEntry).models)
+		}
+	}
+
+	// a second provider on the SAME base_url (cmdcode-style wire split) curating
+	// a DIFFERENT id gets its own row appended, still without cache bleed
+	cfg2 := buildCfg()
+	cfg2.Providers = append(cfg2.Providers, &config.Provider{
+		Name: "zai-claude", Prefix: "zai", BaseURL: up.URL, Wire: "anthropic",
+		Models: []string{"glm-5.3-flash", "glm-other"},
+		Auth:   config.AuthConf{Type: "static", Keys: []string{"sk-z"}},
+	})
+	cfg2.Defaults()
+	cfg2.Validate()
+	srv2 := New(proxy.NewProxy(provider.New(cfg2), st, cfg2.CostFor), auth.NewKeyStore(cfg2.Keys), st, "", "pw", "test")
+	m2, err := srv2.catalog(context.Background(), "zai-claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids2 := map[string]bool{}
+	for _, mm := range m2 {
+		ids2[mm.ID] = true
+	}
+	if !ids2["glm-other"] || ids2["glm-5.3-flashx"] {
+		t.Fatalf("second provider must see only its own curation: %+v", m2)
+	}
+
+	// /v1/models enrichment path (cache-only map) carries manual models too
+	metasMap := cachedCatalogMetas(cfg.Providers)
+	if mm, ok := lookupMeta(metasMap, "zai/glm-5.3-flashx"); !ok || mm.Context != 1000000 || !mm.Image {
+		t.Fatalf("/v1/models metadata for a manual model: %+v ok=%v", mm, ok)
+	}
+}
+
+// /v1/models enrichment runs cachedCatalogMetas on EVERY agent request: it must
+// never attempt a models.dev fetch. loadModelsDev has no negative cache and
+// holds modelsDevMu across a 15s-timeout GET, so a cold snapshot used to make
+// every /v1/models call stall (and serialize all concurrent catalog work).
+func TestCachedCatalogMetasNeverFetchesModelsDev(t *testing.T) {
+	var hits atomic.Int32
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		time.Sleep(3 * time.Second) // would blow the assertion below if awaited
+		fmt.Fprintf(w, `{}`)
+	}))
+	defer slow.Close()
+	oldURL := modelsDevURL
+	modelsDevURL = slow.URL
+	resetModelsDevCache() // cold snapshot: no models.dev data loaded yet
+	t.Cleanup(func() { modelsDevURL = oldURL; resetModelsDevCache() })
+
+	providers := []*config.Provider{{
+		Name: "zai", BaseURL: "https://cache-only.example/v1", Wire: "anthropic",
+		Models: []string{"glm-5.3-flash", "glm-5.3-flashx"},
+	}}
+	catalogCache.Store("https://cache-only.example/v1", catalogEntry{models: []ModelMeta{
+		{ID: "glm-5.3-flash", Family: "chat", Context: 1000000, Input: 0.15},
+	}, until: time.Now().Add(time.Hour)})
+	t.Cleanup(func() { catalogCache.Delete("https://cache-only.example/v1") })
+
+	done := make(chan map[string]ModelMeta, 1)
+	go func() { done <- cachedCatalogMetas(providers) }()
+	select {
+	case metas := <-done:
+		// cold models.dev: curated id still appears, but un-enriched and priced
+		// UNKNOWN (-1 → "—"), never 0 (which the UI renders as "free")
+		mm, ok := metas[canonModelID("glm-5.3-flashx")]
+		if !ok {
+			t.Fatalf("curated id missing with a cold models.dev snapshot: %+v", metas)
+		}
+		if !mm.Manual || mm.Context != 0 || mm.Input != -1 || mm.Output != -1 || mm.Free {
+			t.Fatalf("cold snapshot must degrade to unknown, not free: %+v", mm)
+		}
+		if up := metas[canonModelID("glm-5.3-flash")]; up.Context != 1000000 {
+			t.Fatalf("cached catalog row lost its metadata: %+v", up)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cachedCatalogMetas blocked on a models.dev fetch — /v1/models would stall per request")
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("cachedCatalogMetas fetched models.dev %d time(s)", n)
 	}
 }
 

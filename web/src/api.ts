@@ -68,6 +68,7 @@ export interface CatalogModel {
   id: string; name?: string; family: string; context?: number; max_output?: number;
   input: number; output: number; cache_read: number; cache_write: number;
   reasoning?: boolean; tool_call?: boolean; image?: boolean; free?: boolean;
+  manual?: boolean; // curated by hand: not in the provider's catalog (no metadata)
 }
 export interface ProbeResult {
   text: string; tok_in: number; tok_out: number;
