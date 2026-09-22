@@ -360,6 +360,12 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 		InjectCacheControl: pv.InjectCacheControl,
 		AdaptiveThinking:   pv.AdaptiveThinking,
 	}
+	// DeepSeek-family reasoning models reject assistant turns without
+	// reasoning_content while thinking mode is active (see translate.
+	// InjectDeepseekReasoningPassback). Applied to every openai-wire request
+	// for a matching model so client support (pi extension flag, CLI version)
+	// no longer matters.
+	injectPassback := pv.Wire == WireOpenAI && isDeepseekFamily(upModel)
 
 	switch {
 	case pv.Wire == clientWire || (clientWire == WireResponses && pv.Wire == WireOpenAI):
@@ -385,6 +391,9 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 					if _, exists := req[k]; !exists {
 						req[k] = v
 					}
+				}
+				if injectPassback {
+					translate.InjectDeepseekReasoningPassback(req)
 				}
 				// same-wire anthropic passthrough (e.g. Claude Code → zai): the
 				// cross-wire translate never runs, so inject cache markers here
@@ -558,6 +567,19 @@ func (p *Proxy) setOAuthAuth(h *http.Request, tgt *provider.Target, acct *config
 }
 
 var opencodeSessions sync.Map
+
+// isDeepseekFamily reports whether the upstream model id belongs to the
+// reasoning-model families that require reasoning_content passback in
+// thinking mode — the exact set pi's native opencode-go catalog flags with
+// compat.requiresReasoningContentOnAssistantMessages (deepseek-v4*, glm-5.1,
+// kimi-k2.7-code). Extended if a new family starts enforcing it.
+func isDeepseekFamily(model string) bool {
+	m := strings.ToLower(model)
+	if i := strings.LastIndexByte(m, '/'); i >= 0 {
+		m = m[i+1:] // tolerate prefixed ids
+	}
+	return strings.HasPrefix(m, "deepseek") || m == "glm-5.1" || m == "kimi-k2.7-code"
+}
 
 func (p *Proxy) opencodeSession(k string) string {
 	if v, ok := opencodeSessions.Load(k); ok {

@@ -388,6 +388,27 @@ func toolChoiceToAnthropic(tc any) map[string]any {
 // inject_cache_control (the Z.ai / Claude subscription multiplier).
 func InjectCacheControlAnthropic(out map[string]any) { injectCacheControl(out) }
 
+// InjectDeepseekReasoningPassback fills reasoning_content:"" on assistant
+// messages that lack it (openai chat wire). DeepSeek-family reasoning models
+// in thinking mode reject the whole request with 400 "The `reasoning_content`
+// in the thinking mode must be passed back to the API" when a prior assistant
+// turn arrives without the field — observed against opencode.ai zen/go/v1
+// (intermittent, state-dependent upstream). Clients that already send
+// reasoning_content (real text or "") are untouched; empty-string fill is
+// proven accepted in every request shape (non-stream/stream, tools,
+// thinking:enabled, reasoning_effort, session-affinity multi-turn).
+func InjectDeepseekReasoningPassback(req map[string]any) {
+	for _, mv := range asSlice(req["messages"]) {
+		m := asMap(mv)
+		if m == nil || asString(m["role"]) != "assistant" {
+			continue
+		}
+		if _, exists := m["reasoning_content"]; !exists {
+			m["reasoning_content"] = ""
+		}
+	}
+}
+
 func injectCacheControl(out map[string]any) {
 	mark := func(blocks []any) {
 		if len(blocks) == 0 || hasCacheControl(blocks) {

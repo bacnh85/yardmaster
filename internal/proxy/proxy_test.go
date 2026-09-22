@@ -86,6 +86,97 @@ func TestPassthroughIdentity(t *testing.T) {
 	}
 }
 
+// DeepSeek-family thinking mode: assistant turns without reasoning_content
+// must get "" injected upstream (client-agnostic fix for the intermittent
+// 400 "The reasoning_content in the thinking mode must be passed back").
+func TestDeepseekReasoningPassback(t *testing.T) {
+	var got map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer up.Close()
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "p1", BaseURL: up.URL, Wire: "openai", Models: []string{"deepseek-v4.1-flash", "deepseek-v4-flash", "glm-5.3"},
+			Auth: config.AuthConf{Type: "static", Keys: []string{"sk"}}}}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
+	defer ts.Close()
+
+	post := func(model string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"model":%q,"stream":false,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"user","content":"go"}]}`, model)
+		resp, err := http.Post(ts.URL, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s: status %d", model, resp.StatusCode)
+		}
+	}
+
+	// deepseek family: every assistant message gains reasoning_content:""
+	post("deepseek-v4.1-flash")
+	for _, mv := range got["messages"].([]any) {
+		m := mv.(map[string]any)
+		if m["role"] == "assistant" && m["reasoning_content"] != "" {
+			t.Errorf("deepseek assistant msg missing reasoning_content fill: %v", m)
+		}
+	}
+	post("deepseek-v4-flash")
+	for _, mv := range got["messages"].([]any) {
+		m := mv.(map[string]any)
+		if m["role"] == "assistant" && m["reasoning_content"] != "" {
+			t.Errorf("deepseek-v4 assistant msg missing fill: %v", m)
+		}
+	}
+	// non-deepseek family: untouched
+	post("glm-5.3")
+	for _, mv := range got["messages"].([]any) {
+		m := mv.(map[string]any)
+		if m["role"] == "assistant" {
+			if _, exists := m["reasoning_content"]; exists {
+				t.Errorf("glm-5.3 must stay untouched: %v", m)
+			}
+		}
+	}
+
+	// unit: family matcher edges (prefix-tolerant, case-insensitive)
+	for m, want := range map[string]bool{
+		"deepseek-v4.1-flash": true, "deepseek-v4-flash": true, "ocg/deepseek-v4-pro": true,
+		"DeepSeek-V4.1-Flash": true, "glm-5.1": true, "kimi-k2.7-code": true,
+		"glm-5.3": false, "kimi-k2.6": false, "glm-5.3-flash": false, "": false,
+	} {
+		if got := isDeepseekFamily(m); got != want {
+			t.Errorf("isDeepseekFamily(%q) = %v, want %v", m, got, want)
+		}
+	}
+
+	// client-supplied reasoning_content survives verbatim
+	var preserved string
+	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		ast := req["messages"].([]any)[1].(map[string]any)
+		preserved, _ = ast["reasoning_content"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"x","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer up2.Close()
+	cfg.Providers[0].BaseURL = up2.URL
+	body := `{"model":"deepseek-v4.1-flash","stream":false,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello","reasoning_content":"real thinking"}]}`
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if preserved != "real thinking" {
+		t.Errorf("client reasoning_content clobbered: %q", preserved)
+	}
+}
+
 func TestFailoverOn429(t *testing.T) {
 	var calls1, calls2 atomic.Int32
 	up1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
