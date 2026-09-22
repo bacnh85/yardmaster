@@ -121,15 +121,21 @@ func TestDeepseekReasoningPassback(t *testing.T) {
 	post("deepseek-v4.1-flash")
 	for _, mv := range got["messages"].([]any) {
 		m := mv.(map[string]any)
-		if m["role"] == "assistant" && m["reasoning_content"] != "" {
-			t.Errorf("deepseek assistant msg missing reasoning_content fill: %v", m)
+		if m["role"] == "assistant" {
+			rv, ok := m["reasoning_content"]
+			if !ok || rv != "" {
+				t.Errorf("deepseek assistant msg missing reasoning_content fill (want key with \"\"): %v", m)
+			}
 		}
 	}
 	post("deepseek-v4-flash")
 	for _, mv := range got["messages"].([]any) {
 		m := mv.(map[string]any)
-		if m["role"] == "assistant" && m["reasoning_content"] != "" {
-			t.Errorf("deepseek-v4 assistant msg missing fill: %v", m)
+		if m["role"] == "assistant" {
+			rv, ok := m["reasoning_content"]
+			if !ok || rv != "" {
+				t.Errorf("deepseek-v4 assistant msg missing fill (want key with \"\"): %v", m)
+			}
 		}
 	}
 	// non-deepseek family: untouched
@@ -141,6 +147,48 @@ func TestDeepseekReasoningPassback(t *testing.T) {
 				t.Errorf("glm-5.3 must stay untouched: %v", m)
 			}
 		}
+	}
+
+	// anthropic-wire client → openai upstream (ServeMessages): same fill rule
+	var gotMsgs []any
+	up3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		gotMsgs, _ = req["messages"].([]any)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"pong\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer up3.Close()
+	cfg2 := &config.Config{Providers: []*config.Provider{
+		{Name: "ocg", BaseURL: up3.URL, Wire: "openai", Models: []string{"glm-5.1"},
+			Auth: config.AuthConf{Keys: []string{"k"}}}}}
+	p2 := NewProxy(provider.New(cfg2), nil, nil)
+	ts2 := httptest.NewServer(http.HandlerFunc(p2.ServeMessages))
+	defer ts2.Close()
+	resp3, err := http.Post(ts2.URL, "application/json", strings.NewReader(
+		`{"model":"glm-5.1","max_tokens":64,"system":"be terse","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"text","text":"hello"}]},{"role":"user","content":[{"type":"text","text":"go"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
+	filled := 0
+	for _, mv := range gotMsgs {
+		m := mv.(map[string]any)
+		if m["role"] == "assistant" {
+			rv, ok := m["reasoning_content"]
+			if !ok || rv != "" {
+				t.Errorf("anthropic-client path: assistant msg missing fill: %v", m)
+			}
+			filled++
+		}
+	}
+	if filled == 0 {
+		t.Errorf("anthropic-client path: no assistant message seen upstream (messages: %v)", gotMsgs)
 	}
 
 	// unit: family matcher edges (prefix-tolerant, case-insensitive)
@@ -805,5 +853,33 @@ func TestResponsesClientToOpenAIUpstream(t *testing.T) {
 	}
 	if !strings.Contains(s, "hey") || !strings.Contains(s, "response.completed") {
 		t.Fatalf("text/completed missing: %q", s)
+	}
+}
+
+// Truncated upstream (connection abort mid-event) must NOT be presented to the
+// client as a clean end: no synthetic [DONE] after a scanner error.
+func TestTruncatedUpstreamNoSyntheticDone(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		w.Write([]byte(`data: {"id":"x"`))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	defer up.Close()
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "ocg", BaseURL: up.URL, Wire: "openai", Models: []string{"m"},
+			Auth: config.AuthConf{Keys: []string{"k"}}}}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
+	defer ts.Close()
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(b), "[DONE]") {
+		t.Fatalf("truncated upstream synthesized [DONE]: %q", string(b))
 	}
 }

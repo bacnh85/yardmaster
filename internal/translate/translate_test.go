@@ -172,6 +172,30 @@ func TestCacheControlInjection(t *testing.T) {
 	// system stayed a string (single text) — marker only applies to blocks/tools
 }
 
+// Same-wire anthropic passthrough (InjectCacheControlAnthropic): string system
+// is normalized to one text block and gets the ephemeral marker; blocks-form
+// system keeps the existing mark-last behavior.
+func TestInjectCacheControlAnthropicStringSystem(t *testing.T) {
+	out := mustJSON(t, `{"system":"be terse","messages":[{"role":"user","content":[{"type":"text","text":"u"}]}]}`)
+	InjectCacheControlAnthropic(out)
+	sys, ok := out["system"].([]any)
+	if !ok || len(sys) != 1 {
+		t.Fatalf("string system not normalized to single block: %v", out["system"])
+	}
+	sb := sys[0].(map[string]any)
+	if sb["text"] != "be terse" || sb["cache_control"] == nil {
+		t.Fatalf("system block wrong: %v", sb)
+	}
+	// blocks-form system unchanged (mark-last-block)
+	out2 := mustJSON(t, `{"system":[{"type":"text","text":"a"},{"type":"text","text":"b"}],"messages":[{"role":"user","content":[{"type":"text","text":"u"}]}]}`)
+	InjectCacheControlAnthropic(out2)
+	sys2 := out2["system"].([]any)
+	last := sys2[len(sys2)-1].(map[string]any)
+	if last["cache_control"] == nil || sys2[0].(map[string]any)["cache_control"] != nil {
+		t.Fatalf("blocks-form system marking wrong: %v", sys2)
+	}
+}
+
 func TestAnthropicReqToOpenAI(t *testing.T) {
 	req := mustJSON(t, `{
 		"model": "deepseek-flash", "max_tokens": 2048, "stream": false,

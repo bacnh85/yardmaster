@@ -386,7 +386,19 @@ func toolChoiceToAnthropic(tc any) map[string]any {
 // request body (system / tools / last user message) that doesn't already carry
 // any. Used for same-wire anthropic passthrough when the provider sets
 // inject_cache_control (the Z.ai / Claude subscription multiplier).
-func InjectCacheControlAnthropic(out map[string]any) { injectCacheControl(out) }
+// InjectCacheControlAnthropic marks the system prompt / last tool / last user
+// block with an ephemeral cache marker on a same-wire anthropic passthrough
+// (Claude Code → zai/anthropic upstream). String system (plain-client shape)
+// is normalized to a single text block first — the anthropic wire accepts both
+// forms, but only blocks can carry cache_control. The cross-wire translator
+// deliberately leaves system as a string (locked by TestOpenAIReqToAnthropic),
+// so its opts-flag path keeps string-system semantics.
+func InjectCacheControlAnthropic(out map[string]any) {
+	if s, ok := out["system"].(string); ok && s != "" {
+		out["system"] = []any{map[string]any{"type": "text", "text": s}}
+	}
+	injectCacheControl(out)
+}
 
 // InjectDeepseekReasoningPassback fills reasoning_content:"" on assistant
 // messages that lack it (openai chat wire). DeepSeek-family reasoning models

@@ -457,6 +457,9 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 				o[k] = v
 			}
 		}
+		if injectPassback {
+			translate.InjectDeepseekReasoningPassback(o)
+		}
 		bodyOut, _ = json.Marshal(o)
 		url += "/chat/completions"
 	}
@@ -732,6 +735,7 @@ type respToChatBody struct {
 	buf       bytes.Buffer
 	eventName string
 	eof       bool
+	scanErr   error
 }
 
 func newRespToChatBody(src io.ReadCloser, model string) *respToChatBody {
@@ -743,10 +747,19 @@ func newRespToChatBody(src io.ReadCloser, model string) *respToChatBody {
 func (b *respToChatBody) Read(p []byte) (int, error) {
 	for b.buf.Len() == 0 {
 		if b.eof {
+			if b.scanErr != nil {
+				return 0, b.scanErr
+			}
 			return 0, io.EOF
 		}
 		if !b.sc.Scan() {
 			b.eof = true
+			if err := b.sc.Err(); err != nil {
+				// transport-level break (reset, oversized line): do NOT synthesize
+				// a clean [DONE] — surface the error after draining buffered bytes
+				b.scanErr = err
+				continue
+			}
 			for _, ch := range b.rc.Done() {
 				b.writeChunk(ch)
 			}
@@ -909,6 +922,9 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 				}
 				feedChat(a2o.UsageChunk())
 			}
+			if err := sc.Err(); err != nil {
+				log.Printf("stream translate: upstream read error: %v", err)
+			}
 		} else {
 			// upstream openai chat SSE (or responses-normalized) → responses
 			for sc.Scan() {
@@ -927,6 +943,9 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 				if !feedChat(chunk) {
 					return usage, sinceT(r, *firstTouch)
 				}
+			}
+			if err := sc.Err(); err != nil {
+				log.Printf("stream translate: upstream read error: %v", err)
 			}
 		}
 		for _, e := range tr.Finish() {
@@ -1001,6 +1020,12 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 			if writeEvent("", chunk) != nil {
 				return usage, sinceT(r, *firstTouch)
 			}
+		}
+		if err := sc.Err(); err != nil {
+			log.Printf("stream translate: upstream read error: %v", err)
+		}
+		if err := sc.Err(); err != nil {
+			log.Printf("stream translate: upstream read error: %v", err)
 		}
 		writeDone(w)
 	} else {
