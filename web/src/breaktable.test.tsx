@@ -6,6 +6,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BreakTable } from "./tabs/UsageTab";
+import { totalInput } from "./components";
 import type { BreakdownRow } from "./api";
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -14,8 +15,8 @@ vi.mock("uplot", () => ({ default: class { width = 0; destroy() {} setData() {} 
 vi.mock("uplot/dist/uPlot.min.css", () => ({}));
 
 const rows = (dir: number): BreakdownRow[] => {
-  const r = (name: string, tok_in: number, cache_read: number): BreakdownRow => ({
-    name, requests: 1, errors: 0, tok_in, tok_out: 0, cache_read, cost: 0, ttft_p50_ms: null,
+  const r = (name: string, tok_in: number, cache_read: number, cache_write = 0): BreakdownRow => ({
+    name, requests: 1, errors: 0, tok_in, tok_out: 0, cache_read, cache_write, cost: 0, ttft_p50_ms: null,
   });
   // discriminating pair: RAW order (a<b) is the reverse of TOTAL order (a>b)
   // — requests are equal so only the tok-in key can move anything
@@ -25,6 +26,13 @@ const rows = (dir: number): BreakdownRow[] => {
   ];
   return dir === 1 ? [...base].reverse() : base;
 };
+
+// card-vs-table reconciliation fixture: includes an anthropic cache-write row
+// (cache_write is in the Summary shape but must also flow through BreakdownRow)
+const cardRows: BreakdownRow[] = [
+  { name: "w1", requests: 1, errors: 0, tok_in: 30, tok_out: 1, cache_read: 30, cache_write: 30, cost: 0, ttft_p50_ms: null },
+  { name: "w2", requests: 1, errors: 0, tok_in: 100, tok_out: 1, cache_read: 0, cost: 0, ttft_p50_ms: null },
+];
 
 let host: HTMLDivElement | undefined;
 let root: Root | undefined;
@@ -65,5 +73,17 @@ describe("BreakTable tok-in sort key", () => {
     clickTokIn();
     const th = [...host!.querySelectorAll("th")].find((h) => h.textContent.startsWith("tok in"))!;
     expect(th.getAttribute("aria-sort")).toBe("descending");
+  });
+
+  it("reconciles with the Tokens-in card for cache-write traffic (sum of tok-in cells = card total)", () => {
+    act(() => root!.render(<BreakTable rows={cardRows} />));
+    const cellSum = tokInCells().reduce((acc, c) => acc + Number(c.replace(/,/g, "")), 0);
+    // the card computes totalInput over the Summary aggregate of the same rows
+    const cardTotal = totalInput({
+      tok_in: cardRows.reduce((a, r) => a + r.tok_in, 0),
+      cache_read: cardRows.reduce((a, r) => a + r.cache_read, 0),
+      cache_write: cardRows.reduce((a, r) => a + (r.cache_write ?? 0), 0),
+    });
+    expect(cellSum).toBe(cardTotal); // 30+30+30 + 100 = 190, cache_write included twice over
   });
 });

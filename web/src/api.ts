@@ -40,7 +40,7 @@ export interface ReqRow {
 }
 export interface BreakdownRow {
   name: string; requests: number; errors: number; tok_in: number; tok_out: number;
-  cache_read: number; cost: number; ttft_p50_ms: number | null;
+  cache_read: number; cache_write?: number; cost: number; ttft_p50_ms: number | null;
 }
 export interface KeyRow { name: string; key_suffix: string; allow: string[]; rpm: number; usage?: boolean | null }
 export interface ProviderRow {

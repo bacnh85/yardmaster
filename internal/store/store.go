@@ -337,6 +337,7 @@ type Breakdown struct {
 	TokIn    int64    `json:"tok_in"`
 	TokOut   int64    `json:"tok_out"`
 	CacheRd  int64    `json:"cache_read"`
+	CacheWrt int64    `json:"cache_write"` // totalInput needs it: card/table reconciliation
 	Cost     float64  `json:"cost"`
 	TTFTp50  *float64 `json:"ttft_p50_ms"`
 }
@@ -349,7 +350,7 @@ func (s *Store) BreakdownBy(col string, d time.Duration) ([]Breakdown, error) {
 	since := time.Now().Add(-d).UnixMilli()
 	rows, err := s.db.Query(`SELECT `+col+`, COUNT(*),
 			SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
-			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cache_read),0),
+			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
 			COALESCE(SUM(cost_usd),0)
 		FROM requests WHERE ts >= ? GROUP BY 1 ORDER BY COUNT(*) DESC`, since)
 	if err != nil {
@@ -359,7 +360,7 @@ func (s *Store) BreakdownBy(col string, d time.Duration) ([]Breakdown, error) {
 	out := make([]Breakdown, 0)
 	for rows.Next() {
 		var b Breakdown
-		if err := rows.Scan(&b.Name, &b.Requests, &b.Errors, &b.TokIn, &b.TokOut, &b.CacheRd, &b.Cost); err == nil {
+		if err := rows.Scan(&b.Name, &b.Requests, &b.Errors, &b.TokIn, &b.TokOut, &b.CacheRd, &b.CacheWrt, &b.Cost); err == nil {
 			out = append(out, b)
 		}
 	}
