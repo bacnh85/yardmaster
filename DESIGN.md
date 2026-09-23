@@ -57,8 +57,18 @@ One accent (teal) carries brand + chart primary; status colors carry meaning onl
 - **StatCard**: label (12 muted) + value (25 tabular) + delta line (12).
 - **Table**: header row `surface2`, 12px uppercase? NO — 13px/600 sentence case;
   rows 14px, right-aligned numerics, row hover `surface2`, no zebra.
-- **Chart**: uPlot; series: accent (primary), faint (secondary); grid `line` at 0.5px;
-  legend inline; empty state shows "no data in range" text, never a blank box.
+- **Chart**: uPlot; series colors are the categorical token set `--chart1…6`
+  (light: teal/stone/amber/indigo/rose/moss 700-800 steps; dark: lighter 300-400
+  steps) — data encoding only, never decoration; adjacent series must be
+  nameably different. A series with `axis: 2` gets a right-hand axis with its
+  own scale (e.g. cost in $). Legend is live (hover = per-date values). Grid
+  `line` at 0.5px; empty state shows "no data in range" text, never a blank box.
+- **Activity heatmap** (Usage): one column per week, Mon-first 7 rows, aspect-square
+  cells, 4 intensity levels as `color-mix` steps of `--accent` over `--surface2`
+  (0 = empty surface2); per-cell `title` carries date + value. Day labels, not
+  month rulers.
+- **Share bar** (breakdown tables): `.quota-bar` at 64px + % text, share of total
+  input tokens; sorted implicitly with the token column.
 - **Badge**: pill, `accentSoft` bg + accent text (ok/active), `surface2` + muted (neutral).
 - **Button**: primary = accent bg/white text; secondary = surface + `line` border;
   focus-visible: 2px accent outline offset 2; disabled: 40% opacity.

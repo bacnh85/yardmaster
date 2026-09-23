@@ -1419,3 +1419,68 @@ func TestResponsesRoute(t *testing.T) {
 		t.Fatalf("usage: %v", u)
 	}
 }
+
+// timeseries endpoint: happy path returns series; bad `by` and bad `hours`
+// must be 400s (the handler is an if/else-if chain — exactly where a
+// regression would hide).
+func TestAdminTimeseries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	st.Submit(&store.Record{Ts: now, Key: "k", Model: "m1", Provider: "p", Status: 200, TokIn: 10, TokOut: 2})
+	if err := st.Close(); err != nil { // drain the async batch writer (no defer: Close must happen BEFORE the query below)
+		t.Fatal(err)
+	}
+
+	st2, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	cfg := &config.Config{Listen: ":0", Keys: []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}}}
+	cfg.Defaults()
+	cfg.Validate()
+	reg := provider.New(cfg)
+	p := proxy.NewProxy(reg, st2, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st2, "", "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	get := func(path string) (*http.Response, []byte) {
+		req, _ := http.NewRequest("GET", ts.URL+"/admin/api/"+path, nil)
+		req.SetBasicAuth("", "secretpw")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, body
+	}
+
+	// happy path
+	resp, body := get("timeseries?by=model&hours=24&bucket=hour")
+	if resp.StatusCode != 200 {
+		t.Fatalf("happy path: want 200, got %d (%s)", resp.StatusCode, body)
+	}
+	var out struct {
+		Series []store.ModelSeriesPoint `json:"series"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(out.Series) != 1 || out.Series[0].Model != "m1" || out.Series[0].TokIn != 10 {
+		t.Fatalf("unexpected series: %s", body)
+	}
+
+	// 400 branches
+	for _, bad := range []string{"timeseries?by=provider&hours=24", "timeseries?by=model", "timeseries?by=model&hours=0", "timeseries?by=model&hours=-5", "timeseries?by=model&hours=abc"} {
+		resp, body = get(bad)
+		if resp.StatusCode != 400 {
+			t.Errorf("%s: want 400, got %d (%s)", bad, resp.StatusCode, body)
+		}
+	}
+}

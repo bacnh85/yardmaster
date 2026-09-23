@@ -6,7 +6,9 @@
   --ink: #1C1917; --muted: #49433F; --faint: #49433F; --line: #E7E5E4; /* muted/faint: #57534E is Lc 73 on surface2 — under the APCA 75 gate */
   --accent: #115E59; --accent-hover: #0D4A46; --accent-soft: #CCFBF1;
   --ok: #134E4A; --warn: #92400E; --warn-soft: #FEF3C7; --danger: #7F1D1D; --danger-soft: #FEE2E2;
-  --chart1: #115E59; --chart2: #A8A29E; --chart-fill: rgba(17, 94, 89, 0.08);
+  /* categorical chart series (data encoding only): teal, stone, amber, indigo, rose, moss */
+  --chart1: #115E59; --chart2: #A8A29E; --chart3: #B45309; --chart4: #4338CA; --chart5: #9F1239; --chart6: #3F6212;
+  --chart-fill: rgba(17, 94, 89, 0.08);
   --grid: #E7E5E4; --axis: #78716C;
   --shadow: 0 1px 2px rgb(28 25 23 / 0.06), 0 1px 3px rgb(28 25 23 / 0.05);
   --skeleton: linear-gradient(90deg, #E7E5E4 25%, #F0EFED 37%, #E7E5E4 63%);
@@ -21,7 +23,9 @@
   --ink: #FAFAF9; --muted: #E7E5E4; --faint: #E7E5E4; --line: #44403C; /* #D6D3D1 is Lc 73 on surface2 */
   --accent: #5EEAD4; --accent-hover: #99F6E4; --accent-soft: #17332F;
   --ok: #5EEAD4; --warn: #FCD34D; --warn-soft: #462D1E; --danger: #FECACA; --danger-soft: #2E1517;
-  --chart1: #2DD4BF; --chart2: #A8A29E; --chart-fill: rgba(45, 212, 191, 0.10);
+  /* categorical chart series (data encoding only): lighter steps for dark surfaces */
+  --chart1: #2DD4BF; --chart2: #A8A29E; --chart3: #FBBF24; --chart4: #A5B4FC; --chart5: #FDA4AF; --chart6: #BEF264;
+  --chart-fill: rgba(45, 212, 191, 0.10);
   --grid: #3A3533; --axis: #A8A29E;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.35);
   --skeleton: linear-gradient(90deg, #3A3533 25%, #44403C 37%, #3A3533 63%);
@@ -193,6 +197,32 @@ table.quota-t td { white-space: normal; } /* fixed cols are narrower than accoun
 .quota-fill.danger { background: var(--danger); }
 .quota-cell { display: flex; flex-direction: column; gap: 3px; }
 .quota-meta { display: flex; flex-direction: column; font-size: 12px; }
+
+/* usage tab: share bars reuse .quota-bar at table-cell size */
+.share { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.share .quota-bar { width: 64px; }
+
+/* usage tab: 12-month activity heatmap — one column per week, Mon-first rows;
+   levels are color-mix steps of the accent token (themes automatically);
+   fixed cells + overflow: sparse history must not stretch cells into blocks */
+.heat-wrap { overflow-x: auto; padding-bottom: 4px; }
+.heat { display: grid; grid-template-rows: repeat(7, 11px); grid-auto-flow: column; grid-auto-columns: 11px; gap: 3px; width: max-content; }
+.heat > div { width: 11px; height: 11px; border-radius: 2px; background: var(--surface2); }
+.heat-1 { background: color-mix(in srgb, var(--accent) 25%, var(--surface2)); }
+.heat-2 { background: color-mix(in srgb, var(--accent) 45%, var(--surface2)); }
+.heat-3 { background: color-mix(in srgb, var(--accent) 70%, var(--surface2)); }
+.heat-4 { background: var(--accent); }
+
+/* usage tab: highlights card — most-active-day + weekday token bars */
+.hl-day { margin-bottom: 12px; }
+.hl-day .label { font-size: 12px; color: var(--muted); }
+.hl-day .value { font-size: 25px; font-weight: 600; margin: 2px 0; }
+.hl-day .sub { font-size: 12px; color: var(--faint); }
+.wd-bars { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+.wd-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.wd-col .label { font-size: 12px; color: var(--muted); }
+.wd-track { display: flex; align-items: flex-end; height: 56px; width: 100%; max-width: 28px; }
+.wd-bar { width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; }
 
 table.kv { width: auto; min-width: 320px; }
 table.kv th { background: none; color: var(--faint); font-weight: 500; white-space: nowrap; vertical-align: top; padding: 6px 16px 6px 0; }

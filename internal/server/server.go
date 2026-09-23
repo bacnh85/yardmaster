@@ -313,6 +313,18 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(map[string]any{"breakdown": rows})
+	case path == "timeseries" && r.Method == "GET":
+		by := q.Get("by")
+		if by != "model" {
+			http.Error(w, "by must be model", 400)
+		} else if hours, _ := strconv.Atoi(q.Get("hours")); hours <= 0 {
+			http.Error(w, "hours must be > 0", 400)
+		} else if rows, err := s.Store.TimeSeriesByModel(time.Duration(hours)*time.Hour, q.Get("bucket")); err != nil {
+			http.Error(w, err.Error(), 500)
+		} else {
+			// ponytail: payload is buckets×models — small, no pagination
+			writeJSON(map[string]any{"series": rows})
+		}
 	case path == "keys" && r.Method == "GET":
 		out := make([]map[string]any, 0, len(s.Proxy.Reg.Config().Keys))
 		for _, k := range s.Proxy.Reg.Config().Keys {

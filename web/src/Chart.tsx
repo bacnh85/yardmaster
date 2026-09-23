@@ -1,22 +1,23 @@
 import { useEffect, useRef } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
-import { Summary } from "./api";
-
+// Ponytail: replaced the Summary-typed import — TimeChart now takes generic
+// point rows (ts + arbitrary numeric keys) so model pivots can share it.
 export function TimeChart({
   data,
   height = 220,
   series,
 }: {
-  data: Summary["series"];
+  data: { ts: number; [k: string]: number }[];
   height?: number;
-  series: { key: "requests" | "tok_in" | "tok_out" | "cost" | "errors"; label: string }[];
+  series: { key: string; label: string; axis?: 2 }[]; // axis: 2 → right-hand axis (own scale)
 }) {
   const el = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   // latest committed payload: theme rebuilds run with narrow deps and must not redraw a render that never committed
   const dataRef = useRef(data);
-  const aligned = (d: Summary["series"]): uPlot.AlignedData =>
+  type Point = { ts: number; [k: string]: number };
+  const aligned = (d: Point[]): uPlot.AlignedData =>
     [d.map((p) => p.ts / 1000), ...series.map((s) => d.map((p) => p[s.key] as number))];
 
   // build once per config (presence, height, series set, point mode); NOT per data tick
@@ -28,33 +29,47 @@ export function TimeChart({
       const cs = getComputedStyle(el.current);
       const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
       const c1 = v("--chart1", "#115E59"), c2 = v("--chart2", "#A8A29E");
+      const colors = series.map((_, i) => {
+        const c = v(`--chart${i + 1}`, "");
+        return i === 0 ? c1 : c || c2;
+      });
       const axis = v("--axis", "#78716C"), grid = v("--grid", "#E7E5E4");
       const fill = v("--chart-fill", "rgba(17,94,89,0.08)");
       const compact = (v: number) =>
         Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(1) + "M"
         : Math.abs(v) >= 1e3 ? (v / 1e3).toFixed(v >= 1e4 ? 0 : 1) + "k"
         : String(Math.round(v));
+      const dual = series.some((s) => s.axis === 2);
       const opts: uPlot.Options = {
         width: el.current.clientWidth,
         height,
         scales: { x: { time: true } },
         axes: [
           { stroke: axis, grid: { stroke: grid, width: 0.5 } },
-          { stroke: axis, grid: { stroke: grid, width: 0.5 }, side: 1,
-            values: (u: uPlot, vals: number[]) => vals.map(compact) },
+          // dual: token scale keeps a LEFT value axis (side 3) while cost takes
+          // the right; without an axis mapped to scale "y" uPlot draws no tick
+          // labels for the token series at all
+          ...(dual ? [{ stroke: axis, grid: { stroke: grid, width: 0.5 }, side: 3 as const,
+                      values: (u: uPlot, vals: number[]) => vals.map(compact) }] : []),
+          dual
+            ? { stroke: axis, grid: { show: false }, side: 1, scale: "2",
+                values: (u: uPlot, vals: number[]) => vals.map((x) => "$" + (Math.abs(x) >= 100 ? compact(x) : x >= 1 ? x.toFixed(2) : x >= 0.1 ? x.toFixed(2) : x.toFixed(3))) }
+            : { stroke: axis, grid: { stroke: grid, width: 0.5 }, side: 1,
+                values: (u: uPlot, vals: number[]) => vals.map(compact) },
         ],
         series: [
           {},
           ...series.map((s, i) => ({
             label: s.label,
-            stroke: i === 0 ? c1 : c2,
+            stroke: colors[i],
             width: 1.5,
             fill: i === 0 ? fill : undefined,
             spanGaps: true,
+            scale: s.axis === 2 ? "2" : "y",
             points: { show: data.length < 30 },
           })),
         ],
-        legend: { show: true, live: false },
+        legend: { show: true, live: true }, // hover = per-date values in the legend (uPlot's tooltip)
       };
       return new uPlot(opts, payload, el.current);
     };

@@ -243,30 +243,28 @@ func (s *Store) SummarySince(d time.Duration, bucket string) (*Summary, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT ttft_ms FROM requests WHERE ts >= ? AND ttft_ms > 0`, since)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var v float64
-		if rows.Scan(&v) == nil {
-			ttfts = append(ttfts, v)
+	// percentiles are insertion-sorted (O(n²)); skip collection entirely for
+	// long windows (the 12-month Usage heatmap fetch) — don't even load the
+	// ttft values. LatencyTab only ever asks for 24h. Same user-visible
+	// contract as an empty window: cards render "–".
+	if d <= 30*24*time.Hour {
+		rows, err := s.db.Query(`SELECT ttft_ms FROM requests WHERE ts >= ? AND ttft_ms > 0`, since)
+		if err != nil {
+			return nil, err
 		}
+		for rows.Next() {
+			var v float64
+			if rows.Scan(&v) == nil {
+				ttfts = append(ttfts, v)
+			}
+		}
+		rows.Close()
+		sum.TTFTp50 = percentiles(ttfts, 0.50)[0]
+		sum.TTFTp95 = percentiles(ttfts, 0.95)[0]
 	}
-	rows.Close()
-	sum.TTFTp50 = percentiles(ttfts, 0.50)[0]
-	sum.TTFTp95 = percentiles(ttfts, 0.95)[0]
 
-	group := `"hour"` // default
-	switch bucket {
-	case "minute":
-		group = "ts/60000*60000"
-	case "day":
-		group = "ts/86400000*86400000"
-	default:
-		group = "ts/3600000*3600000"
-	}
-	rows, err = s.db.Query(`SELECT `+group+`, COUNT(*),
+	group := bucketExpr(bucket)
+	rows, err := s.db.Query(`SELECT `+group+`, COUNT(*),
 			SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
 			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cost_usd),0)
 		FROM requests WHERE ts >= ? GROUP BY 1 ORDER BY 1`, since)
@@ -284,6 +282,49 @@ func (s *Store) SummarySince(d time.Duration, bucket string) (*Summary, error) {
 		sum.Series = []SeriesPoint{}
 	}
 	return sum, nil
+}
+
+// bucketExpr maps a bucket name to its SQL grouping expression ("minute" |
+// "hour" | "day"; anything else = hour). Shared by SummarySince and the
+// per-model time series.
+func bucketExpr(bucket string) string {
+	switch bucket {
+	case "minute":
+		return "ts/60000*60000"
+	case "day":
+		return "ts/86400000*86400000"
+	}
+	return "ts/3600000*3600000"
+}
+
+// ModelSeriesPoint is one model's token/cost totals inside one time bucket.
+type ModelSeriesPoint struct {
+	Bucket int64   `json:"ts"` // unix millis of bucket start
+	Model  string  `json:"model"`
+	TokIn  int64   `json:"tok_in"`
+	TokOut int64   `json:"tok_out"`
+	Cost   float64 `json:"cost"`
+}
+
+// TimeSeriesByModel groups tok/cost by (bucket, model) — the Usage tab's
+// top-models-over-time chart. TokIn stays cache-exclusive, matching SeriesPoint.
+func (s *Store) TimeSeriesByModel(d time.Duration, bucket string) ([]ModelSeriesPoint, error) {
+	since := time.Now().Add(-d).UnixMilli()
+	rows, err := s.db.Query(`SELECT `+bucketExpr(bucket)+`, model,
+			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cost_usd),0)
+		FROM requests WHERE ts >= ? GROUP BY 1, 2 ORDER BY 1`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ModelSeriesPoint{}
+	for rows.Next() {
+		var p ModelSeriesPoint
+		if err := rows.Scan(&p.Bucket, &p.Model, &p.TokIn, &p.TokOut, &p.Cost); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 type Row struct {
