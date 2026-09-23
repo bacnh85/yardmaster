@@ -35,7 +35,7 @@ type QuotaAccount struct {
 	Suffix         string       `json:"suffix"`
 	FiveHour       *QuotaWindow `json:"five_hour,omitempty"`
 	Weekly         *QuotaWindow `json:"weekly,omitempty"`
-	Monthly        *QuotaWindow `json:"monthly,omitempty"` // explicit percent window (OpenCode Go); cc/DeepSeek derive the column instead
+	Monthly        *QuotaWindow `json:"monthly,omitempty"`         // explicit percent window (OpenCode Go); cc/DeepSeek derive the column instead
 	MonthlyCredits *float64     `json:"monthly_credits,omitempty"` // USD remaining, or balance per Currency
 	Currency       string       `json:"currency,omitempty"`        // balance currency when not USD (e.g. DeepSeek CNY accounts)
 	MonthlyTotal   float64      `json:"monthly_total,omitempty"`   // plan allowance; 0 = unknown plan
@@ -73,6 +73,8 @@ func quotaSource(baseURL string) string {
 		}
 	case "openrouter.ai":
 		return "openrouter"
+	case "ollama.com":
+		return "ollama"
 	}
 	return ""
 }
@@ -85,6 +87,7 @@ var billingPaths = map[string]string{
 	"zai":         "/api/monitor/usage/quota/limit",
 	"opencode":    "/zen/go/v1/usage",
 	"openrouter":  "/api/v1/credits",
+	"ollama":      "/api/usage",
 }
 
 // quotaClient fetches usage windows; var so tests can redirect upstream.
@@ -422,6 +425,81 @@ func fetchOpenRouterQuota(ctx context.Context, quotaURL, key string) (*QuotaAcco
 	return acct, nil
 }
 
+// olUsage mirrors GET https://ollama.com/api/usage (live-verified 2026-09-23
+// with a Free-tier key: limits={monthly:{usage:0.67,models:[...]}};
+// monopi PR #379 fixtures show session/weekly on other tiers). *.usage is a
+// consumed FRACTION (0..1) — the dashboard renders it as a pct window.
+// Malformed windows (bare numbers, non-numeric string usages) are dropped
+// per-window, never a payload failure or a fabricated 0%. No reset
+// timestamps and no plan allowance are exposed — never fabricated.
+type olUsage struct {
+	Activity struct {
+		Cost flexString `json:"cost"`
+	} `json:"activity"`
+	Limits map[string]json.RawMessage `json:"limits"`
+}
+
+// flexFloat accepts a JSON number or numeric string; anything else errors and
+// drops just that window (monopi's fixtures show "not-a-number" in the wild).
+// ok distinguishes "decoded" from "absent/malformed" so a genuine 0 usage
+// window renders as 0% instead of being dropped as no-data.
+type flexFloat struct {
+	v  float64
+	ok bool
+}
+
+func (f *flexFloat) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return fmt.Errorf("not a number: %s", s)
+	}
+	f.v, f.ok = v, true
+	return nil
+}
+
+// fetchOllamaQuota reads Ollama Cloud usage windows for one key: session
+// (5h) → FiveHour, weekly (7d) → Weekly, both as pct-of-allowance (OpenCode
+// convention). A missing or malformed window stays nil — never a fake 0%.
+func fetchOllamaQuota(ctx context.Context, quotaURL, key string) (*QuotaAccount, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, quotaURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := quotaClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var body olUsage
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return nil, fmt.Errorf("decode usage: %w", err)
+	}
+	olPct := func(raw json.RawMessage) *QuotaWindow {
+		var w struct {
+			Usage flexFloat `json:"usage"`
+		}
+		// ok=false covers a malformed/absent usage (and literal null); a genuine
+		// {usage: 0} fresh window must render as 0%, never as no-data
+		if json.Unmarshal(raw, &w) != nil || !w.Usage.ok {
+			return nil
+		}
+		pct := float64(w.Usage.v) * 100
+		return &QuotaWindow{Used: pct, Cap: 100, Unit: "pct", Exceeded: pct >= 100}
+	}
+	return &QuotaAccount{
+		FiveHour: olPct(body.Limits["session"]),
+		Weekly:   olPct(body.Limits["weekly"]),
+		Monthly:  olPct(body.Limits["monthly"]), // the only window on Free tier
+	}, nil
+}
+
 const quotaTTL = 60 * time.Second
 
 var (
@@ -532,6 +610,8 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 				acct, err = fetchOpencodeQuota(context.Background(), origin, key)
 			case "openrouter":
 				acct, err = fetchOpenRouterQuota(context.Background(), origin, key)
+			case "ollama":
+				acct, err = fetchOllamaQuota(context.Background(), origin, key)
 			default:
 				acct, err = fetchCommandCodeQuota(context.Background(), origin, key)
 			}

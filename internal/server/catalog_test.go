@@ -30,6 +30,24 @@ func TestTokToMtok(t *testing.T) {
 	}
 }
 
+// modelsDevProviderID maps a provider base_url to its models.dev entry —
+// ollama.com hosts the "ollama-cloud" entry with full catalog metadata.
+func TestModelsDevProviderID(t *testing.T) {
+	cases := map[string]string{
+		"https://ollama.com":            "ollama-cloud",
+		"https://ollama.com/v1":         "ollama-cloud",
+		"https://api.commandcode.ai":    "", // CommandCode carries its own metadata
+		"https://api.deepseek.com":      "deepseek",
+		"https://opencode.ai/zen/go/v1": "opencode-go",
+		"https://api.example.com/v1":    "",
+	}
+	for in, want := range cases {
+		if got := modelsDevProviderID(in); got != want {
+			t.Errorf("modelsDevProviderID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // OpenRouter-style /models payload: live pricing strings, max_completion_tokens,
 // modality/parameter capability flags, :free models, BYO-key "-1" pricing.
 // A models.dev-provider payload (CommandCode shape: only id/name/context/

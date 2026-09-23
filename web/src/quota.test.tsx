@@ -58,6 +58,8 @@ describe("isQuotaProvider", () => {
     ["https://opencode.ai/zen/go/v1", true],
     ["https://opencode.ai/zen/v1", false], // Zen credits: no usage API
     ["https://opencode.ai", false],
+    ["https://ollama.com", true],
+    ["https://ollama.com/v1", true],
     ["https://api.example.com/v1", false],
     ["", false],
     ["not a url", false],

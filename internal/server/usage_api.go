@@ -57,6 +57,8 @@ func sourceForSlug(slug string) string {
 		return "deepseek"
 	case "ocg", "opencode-go", "opencode":
 		return "opencode"
+	case "ol", "ollama":
+		return "ollama"
 	}
 	return ""
 }

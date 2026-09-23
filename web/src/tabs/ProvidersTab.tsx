@@ -178,8 +178,8 @@ export const effectiveCap = (planFilter: "all" | CmdPlan, subscription: string):
 };
 
 /** Ids allowed under a plan cap: "" = all, else only that tier's models. */
-export const capIds = (ids: string[], cap: CmdPlan): string[] =>
-  cap === "" ? ids : ids.filter((id) => cmdPlan(id) === cap);
+export const capIds = (ids: string[], cap: CmdPlan, planOf: (id: string) => CmdPlan = cmdPlan): string[] =>
+  cap === "" ? ids : ids.filter((id) => planOf(id) === cap);
 
 /** Effective family of a catalog model within a preset group: curation wins —
  *  a model curated on a responses-wire entry is "responses" even when models.dev
@@ -793,6 +793,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     const ids = capIds(
       catalog.models.filter((m) => familyFor(group, m) === e.family).map((m) => m.id),
       cap,
+      r.planOf,
     );
     if (ids.length === 0) { toast(`no ${e.family} models${cap ? ` on ${cap}` : ""}`, "err"); return; }
     const next = Array.from(new Set([...sub.models, ...ids]));
@@ -803,8 +804,9 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     } catch (e2) { toast(String(e2 instanceof Error ? e2.message : e2), "err"); }
   };
 
+  const planOf = r.planOf ?? cmdPlan;
   const shown = withCurated(catalog?.models ?? [], group).filter((m) =>
-    (m.manual || planFilter === "all" || cmdPlan(m.id) === planFilter) &&
+    (m.manual || planFilter === "all" || planOf(m.id) === planFilter) &&
     (familyFilter === "all" || (familyFilter === "exposed" ? isVisible(m) : m.manual ? false : familyFilter === "free" ? m.free : !m.free)) &&
     (!filter || prefixedId(r.prefix, m.id).includes(filter)));
   // rows without a resolvable wire ("serve on…", no checkbox) can never be
@@ -828,7 +830,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
       // wildcard hides materialize the UNcapped family complement — the exact
       // per-row checkbox semantics (hiding can only narrow a wildcard)
       const famIds = catalog.models.filter((x) => familyFor(group, x) === fam).map((x) => x.id);
-      const universe = on ? capIds(famIds, effectiveCap(planFilter, sub.subscription || "")) : famIds;
+      const universe = on ? capIds(famIds, effectiveCap(planFilter, sub.subscription || ""), r.planOf) : famIds;
       const shownIds = shown.filter((x) => familyFor(group, x) === fam).map((x) => x.id);
       const next = bulkNextModels(sub.models, shownIds, universe, on);
       if (next === null) {
@@ -1089,7 +1091,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                             {m.tool_call && <span className="badge muted" title="tool calling">tools</span>}
                             {m.image && <span className="badge muted" title="image input">img</span>}
                             {m.manual && <span className="badge muted" title="added by hand — not in the provider's catalog; metadata comes from models.dev when known">manual</span>}
-                            {r.plans && !m.manual && <span className="badge muted" title={cmdPlan(m.id) ? `${cmdPlan(m.id)} plan` : "new model — plan tier not yet classified"}>{cmdPlan(m.id) || "?"}</span>}
+                            {r.plans && !m.manual && <span className="badge muted" title={planOf(m.id) ? `${planOf(m.id)} plan` : "new model — plan tier not yet classified"}>{planOf(m.id) || "?"}</span>}
                           </td>
                           <td className="num">{m.context ? fmtTok(m.context) : "—"}</td>
                           <td className="num col-md">{m.max_output ? fmtTok(m.max_output) : "—"}</td>

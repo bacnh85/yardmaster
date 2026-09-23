@@ -25,6 +25,7 @@ func TestUsageSlugMap(t *testing.T) {
 		"zai": "zai", "command-code": "commandcode", "cmd": "commandcode",
 		"commandcode": "commandcode", "ds": "deepseek", "deepseek": "deepseek",
 		"ocg": "opencode", "opencode-go": "opencode", "opencode": "opencode",
+		"ol": "ollama", "ollama": "ollama",
 		"glm-5.3-flash": "", "": "",
 	}
 	for in, want := range cases {

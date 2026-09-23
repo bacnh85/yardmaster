@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels, bulkNextModels, effectiveCap, capIds, withCurated, toggleModels, isCuratedModel, canonModelId } from "./tabs/ProvidersTab";
-import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan } from "./presets";
+import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan, olPlan } from "./presets";
 import type { CatalogModel, ProviderRow } from "./api";
 
 describe("providerBody", () => {
@@ -122,10 +122,10 @@ const baseRow: ProviderRow = {
 describe("prefix registry", () => {
   it("every registry provider carries a short routing prefix", () => {
     expect(REGISTRY.map((r) => [r.id, r.prefix])).toEqual([
-      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"],
+      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"], ["ollama", "ol"],
     ]);
     expect(REGISTRY.map((r) => [r.id, r.code])).toEqual([
-      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"],
+      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"], ["ollama", "OL"],
     ]);
   });
 });
@@ -151,7 +151,7 @@ describe("registry", () => {
   });
 
   it("has the providers the product must support", () => {
-    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "opencode-go", "openrouter", "zai"]);
+    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "ollama", "opencode-go", "openrouter", "zai"]);
     const zen = REGISTRY.find((r) => r.id === "opencode-go")!;
     expect(zen.entries).toHaveLength(3); // one config provider per wire family
     for (const e of zen.entries) {
@@ -172,6 +172,14 @@ describe("registry", () => {
     expect(ds.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat", "responses"]);
     expect(new Set(ds.entries.map((e) => e.base_url)).size).toBe(2); // /anthropic base differs
     expect(ds.entries.find((e) => e.wire === "anthropic")!.base_url).toBe("https://api.deepseek.com/anthropic");
+    // Ollama Cloud: single openai-wire entry (chat hub translates for Claude/Codex
+    // clients); /v1/models is public, catalog metadata comes from models.dev ollama-cloud
+    const ol = REGISTRY.find((r) => r.id === "ollama")!;
+    expect(ol.plans).toBe(true);
+    expect(ol.planOf?.("gpt-oss:20b")).toBe("goat"); // free tier
+    expect(ol.planOf?.("glm-5.3")).toBe("pro");
+    expect(ol.entries).toHaveLength(1);
+    expect(ol.entries[0]).toMatchObject({ name: "ollama", wire: "openai", base_url: "https://ollama.com/v1", family: "chat" });
   });
 
   it("classifies CommandCode models per plan (live catalog ids)", () => {
@@ -186,6 +194,19 @@ describe("registry", () => {
     expect(cmdPlan("claude-opus-5")).toBe("max");
     expect(cmdPlan("sakana/fugu-ultra")).toBe("max");
     expect(cmdPlan("brand-new-model")).toBe(""); // unclassified future id
+  });
+
+  it("classifies Ollama Cloud models per plan (live free-tier list)", () => {
+    // the 6 free models → "goat" (tier-lattice lowest slot); everything else → "pro"
+    expect(olPlan("gemma4:31b")).toBe("goat");
+    expect(olPlan("gpt-oss:20b")).toBe("goat");
+    expect(olPlan("gpt-oss:120b")).toBe("goat");
+    expect(olPlan("nemotron-3-nano:30b")).toBe("goat");
+    expect(olPlan("nemotron-3-super")).toBe("goat");
+    expect(olPlan("nemotron-3-ultra")).toBe("goat");
+    expect(olPlan("glm-5.3")).toBe("pro");
+    expect(olPlan("deepseek-v4-pro:0813")).toBe("pro");
+    expect(olPlan("kimi-k3")).toBe("pro");
   });
 
   it("groups config providers by preset, falling back to legacy names", () => {
@@ -314,6 +335,11 @@ describe("registry", () => {
       expect(capIds(ids, "")).toEqual(ids);
       expect(capIds(ids, "goat")).toEqual(["zai-org/GLM-5.3"]);
       expect(capIds(ids, "max")).toEqual(["claude-opus-5"]);
+    });
+    it("capIds honors a preset-specific planOf (ollama free-tier guardrail)", () => {
+      const ids = ["gpt-oss:20b", "glm-5.3", "kimi-k3"];
+      expect(capIds(ids, "goat", olPlan)).toEqual(["gpt-oss:20b"]); // free models only
+      expect(capIds(ids, "pro", olPlan)).toEqual(["glm-5.3", "kimi-k3"]);
     });
   });
 

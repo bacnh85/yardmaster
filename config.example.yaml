@@ -69,6 +69,18 @@ providers:
     auth: { type: static, keys: ["sk-or-..."] }
     models: [deepseek/deepseek-chat, deepseek/deepseek-r1]
 
+  # --- Ollama Cloud (https://ollama.com) ---
+  # Open models served from Ollama's cloud. Dashboard preset: one-click create.
+  # /v1/models is public (catalog enriched from models.dev); GET /api/usage
+  # feeds the Quota tab's session/weekly pct windows. Claude Code/Codex clients
+  # work through yardmaster's wire translation.
+  - name: ollama
+    base_url: https://ollama.com/v1
+    wire: openai
+    prefix: ol
+    auth: { type: static, keys: ["..."] }
+    models: [glm-5.3, glm-5.3-flash, deepseek-v4.1-flash, kimi-k3, "gpt-oss:120b"]
+
   # --- OpenCode Go / OpenCode Zen (https://opencode.ai/zen) ---
   # One gateway, three wire families — add the entries you need (dashboard
   # presets do this in one click; `session: opencode` sends the required

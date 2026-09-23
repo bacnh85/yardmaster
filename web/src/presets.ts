@@ -17,6 +17,7 @@ export interface RegistryProvider {
   code: string;      // short code: monogram + connection label prefix (e.g. "OCG")
   prefix: string;    // routing prefix; models exposed to agents as "prefix/model"
   plans?: boolean;   // catalog supports plan-tier filtering (cmdPlan)
+  planOf?: (id: string) => CmdPlan; // plan classifier; defaults to cmdPlan when plans is set
   entries: RegistryEntry[];
 }
 
@@ -59,7 +60,7 @@ export const REGISTRY: RegistryProvider[] = [
     ],
   },
   {
-    id: "cmdcode", title: "Command Code (CC)", code: "CC", prefix: "cmd", plans: true,
+    id: "cmdcode", title: "Command Code (CC)", code: "CC", prefix: "cmd", plans: true, planOf: cmdPlan,
     desc: "Command Code Provider API — 50+ open models on GOAT, Claude/GPT/Gemini on Pro/Max",
     entries: [
       { name: "cmdcode", wire: "openai", base_url: "https://api.commandcode.ai/provider/v1", family: "chat", familyLabel: "Open models (GOAT+)" },
@@ -71,6 +72,13 @@ export const REGISTRY: RegistryProvider[] = [
     desc: "457 models across 60+ vendors on one OpenAI-compatible endpoint — live pricing, prepaid credits, :free tier",
     entries: [
       { name: "openrouter", wire: "openai", base_url: "https://openrouter.ai/api/v1", family: "chat", familyLabel: "All vendors · chat completions · :free tier" },
+    ],
+  },
+  {
+    id: "ollama", title: "Ollama Cloud (OL)", code: "OL", prefix: "ol", plans: true, planOf: olPlan,
+    desc: "Open models on Ollama's cloud — GLM, DeepSeek, Kimi, MiniMax, gpt-oss; per-token credits, no subscription lock-in",
+    entries: [
+      { name: "ollama", wire: "openai", base_url: "https://ollama.com/v1", family: "chat", familyLabel: "GLM · DeepSeek · Kimi · MiniMax · gpt-oss" },
     ],
   },
 ];
@@ -119,6 +127,23 @@ export function cmdPlan(id: string): CmdPlan {
   if (CC_PRO.includes(k)) return "pro";
   if (CC_GOAT.includes(k)) return "goat";
   return "";
+}
+
+// Ollama Cloud Free-tier models (ollama.com/settings → Included usage,
+// live-verified 2026-09-23: paid models 402 with "not included in your free
+// usage"; Pro/Max/Team unlock every model). Ids Ollama adds later fall to ""
+// — shown only under the "all" filter, never swept by plan expose-alls until
+// filed into the right list here.
+const OL_FREE = [
+  "gemma4:31b", "gpt-oss:20b", "gpt-oss:120b",
+  "nemotron-3-nano:30b", "nemotron-3-super", "nemotron-3-ultra",
+];
+
+/** Plan tier for an Ollama Cloud catalog id. Free models → "goat" (the tier
+ *  lattice's lowest slot, so the subscription guardrail machinery applies);
+ *  paid models → "pro" (Pro/Max/Team all unlock the full catalog). */
+export function olPlan(id: string): CmdPlan {
+  return OL_FREE.includes(id.toLowerCase()) ? "goat" : "pro";
 }
 
 /** Find a config provider's registry entry: by preset id, else by exact name (legacy configs). */

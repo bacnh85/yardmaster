@@ -226,6 +226,79 @@ func quotaTestHarness(t *testing.T, hits *int) (*httptest.Server, func(int64)) {
 	return ts, func(us int64) { delayUs.Store(us) }
 }
 
+// TestQuotaEndpointOllama drives the full handler path for the ollama source:
+// host match (ollama.com/v1 → ollama), origin derivation (billingPaths —
+// /api/usage on the bare origin, no /v1), and window mapping, via the same
+// redirectRT harness as TestQuotaEndpoint.
+func TestQuotaEndpointOllama(t *testing.T) {
+	hits := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/usage" {
+			t.Errorf("upstream path %s", r.URL.Path) // origin only — /v1 must NOT carry over
+		}
+		if r.Header.Get("Authorization") != "Bearer ol-secret" {
+			t.Errorf("Authorization %q", r.Header.Get("Authorization"))
+		}
+		fmt.Fprint(w, `{"limits":{"monthly":{"usage":0.67,"models":[{"name":"gemma4:31b","request_count":471}]}}}`)
+	}))
+	defer up.Close()
+	resetQuotaCache(t, &hits, up.URL)
+
+	dbPath := t.TempDir() + "/test.db"
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "ollama", BaseURL: "https://ollama.com/v1", Wire: "openai", Preset: "ollama", Prefix: "ol",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"ol-secret"}}},
+		},
+	}
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	reg := provider.New(cfg)
+	p := proxy.NewProxy(reg, st, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, "", "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/admin/api/quota", nil)
+	req.SetBasicAuth("x", "secretpw")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	var out struct {
+		Quotas []ProviderQuota `json:"quotas"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, b)
+	}
+	if len(out.Quotas) != 1 || out.Quotas[0].Source != "ollama" {
+		t.Fatalf("quotas: %+v", out.Quotas)
+	}
+	g := out.Quotas[0]
+	if len(g.Providers) != 1 || g.Providers[0] != "ollama" || len(g.Accounts) != 1 {
+		t.Fatalf("group: %+v", g)
+	}
+	a := g.Accounts[0]
+	if a.Err != "" || a.Monthly == nil || math.Abs(a.Monthly.Used-67) > 0.01 || a.Monthly.Unit != "pct" {
+		t.Errorf("account: err=%q monthly=%+v", a.Err, a.Monthly)
+	}
+	if hits != 1 {
+		t.Errorf("upstream fetches %d, want 1", hits)
+	}
+}
+
 func TestQuotaCancelDoesNotPoisonCache(t *testing.T) {
 	hits := 0
 	ts, setDelay := quotaTestHarness(t, &hits)
@@ -348,10 +421,12 @@ func TestQuotaSourceMatcher(t *testing.T) {
 		"https://api.deepseek.com/anthropic":     "deepseek",
 		"https://opencode.ai/zen/go/v1":          "opencode",
 		"http://OpenCode.AI/zen/go/v1":           "opencode", // case-insensitive host + path
-		"https://opencode.ai/zen/v1":             "",          // Zen credits: no usage API → no quota row
+		"https://opencode.ai/zen/v1":             "",         // Zen credits: no usage API → no quota row
 		"https://opencode.ai":                    "",
 		"https://openrouter.ai/api/v1":           "openrouter",
 		"http://OpenRouter.AI/api/v1":            "openrouter", // case-insensitive host
+		"https://ollama.com":                     "ollama",
+		"https://ollama.com/v1":                  "ollama",
 		"https://api.example.com/v1":             "",
 		"not a url":                              "",
 	}
@@ -359,6 +434,106 @@ func TestQuotaSourceMatcher(t *testing.T) {
 		if got := quotaSource(in); got != want {
 			t.Errorf("quotaSource(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestFetchOllamaQuota parses the ollama.com/api/usage shape (monopi PR #379
+// fixtures): session/weekly usage are consumed FRACTIONS 0..1; malformed
+// windows (bare number, string usage) are ignored, never fabricated as 0%.
+func TestFetchOllamaQuota(t *testing.T) {
+	orig := quotaClient
+	t.Cleanup(func() { quotaClient = orig })
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer k1" {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		fmt.Fprint(w, `{`+
+			`"activity":{"cost":"20.00000","period":{"type":"last_4_weeks"},"models":[{"name":"glm-5.3-flash","request_count":788,"cost":"14.24810"}]},`+
+			`"limits":{"session":{"usage":0.005,"models":[]},"weekly":{"usage":0.827,"models":[]}}}`)
+	}))
+	defer up.Close()
+	quotaClient = up.Client()
+	acct, err := fetchOllamaQuota(context.Background(), up.URL, "k1")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if w := acct.FiveHour; w == nil || w.Used != 0.5 || w.Cap != 100 || w.Unit != "pct" || w.Exceeded || w.ResetAt != 0 {
+		t.Errorf("FiveHour = %+v", w)
+	}
+	if w := acct.Weekly; w == nil || math.Abs(w.Used-82.7) > 0.01 || w.Cap != 100 || w.Unit != "pct" || w.Exceeded {
+		t.Errorf("Weekly = %+v", w)
+	}
+
+	// malformed: non-numeric string usage and a bare-number window are skipped,
+	// absent limits stay nil — the account surfaces no fabricated windows
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"limits":{"session":{"usage":"not-a-number"},"weekly":42}}`)
+	}))
+	defer bad.Close()
+	quotaClient = bad.Client()
+	acct, err = fetchOllamaQuota(context.Background(), bad.URL, "k1")
+	if err != nil {
+		t.Fatalf("fetch malformed: %v", err)
+	}
+	if acct.FiveHour != nil || acct.Weekly != nil {
+		t.Errorf("want nil windows, got FiveHour=%+v Weekly=%+v", acct.FiveHour, acct.Weekly)
+	}
+
+	// Free tier (live 2026-09-23): a single monthly window, no session/weekly
+	free := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"limits":{"monthly":{"usage":0.67,"models":[{"name":"gemma4:31b","request_count":471}]}}}`)
+	}))
+	defer free.Close()
+	quotaClient = free.Client()
+	acct, err = fetchOllamaQuota(context.Background(), free.URL, "k1")
+	if err != nil {
+		t.Fatalf("fetch free: %v", err)
+	}
+	if w := acct.Monthly; w == nil || math.Abs(w.Used-67) > 0.01 || w.Unit != "pct" || acct.FiveHour != nil || acct.Weekly != nil {
+		t.Errorf("Monthly = %+v, FiveHour = %+v, Weekly = %+v", acct.Monthly, acct.FiveHour, acct.Weekly)
+	}
+
+	// genuine zero: a fresh window at usage 0 must render 0%, not no-data —
+	// this is exactly what w.Usage.ok guards (vs absent/malformed)
+	zero := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"limits":{"monthly":{"usage":0}}}`)
+	}))
+	defer zero.Close()
+	quotaClient = zero.Client()
+	acct, err = fetchOllamaQuota(context.Background(), zero.URL, "k1")
+	if err != nil {
+		t.Fatalf("fetch zero: %v", err)
+	}
+	if w := acct.Monthly; w == nil || w.Used != 0 || w.Unit != "pct" || w.Exceeded {
+		t.Errorf("Monthly = %+v, want a real 0%% window", acct.Monthly)
+	}
+
+	// numeric-string usage parses (monopi fixtures show string values in the wild)
+	str := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"limits":{"session":{"usage":"0.5"}}}`)
+	}))
+	defer str.Close()
+	quotaClient = str.Client()
+	acct, err = fetchOllamaQuota(context.Background(), str.URL, "k1")
+	if err != nil {
+		t.Fatalf("fetch string usage: %v", err)
+	}
+	if w := acct.FiveHour; w == nil || w.Used != 50 || acct.Weekly != nil {
+		t.Errorf("FiveHour = %+v, Weekly = %+v", acct.FiveHour, acct.Weekly)
+	}
+
+	// PAYG/free key: no limits object at all → empty account, no error
+	none := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"activity":{"cost":"1.50"}}`)
+	}))
+	defer none.Close()
+	quotaClient = none.Client()
+	acct, err = fetchOllamaQuota(context.Background(), none.URL, "k1")
+	if err != nil {
+		t.Fatalf("fetch empty: %v", err)
+	}
+	if acct.FiveHour != nil || acct.Weekly != nil {
+		t.Errorf("want nil windows, got FiveHour=%+v Weekly=%+v", acct.FiveHour, acct.Weekly)
 	}
 }
 

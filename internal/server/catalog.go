@@ -100,6 +100,8 @@ func modelsDevProviderID(baseURL string) string {
 		return "zhipuai"
 	case strings.Contains(b, "openrouter"):
 		return "openrouter"
+	case strings.Contains(b, "ollama.com"):
+		return "ollama-cloud"
 	}
 	return ""
 }
