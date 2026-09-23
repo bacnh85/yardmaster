@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -335,6 +336,18 @@ func (s *Server) upstreamModels(ctx context.Context, p *config.Provider) []Model
 			Name               string   `json:"name"`
 			ContextLength      int      `json:"context_length"`
 			SupportedEndpoints []string `json:"supported_endpoints"`
+			Pricing            struct {
+				Prompt         flexString
+				Completion     flexString
+				InputCacheRead flexString `json:"input_cache_read"`
+			}
+			TopProvider struct {
+				MaxCompletionTokens int `json:"max_completion_tokens"`
+			} `json:"top_provider"`
+			Architecture struct {
+				InputModalities []string `json:"input_modalities"`
+			} `json:"architecture"`
+			SupportedParameters []string `json:"supported_parameters"`
 		} `json:"data"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&body) != nil {
@@ -356,9 +369,46 @@ func (s *Server) upstreamModels(ctx context.Context, p *config.Provider) []Model
 				mm.Family = "chat"
 			}
 		}
+		// OpenRouter-style live pricing: per-token strings → $/Mtok. Gated on
+		// the pricing object being present — providers whose /models carries no
+		// pricing (CommandCode) must not flip Free or zero models.dev prices in
+		// enrichCatalog. -1 = BYO-key (unmanaged) → the -1 unknown-price
+		// convention, never 0/"free".
+		if m.Pricing.Prompt != "" || m.Pricing.Completion != "" {
+			mm.Input = tokToMtok(m.Pricing.Prompt)
+			mm.Output = tokToMtok(m.Pricing.Completion)
+			mm.CacheRead = tokToMtok(m.Pricing.InputCacheRead)
+			mm.Free = mm.Input == 0 && mm.Output == 0
+		}
+		mm.MaxOutput = m.TopProvider.MaxCompletionTokens
+		mm.Image = slices.Contains(m.Architecture.InputModalities, "image")
+		mm.Reasoning = slices.Contains(m.SupportedParameters, "reasoning")
+		mm.ToolCall = slices.Contains(m.SupportedParameters, "tool_choice")
 		out = append(out, mm)
 	}
 	return out
+}
+
+// flexString accepts the per-token pricing strings OpenRouter /models emits
+// ("-1", "0.0000007") without failing whole-payload decode.
+type flexString string
+
+func (f *flexString) UnmarshalJSON(b []byte) error {
+	*f = flexString(strings.Trim(string(b), `"`))
+	return nil
+}
+
+// tokToMtok converts a $/token price string to $/Mtok; -1 (unmanaged) and
+// unparsable values map to the -1 unknown-price convention.
+func tokToMtok(s flexString) float64 {
+	f, err := strconv.ParseFloat(string(s), 64)
+	if err != nil {
+		return 0
+	}
+	if f < 0 {
+		return -1
+	}
+	return f * 1_000_000
 }
 
 // enrichCatalog merges models.dev metadata into upstream metas (or fabricates
@@ -401,12 +451,44 @@ func enrichCatalog(baseURL string, ups []ModelMeta) {
 			}
 		}
 		// upstream-reported metadata wins (it's the serving provider);
-		// models.dev fills only what upstream doesn't report
+		// models.dev fills only what upstream doesn't report. Upstream pricing
+		// must be non-zero to win — 0 means the upstream reported no pricing
+		// (zeroing models.dev prices would flip paid models to "free"). -1
+		// upstream (BYO-key) also wins: never overwrite unknown with unknown.
 		if up.Name != "" {
 			mm.Name = up.Name
 		}
 		if up.Context > 0 {
 			mm.Context = up.Context
+		}
+		if up.MaxOutput > 0 {
+			mm.MaxOutput = up.MaxOutput
+		}
+		if up.Input != 0 {
+			mm.Input = up.Input
+		}
+		if up.Output != 0 {
+			mm.Output = up.Output
+		}
+		if up.CacheRead > 0 {
+			mm.CacheRead = up.CacheRead
+		}
+		if up.Image {
+			mm.Image = true
+		}
+		if up.Reasoning {
+			mm.Reasoning = true
+		}
+		if up.ToolCall {
+			mm.ToolCall = true
+		}
+		if up.Free {
+			mm.Free = true
+		}
+		// upstream -1 pricing (BYO-key) must never coexist with a models.dev
+		// free flag: unknown price is not a free model
+		if mm.Input < 0 || mm.Output < 0 {
+			mm.Free = false
 		}
 		if up.Family != "" {
 			mm.Family = up.Family // endpoint-reported wire beats the npm guess

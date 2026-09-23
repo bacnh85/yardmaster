@@ -60,9 +60,12 @@ providers:
   # send unsigned (matching the real client's fail-open).
 
   # --- OpenRouter (OpenAI wire, model ids like "deepseek/deepseek-chat") ---
+  # Dashboard preset: one-click create. /models is public (catalog + live
+  # pricing); GET /api/v1/credits feeds the Quota tab's credit balance.
   - name: openrouter
     base_url: https://openrouter.ai/api/v1
     wire: openai
+    prefix: or
     auth: { type: static, keys: ["sk-or-..."] }
     models: [deepseek/deepseek-chat, deepseek/deepseek-r1]
 

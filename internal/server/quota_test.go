@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -349,6 +350,8 @@ func TestQuotaSourceMatcher(t *testing.T) {
 		"http://OpenCode.AI/zen/go/v1":           "opencode", // case-insensitive host + path
 		"https://opencode.ai/zen/v1":             "",          // Zen credits: no usage API → no quota row
 		"https://opencode.ai":                    "",
+		"https://openrouter.ai/api/v1":           "openrouter",
+		"http://OpenRouter.AI/api/v1":            "openrouter", // case-insensitive host
 		"https://api.example.com/v1":             "",
 		"not a url":                              "",
 	}
@@ -535,5 +538,101 @@ func TestQuotaDeepSeekBalance(t *testing.T) {
 	resp2.Body.Close()
 	if hits != 2 {
 		t.Errorf("cache miss: fetches %d, want 2", hits)
+	}
+}
+
+const orCreditsJSON = `{"data":{"total_credits":80.25,"total_usage":14.75}}`
+
+func TestQuotaOpenRouterCredits(t *testing.T) {
+	hits := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/credits" {
+			t.Errorf("upstream path %s", r.URL.Path)
+		}
+		switch strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		case "or-good":
+			w.Write([]byte(orCreditsJSON))
+		case "or-empty":
+			w.Write([]byte(`{"data":{"total_credits":12.5,"total_usage":13.1}}`))
+		case "or-nocredits":
+			w.Write([]byte(`{"data":{}}`))
+		default:
+			w.WriteHeader(401)
+			w.Write([]byte(`{"error":{"message":"No cookie auth credentials found","code":401}}`))
+		}
+	}))
+	defer up.Close()
+	resetQuotaCache(t, &hits, up.URL)
+
+	dbPath := t.TempDir() + "/test.db"
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	base := "https://openrouter.ai/api/v1"
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "openrouter", BaseURL: base, Wire: "openai", Preset: "openrouter",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"or-good", "or-empty", "or-nocredits", "or-bad"}, KeyLabels: []string{"Main"}}},
+		},
+	}
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	reg := provider.New(cfg)
+	p := proxy.NewProxy(reg, st, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, "", "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/admin/api/quota", nil)
+	req.SetBasicAuth("x", "secretpw")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("quota fetch: %d %v", resp.StatusCode, err)
+	}
+	var out struct {
+		Quotas []ProviderQuota `json:"quotas"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, b)
+	}
+	if len(out.Quotas) != 1 || out.Quotas[0].Source != "openrouter" {
+		t.Fatalf("quotas: %+v", out.Quotas)
+	}
+	g := out.Quotas[0]
+	if len(g.Accounts) != 4 {
+		t.Fatalf("want 4 accounts, got %d: %s", len(g.Accounts), b)
+	}
+	a := g.Accounts[0]
+	if a.Label != "Main" || a.MonthlyCredits == nil || math.Abs(*a.MonthlyCredits-65.5) > 1e-9 {
+		t.Errorf("account: label=%q credits=%v want Main/65.5 (80.25-14.75)", a.Label, a.MonthlyCredits)
+	}
+	if a.MonthlyTotal != 80.25 {
+		t.Errorf("monthly total %v, want 80.25", a.MonthlyTotal)
+	}
+	// exhausted prepaid account: total < usage clamps to $0, never negative
+	if e := g.Accounts[1]; e.MonthlyCredits == nil || *e.MonthlyCredits != 0 || e.MonthlyTotal != 12.5 || e.Err != "" {
+		t.Errorf("exhausted account = credits=%v total=%v err=%q, want 0/12.5/no-err", e.MonthlyCredits, e.MonthlyTotal, e.Err)
+	}
+	// no credits in the payload → nothing displayed, never a fabricated 0
+	if n := g.Accounts[2]; n.MonthlyCredits != nil || n.MonthlyTotal != 0 || n.Err != "" {
+		t.Errorf("no-credits account = %+v, want nil credits, no error", n)
+	}
+	if g.Accounts[3].Err == "" || !strings.Contains(g.Accounts[3].Err, "401") {
+		t.Errorf("bad-key account err %q, want HTTP 401", g.Accounts[3].Err)
+	}
+	if hits != 4 {
+		t.Errorf("upstream fetches %d, want 4", hits)
 	}
 }

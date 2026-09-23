@@ -122,10 +122,10 @@ const baseRow: ProviderRow = {
 describe("prefix registry", () => {
   it("every registry provider carries a short routing prefix", () => {
     expect(REGISTRY.map((r) => [r.id, r.prefix])).toEqual([
-      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"],
+      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"],
     ]);
     expect(REGISTRY.map((r) => [r.id, r.code])).toEqual([
-      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"],
+      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"],
     ]);
   });
 });
@@ -151,7 +151,7 @@ describe("registry", () => {
   });
 
   it("has the providers the product must support", () => {
-    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "opencode-go", "zai"]);
+    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "opencode-go", "openrouter", "zai"]);
     const zen = REGISTRY.find((r) => r.id === "opencode-go")!;
     expect(zen.entries).toHaveLength(3); // one config provider per wire family
     for (const e of zen.entries) {

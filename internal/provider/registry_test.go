@@ -120,6 +120,15 @@ func TestUpstreamModelPrefix(t *testing.T) {
 	if got := UpstreamModel(p, "ocg/other"); got != "other" {
 		t.Fatalf("prefixed unmapped: got %q", got)
 	}
+	// natural id whose first segment equals the prefix must not be stripped
+	np := &config.Provider{Name: "openrouter", Prefix: "openrouter",
+		Models: []string{"openrouter/auto", "deepseek/deepseek-chat"}}
+	if got := UpstreamModel(np, "openrouter/auto"); got != "openrouter/auto" {
+		t.Fatalf("natural id under colliding prefix: got %q", got)
+	}
+	if got := UpstreamModel(np, "openrouter/deepseek/deepseek-chat"); got != "deepseek/deepseek-chat" {
+		t.Fatalf("genuinely prefixed id: got %q", got)
+	}
 }
 
 func TestSplitPrefix(t *testing.T) {
@@ -135,5 +144,58 @@ func TestSplitPrefix(t *testing.T) {
 	}
 	if _, bare, ok := SplitPrefix(cfg, "ocg/"); ok || bare != "ocg/" {
 		t.Fatal("trailing slash must not match")
+	}
+}
+
+// collidingConfig: a provider whose prefix equals a vendor namespace of its
+// own curated natural ids (the openrouter/auto trap).
+func collidingConfig() *config.Config {
+	return &config.Config{
+		Providers: []*config.Provider{
+			{Name: "openrouter", Prefix: "openrouter", Wire: "openai", BaseURL: "https://openrouter.ai/api/v1",
+				Models: []string{"openrouter/auto", "deepseek/deepseek-chat"},
+				Auth:   config.AuthConf{Type: "static", Keys: []string{"k1"}}},
+		},
+		Keys: []*config.Key{{Key: "ar-x", Name: "pi", Allow: []string{"*"}}},
+	}
+}
+
+// End to end: a natural id whose first segment equals the configured prefix
+// must resolve (not 404) and reach upstream whole; genuinely prefixed ids
+// strip as usual; uncurated prefixed ids still 404.
+func TestCollidingPrefixResolve(t *testing.T) {
+	reg := New(collidingConfig())
+
+	// natural id, bare request: SplitPrefix sees prefix="openrouter" and
+	// strips to "auto" — Resolve must still match the full curated id
+	tgts := reg.Resolve("openrouter/auto", []string{"*"})
+	if len(tgts) != 1 || names(tgts)[0] != "openrouter" {
+		t.Fatalf("natural openrouter/auto: got %v, want [openrouter]", names(tgts))
+	}
+	if got := UpstreamModel(tgts[0].Provider, "openrouter/auto"); got != "openrouter/auto" {
+		t.Fatalf("natural id upstream: got %q, want unstripped", got)
+	}
+
+	// genuinely prefixed: bare id curated → resolves and strips
+	tgts = reg.Resolve("openrouter/deepseek/deepseek-chat", []string{"*"})
+	if len(tgts) != 1 {
+		t.Fatalf("prefixed deepseek: got %v", names(tgts))
+	}
+	if got := UpstreamModel(tgts[0].Provider, "openrouter/deepseek/deepseek-chat"); got != "deepseek/deepseek-chat" {
+		t.Fatalf("prefixed upstream: got %q", got)
+	}
+
+	// uncurated prefixed id → no target (404)
+	if tgts := reg.Resolve("openrouter/z-ai/glm-5.3", []string{"*"}); len(tgts) != 0 {
+		t.Fatalf("uncurated prefixed: got %v, want none", names(tgts))
+	}
+
+	// advertisement: both curated ids, prefixed (no doubled prefix segment)
+	ids := map[string]bool{}
+	for _, id := range reg.Models() {
+		ids[id] = true
+	}
+	if !ids["openrouter/openrouter/auto"] || !ids["openrouter/deepseek/deepseek-chat"] {
+		t.Fatalf("advertised ids missing: %v", ids)
 	}
 }

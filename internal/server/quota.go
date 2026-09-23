@@ -71,6 +71,8 @@ func quotaSource(baseURL string) string {
 		if strings.Contains(strings.ToLower(u.Path), "/go/") {
 			return "opencode" // zen/go/v1 = Go subscription; plain zen/v1 (credits) has no usage API
 		}
+	case "openrouter.ai":
+		return "openrouter"
 	}
 	return ""
 }
@@ -82,6 +84,7 @@ var billingPaths = map[string]string{
 	"deepseek":    "/user/balance",
 	"zai":         "/api/monitor/usage/quota/limit",
 	"opencode":    "/zen/go/v1/usage",
+	"openrouter":  "/api/v1/credits",
 }
 
 // quotaClient fetches usage windows; var so tests can redirect upstream.
@@ -374,6 +377,51 @@ func fetchOpencodeQuota(ctx context.Context, quotaURL, key string) (*QuotaAccoun
 	}, nil
 }
 
+// fetchOpenRouterQuota reads the prepaid credit balance for one OpenRouter
+// API key via GET /api/v1/credits (documented shape; unauthenticated calls
+// 401, so the parser is exercised only with a real key). total_credits is
+// the lifetime amount purchased; remaining = total_credits - total_usage.
+// No total_credits (or a zero total) means nothing usable to display — the
+// account is returned empty rather than fabricated as 0.
+type orCredits struct {
+	Data struct {
+		TotalCredits float64 `json:"total_credits"`
+		TotalUsage   float64 `json:"total_usage"`
+	} `json:"data"`
+}
+
+func fetchOpenRouterQuota(ctx context.Context, quotaURL, key string) (*QuotaAccount, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, quotaURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := quotaClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var body orCredits
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	acct := &QuotaAccount{}
+	if body.Data.TotalCredits > 0 {
+		remain := body.Data.TotalCredits - body.Data.TotalUsage
+		if remain < 0 {
+			remain = 0 // exhausted prepaid account: $0 left, not a negative claim
+		}
+		acct.MonthlyCredits = &remain
+		acct.MonthlyTotal = body.Data.TotalCredits
+	}
+	return acct, nil
+}
+
 const quotaTTL = 60 * time.Second
 
 var (
@@ -482,6 +530,8 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 				acct, err = fetchZaiQuota(context.Background(), origin, key)
 			case "opencode":
 				acct, err = fetchOpencodeQuota(context.Background(), origin, key)
+			case "openrouter":
+				acct, err = fetchOpenRouterQuota(context.Background(), origin, key)
 			default:
 				acct, err = fetchCommandCodeQuota(context.Background(), origin, key)
 			}

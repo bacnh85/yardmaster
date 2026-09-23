@@ -134,9 +134,13 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 	if !matched {
 		if prefixed {
 			// prefixed requests must hit a curated model — an empty Models
-			// list (wildcard) inside the group would silently wrong-wire it
+			// list (wildcard) inside the group would silently wrong-wire it.
+			// A provider whose prefix equals a vendor namespace of its own
+			// natural ids (prefix "openrouter", curated "openrouter/auto")
+			// also serves the FULL id bare: SplitPrefix already stripped the
+			// segment, so match it back against the full model id too.
 			for _, p := range r.cfg.Providers {
-				if p.Prefix == prefix && (contains(p.Models, bare) || containsMap(p.ModelMap, bare)) {
+				if p.Prefix == prefix && (contains(p.Models, bare) || containsMap(p.ModelMap, bare) || contains(p.Models, model) || containsMap(p.ModelMap, model)) {
 					provs = append(provs, p)
 				}
 			}
@@ -151,6 +155,14 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 	name := model // id this provider's Models list is checked against
 	if prefixed {
 		name = bare
+		// full-id-curated natural id (prefix == vendor namespace): the curation
+		// match that selected the provider above used the full id
+		for _, p := range provs {
+			if contains(p.Models, model) || containsMap(p.ModelMap, model) {
+				name = model
+				break
+			}
+		}
 	}
 	var targets []*Target
 	for _, p := range provs {
@@ -212,7 +224,12 @@ func containsMap(m map[string]string, s string) bool {
 func UpstreamModel(p *config.Provider, model string) string {
 	if p.Prefix != "" {
 		if bare, ok := strings.CutPrefix(model, p.Prefix+"/"); ok {
-			model = bare
+			// a bare natural id whose full form is itself curated (e.g.
+			// "openrouter/auto" under prefix "openrouter") must go upstream
+			// whole — strip only when the full id isn't itself a served model
+			if !contains(p.Models, model) && !containsMap(p.ModelMap, model) {
+				model = bare
+			}
 		}
 	}
 	if p.ModelMap != nil {

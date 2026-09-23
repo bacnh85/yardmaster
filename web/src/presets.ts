@@ -66,6 +66,13 @@ export const REGISTRY: RegistryProvider[] = [
       { name: "cmdcode-claude", wire: "anthropic", base_url: "https://api.commandcode.ai/provider/v1", family: "anthropic", familyLabel: "Claude (Pro/Max)" },
     ],
   },
+  {
+    id: "openrouter", title: "OpenRouter (OR)", code: "OR", prefix: "or",
+    desc: "457 models across 60+ vendors on one OpenAI-compatible endpoint — live pricing, prepaid credits, :free tier",
+    entries: [
+      { name: "openrouter", wire: "openai", base_url: "https://openrouter.ai/api/v1", family: "chat", familyLabel: "All vendors · chat completions · :free tier" },
+    ],
+  },
 ];
 
 // Command Code plan tiers, by live catalog id (api.commandcode.ai/provider/v1/models,

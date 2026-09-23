@@ -14,7 +14,7 @@ export const monthlyWindow = (a: QuotaAccount): QuotaWindow | undefined =>
     ? { used: Math.max(0, a.monthly_total - a.monthly_credits), cap: a.monthly_total }
     : undefined;
 
-const SOURCE_LABEL: Record<string, string> = { commandcode: "Command Code", deepseek: "DeepSeek", zai: "Z.AI GLM Coding Plan", opencode: "OpenCode Go" };
+const SOURCE_LABEL: Record<string, string> = { commandcode: "Command Code", deepseek: "DeepSeek", zai: "Z.AI GLM Coding Plan", opencode: "OpenCode Go", openrouter: "OpenRouter" };
 
 /** Client mirror of the server matcher (internal/server/quota.go quotaSource).
  *  host (not hostname) keeps the port in play, matching Go's url.Host compare. */
@@ -23,7 +23,8 @@ export const isQuotaProvider = (base_url: string) => {
     const h = new URL(base_url).host.toLowerCase();
     const p = new URL(base_url).pathname.toLowerCase();
     return h === "api.commandcode.ai" || h === "api.deepseek.com" || h === "api.z.ai" || h === "zcode.z.ai"
-      || (h === "opencode.ai" && p.includes("/go/")); // zen/go/v1 = Go subscription; plain zen/v1 has no usage API
+      || (h === "opencode.ai" && p.includes("/go/")) // zen/go/v1 = Go subscription; plain zen/v1 has no usage API
+      || h === "openrouter.ai";
   } catch { return false; }
 };
 
