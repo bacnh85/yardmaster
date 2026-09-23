@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -135,8 +136,8 @@ func TestAllCooledReturns429WithRetryAfter(t *testing.T) {
 	if resp2.StatusCode != 429 {
 		t.Fatalf("cooled status: %d, want 429", resp2.StatusCode)
 	}
-	if ra := resp2.Header.Get("Retry-After"); ra == "" {
-		t.Fatal("missing Retry-After on all-cooled response")
+	if ra, err := strconv.Atoi(resp2.Header.Get("Retry-After")); err != nil || ra < 25 || ra > 30 {
+		t.Fatalf("Retry-After = %q, want ~30 (remaining cooldown seconds)", resp2.Header.Get("Retry-After"))
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("cooled retry hit upstream %d times, want 1", calls.Load())

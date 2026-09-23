@@ -269,6 +269,23 @@ func (p *OAuthPool) Cooling(providerName, acctName string) bool {
 	return time.Now().Before(a.coolUntil)
 }
 
+// Until returns when the account's cooldown expires (zero time if not cooling).
+func (p *OAuthPool) Until(providerName, acctName string) time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	a := p.get(providerName, acctName)
+	if a == nil {
+		return time.Time{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !time.Now().Before(a.coolUntil) {
+		return time.Time{}
+	}
+	return a.coolUntil
+}
+
 // State is the admin-API view of one account (never includes tokens).
 type State struct {
 	Name      string `json:"name"`

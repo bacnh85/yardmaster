@@ -229,6 +229,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			// quota-cooled oauth accounts are skipped, not burned as a failover attempt
 			if p.Pool != nil && p.Pool.Cooling(tgt.Provider.Name, tgt.AcctName) {
 				lastErr = fmt.Sprintf("%s: account %s cooling down", tgt.Provider.Name, tgt.AcctName)
+				if u := p.Pool.Until(tgt.Provider.Name, tgt.AcctName); u.After(cooledUntil) {
+					cooledUntil = u
+				}
 				continue
 			}
 		} else if p.Cd != nil && p.Cd.Cooling(tgt.Provider.Name, limKey) {
@@ -1038,9 +1041,6 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 			if writeEvent("", chunk) != nil {
 				return usage, sinceT(r, *firstTouch)
 			}
-		}
-		if err := sc.Err(); err != nil {
-			log.Printf("stream translate: upstream read error: %v", err)
 		}
 		if err := sc.Err(); err != nil {
 			log.Printf("stream translate: upstream read error: %v", err)

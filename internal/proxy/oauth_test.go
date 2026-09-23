@@ -180,8 +180,12 @@ func TestOAuthCooledAccountSkipped(t *testing.T) {
 	if h.upCalls.Load() != 0 {
 		t.Fatal("cooled account must not be dispatched")
 	}
-	if resp.StatusCode != 502 {
-		t.Fatalf("want 502 with no remaining targets, got %d", resp.StatusCode)
+	// all targets cooling → 429 + Retry-After (not a 502 that invites retries)
+	if resp.StatusCode != 429 {
+		t.Fatalf("want 429 when all targets cooling, got %d", resp.StatusCode)
+	}
+	if ra := resp.Header.Get("Retry-After"); ra == "" || ra == "0" {
+		t.Fatalf("Retry-After = %q, want remaining cooldown seconds", ra)
 	}
 }
 
