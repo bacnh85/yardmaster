@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -204,6 +205,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 	lastErr := ""
 	var lastStatus int
 	var lastErrBody []byte
+	var cooledUntil time.Time // latest cooldown expiry among skipped targets
 
 	for attempt, tgt := range targets {
 		if attempt > 0 {
@@ -232,6 +234,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 		} else if p.Cd != nil && p.Cd.Cooling(tgt.Provider.Name, limKey) {
 			// rate-limited / breaker-tripped static keys are skipped too
 			lastErr = fmt.Sprintf("%s: key cooling down", tgt.Provider.Name)
+			if u := p.Cd.Until(tgt.Provider.Name, limKey); u.After(cooledUntil) {
+				cooledUntil = u
+			}
 			continue
 		}
 		if lim := p.Reg.Limiter(tgt.Provider, limKey); lim != nil {
@@ -323,6 +328,19 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(lastStatus)
 				w.Write(out)
+				return
+			}
+			if !cooledUntil.IsZero() {
+				// every target was skipped due to cooldown: the router itself is
+				// the rate limiter — answer 429 + Retry-After so clients back off
+				// instead of hammering (502 invites immediate retries).
+				retry := int(time.Until(cooledUntil).Seconds()) + 1
+				if retry < 1 {
+					retry = 1
+				}
+				rec.Status = 429
+				rec.Err = lastErr
+				p.write429(w, clientWire, retry, "all targets cooling down: "+lastErr)
 				return
 			}
 			rec.Status = 502
@@ -1168,6 +1186,22 @@ func (p *Proxy) writeError(w http.ResponseWriter, wire string, status int, msg s
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	w.Write(b)
+}
+
+// write429 emits a rate-limit error with Retry-After, anthropic/openai dialect.
+func (p *Proxy) write429(w http.ResponseWriter, wire string, retryAfterS int, msg string) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterS))
+	var b []byte
+	if wire == WireAnthropic {
+		b, _ = json.Marshal(map[string]any{"type": "error",
+			"error": map[string]any{"type": "rate_limit_error", "message": msg}})
+	} else {
+		b, _ = json.Marshal(map[string]any{"error": map[string]any{
+			"message": msg, "type": "rate_limit_error", "code": 429}})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(429)
 	w.Write(b)
 }
 

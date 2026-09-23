@@ -79,6 +79,17 @@ func (c *Cooldowns) Cooling(provider, key string) bool {
 	return ok && c.now().Before(e.until)
 }
 
+// Until returns when the cooldown expires (zero time if not cooling).
+func (c *Cooldowns) Until(provider, key string) time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[provider+"\x00"+key]
+	if !ok || !c.now().Before(e.until) {
+		return time.Time{}
+	}
+	return e.until
+}
+
 func (c *Cooldowns) Reset(provider, key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

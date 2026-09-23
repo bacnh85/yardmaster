@@ -94,7 +94,51 @@ func TestCooldown5xxBreaker(t *testing.T) {
 	if calls.Load() != 3 {
 		t.Fatalf("breaker did not skip: %d upstream calls", calls.Load())
 	}
-	if resp.StatusCode != 502 {
-		t.Fatalf("all-cooled status: %d", resp.StatusCode)
+	if resp.StatusCode != 429 {
+		t.Fatalf("all-cooled status: %d, want 429", resp.StatusCode)
+	}
+}
+
+// when every target is cooling, the router must answer 429 + Retry-After (a
+// self-inflicted rate limit), not a 502 that invites immediate client retries.
+func TestAllCooledReturns429WithRetryAfter(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(429)
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "a", BaseURL: up.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k1"}}},
+	}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
+	defer ts.Close()
+
+	// first request: upstream 429s, key cools for 30s
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 429 {
+		t.Fatalf("first request status: %d", resp.StatusCode)
+	}
+	// second request during cooldown: no upstream call, 429 + Retry-After
+	resp2, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 429 {
+		t.Fatalf("cooled status: %d, want 429", resp2.StatusCode)
+	}
+	if ra := resp2.Header.Get("Retry-After"); ra == "" {
+		t.Fatal("missing Retry-After on all-cooled response")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("cooled retry hit upstream %d times, want 1", calls.Load())
 	}
 }
