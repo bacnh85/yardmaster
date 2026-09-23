@@ -694,6 +694,65 @@ func TestUsageRecordedThroughStore(t *testing.T) {
 	}
 }
 
+// Regression: the live view computes elapsed as Date.now() - start, so
+// ActiveEntry.start must be a JSON number of unix millis. It was time.Time
+// (RFC3339 string) once and every elapsed cell rendered "NaNs". Pin the wire
+// contract: hold a request in flight, inspect the live payload.
+func TestActiveStartIsEpochMillis(t *testing.T) {
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK) // headers first: Active entry appears once do() returns
+		w.(http.Flusher).Flush()     // ...and actually pushed out, not buffered
+		<-release                    // hold the request in flight so Active keeps the entry
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "a", BaseURL: up.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k"}}}}}
+	p := NewProxy(provider.New(cfg), nil, func(string) config.Cost { return config.Cost{Input: 1, Output: 2} })
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
+	defer ts.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- func() error {
+			resp, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m","stream":true}`))
+			if err != nil {
+				return err
+			}
+			return resp.Body.Close()
+		}()
+	}()
+
+	var e *ActiveEntry
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		if list := p.Active.List(); len(list) == 1 {
+			e = list[0]
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("active entry never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if d := time.Now().UnixMilli() - e.Start; d < 0 || d > 5000 {
+		t.Errorf("Start = %d, want unix millis within 5s of now", e.Start)
+	}
+	// the actual wire shape: "start" must decode as a number, not a string
+	b, _ := json.Marshal(e)
+	var wire struct {
+		Start json.Number `json:"start"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Errorf("start must be a JSON number of epoch millis: %v (payload %s)", err, b)
+	}
+	close(release)
+	<-done
+}
+
 // Z.ai reports cache usage only in the terminal message_delta (message_start
 // is zeros) — stats capture must pick it up there.
 func TestCaptureAnthropicUsage_ZaiDelta(t *testing.T) {

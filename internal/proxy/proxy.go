@@ -78,7 +78,7 @@ type ActiveEntry struct {
 	Provider string    `json:"provider"`
 	Key      string    `json:"key"`
 	Stream   bool      `json:"stream"`
-	Start    time.Time `json:"start"`
+	Start    int64     `json:"start"` // unix millis
 	TTFTms   float64   `json:"ttft_ms"`
 }
 
@@ -298,7 +298,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 		rec.Attempts = attempt + 1
 		p.Active.Set(&ActiveEntry{
 			ID: activeID, Model: model, Provider: tgt.Provider.Name,
-			Key: rec.Key, Stream: stream, Start: start,
+			Key: rec.Key, Stream: stream, Start: start.UnixMilli(),
 		})
 		usage, ttft = p.forward(w, r, clientWire, tgt, resp, req, upModel, stream, activeID)
 		p.Active.Done(activeID)
