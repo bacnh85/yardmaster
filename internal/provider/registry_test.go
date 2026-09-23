@@ -199,3 +199,24 @@ func TestCollidingPrefixResolve(t *testing.T) {
 		t.Fatalf("advertised ids missing: %v", ids)
 	}
 }
+
+// The per-provider name match: a DISABLED full-id-curated provider sharing the
+// prefix must not flip the curation name for an enabled bare-curated sibling.
+func TestCollidingPrefixDisabledSibling(t *testing.T) {
+	cfg := &config.Config{
+		Providers: []*config.Provider{
+			{Name: "or-natural", Prefix: "openrouter", Wire: "openai", BaseURL: "https://x",
+				Models: []string{"openrouter/auto"}, Disabled: true,
+				Auth: config.AuthConf{Type: "static", Keys: []string{"k0"}}},
+			{Name: "or-main", Prefix: "openrouter", Wire: "openai", BaseURL: "https://y",
+				Models: []string{"deepseek/deepseek-chat"},
+				Auth:   config.AuthConf{Type: "static", Keys: []string{"k1"}}},
+		},
+		Keys: []*config.Key{{Key: "ar-x", Name: "pi", Allow: []string{"*"}}},
+	}
+	reg := New(cfg)
+	tgts := reg.Resolve("openrouter/deepseek/deepseek-chat", []string{"*"})
+	if len(tgts) != 1 || names(tgts)[0] != "or-main" {
+		t.Fatalf("bare-curated sibling behind disabled full-id sibling: got %v", names(tgts))
+	}
+}

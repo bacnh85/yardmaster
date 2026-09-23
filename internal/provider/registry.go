@@ -155,21 +155,21 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 	name := model // id this provider's Models list is checked against
 	if prefixed {
 		name = bare
-		// full-id-curated natural id (prefix == vendor namespace): the curation
-		// match that selected the provider above used the full id
-		for _, p := range provs {
-			if contains(p.Models, model) || containsMap(p.ModelMap, model) {
-				name = model
-				break
-			}
-		}
 	}
 	var targets []*Target
 	for _, p := range provs {
 		if p.Disabled {
 			continue
 		}
-		if len(p.Models) > 0 && !contains(p.Models, name) && !containsMap(p.ModelMap, name) {
+		// full-id-curated natural id (prefix == vendor namespace): this
+		// provider matched on the full model id, not the stripped bare —
+		// decided per provider so a disabled full-id sibling can't flip the
+		// match name for everyone sharing the prefix
+		pname := name
+		if prefixed && (contains(p.Models, model) || containsMap(p.ModelMap, model)) {
+			pname = model
+		}
+		if len(p.Models) > 0 && !contains(p.Models, pname) && !containsMap(p.ModelMap, pname) {
 			continue
 		}
 		switch p.Auth.Type {
