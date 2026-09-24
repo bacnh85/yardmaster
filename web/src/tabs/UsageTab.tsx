@@ -135,7 +135,8 @@ export function UsageTab() {
             <div className="card">
               <h3>Tokens by model</h3>
               <TimeChart data={pivot.rows} height={220} smooth
-                series={pivot.models.map((m) => ({ key: m, label: m }))} />
+                // rows store values under PIVOT_KEY+model (the collision-safe key) — series must look the same up; bare name stays the label
+                series={pivot.models.map((m) => ({ key: PIVOT_KEY + m, label: m }))} />
             </div>
           )}
           <div className="grid half">
