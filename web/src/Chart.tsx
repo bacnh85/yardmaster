@@ -33,17 +33,28 @@ function tooltipPlugin() {
       : String(Math.round(v));
     const money = (v: number) => "$" + (Math.abs(v) >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(2) : v.toPrecision(2));
     const t = (u.data[0][i] ?? 0) * 1000;
-    let rows = "";
+    // DOM-built, never innerHTML: series labels are arbitrary client-supplied
+    // model names from proxy request payloads — hostile labels must stay inert
+    tip.replaceChildren();
+    const head = tip.appendChild(document.createElement("div"));
+    head.className = "u-tip-head";
+    head.textContent = fmtTs(t);
     for (let s = 1; s < u.series.length; s++) {
       const v = u.data[s]?.[i];
       const ser = u.series[s];
       if (v == null) continue;
-      const dollar = (ser.scale ?? "y") === "2";
-      rows += `<div class="u-tip-row"><span class="u-tip-dot" style="background:${ser.stroke}"></span>` +
-        `<span class="u-tip-label">${typeof ser.label === "string" ? ser.label : ""}</span>` +
-        `<span class="u-tip-val">${dollar ? money(v) : compact(v)}</span></div>`;
+      const row = tip.appendChild(document.createElement("div"));
+      row.className = "u-tip-row";
+      const dot = row.appendChild(document.createElement("span"));
+      dot.className = "u-tip-dot";
+      dot.style.background = typeof ser.stroke === "string" ? ser.stroke : "";
+      const label = row.appendChild(document.createElement("span"));
+      label.className = "u-tip-label";
+      label.textContent = typeof ser.label === "string" ? ser.label : "";
+      const val = row.appendChild(document.createElement("span"));
+      val.className = "u-tip-val";
+      val.textContent = (ser.scale ?? "y") === "2" ? money(v) : compact(v);
     }
-    tip.innerHTML = `<div class="u-tip-head">${fmtTs(t)}</div>${rows}`;
     tip.style.display = "";
     const left = u.cursor.left ?? 0, top = u.cursor.top ?? 0;
     const w = tip.offsetWidth, h = tip.offsetHeight;

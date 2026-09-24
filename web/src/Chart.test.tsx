@@ -97,6 +97,28 @@ describe("TimeChart lifecycle", () => {
     expect(filter(none, 1, true)).toEqual([]); // no hover → no markers
   });
 
+  it("tooltip renders hostile series labels as inert text (no innerHTML sink)", () => {
+    mount(<TimeChart data={pts(4)} series={[{ key: "requests", label: '<img src=x onerror=window.__xss=1>' }]} />);
+    const plugin = ((plots[0].opts as uPlot.Options).plugins as uPlot.Plugin[])[0];
+    const setCursor = plugin.hooks.setCursor as unknown as ((self: uPlot) => void)[];
+    const over = document.createElement("div");
+    const fake = {
+      cursor: { idx: 2, left: 10, top: 10, idxs: [0, 2] },
+      data: [[1700000000, 1700003600, 1700007200, 1700010800], [5, 6, 7, 8]],
+      series: [ {}, { stroke: "#fff", label: '<img src=x onerror=window.__xss=1>', scale: "y" } ],
+      over,
+    } as unknown as uPlot;
+    setCursor[0](fake); // attach-on-first-use appends the tip to fake.over
+    const shown = over.querySelector(".u-tip") as HTMLElement;
+    expect(shown.style.display).toBe("");
+    expect((window as unknown as { __xss?: unknown }).__xss).toBeUndefined(); // never executed
+    expect(shown.querySelector("img")).toBeNull(); // no parsed HTML
+    expect(shown.querySelector(".u-tip-label")?.textContent).toBe('<img src=x onerror=window.__xss=1>'); // inert text
+    // hide on idx null
+    setCursor[0]({ ...fake, cursor: { ...fake.cursor, idx: null } } as unknown as uPlot);
+    expect(shown.style.display).toBe("none");
+  });
+
   it("builds once and setData's in place when only data changes (poll tick)", () => {
     mount(<TimeChart data={pts(24)} series={SERIES} />);
     rerender(<TimeChart data={pts(24, 2_000_000_000_000)} series={SERIES} />);

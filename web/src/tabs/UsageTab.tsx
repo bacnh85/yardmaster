@@ -38,7 +38,12 @@ export const busiestDay = (cells: HeatCell[]) =>
   cells.reduce<HeatCell | null>((best, c) => (!best || c.tokens > best.tokens ? c : best), null);
 
 /** Pivot (bucket, model) points into per-bucket rows for TimeChart: top N
- * models by total tokens, everything else collapsed into "other". */
+ *  models by total tokens, everything else collapsed into "other". Model names
+ *  are arbitrary client-supplied strings — they key under a reserved prefix so
+ *  a model literally named "ts" can't clobber the row's timestamp (and "other"
+ *  merges into the aggregate bucket); the prefix is stripped in the returned
+ *  models list and never appears in series keys' meaning. */
+export const PIVOT_KEY = "\u0000m:"; // NUL-prefixed: untypeable by clients
 export function pivotModels(points: ModelSeriesPoint[], topN = 5) {
   const totals = new Map<string, number>();
   for (const p of points) totals.set(p.model, (totals.get(p.model) ?? 0) + p.tok_in + p.tok_out);
@@ -48,11 +53,11 @@ export function pivotModels(points: ModelSeriesPoint[], topN = 5) {
   for (const p of points) {
     let row = byTs.get(p.ts);
     if (!row) byTs.set(p.ts, (row = { ts: p.ts }));
-    const name = topSet.has(p.model) ? p.model : "other";
-    row[name] = (row[name] ?? 0) + p.tok_in + p.tok_out;
+    const key = PIVOT_KEY + (topSet.has(p.model) ? p.model : "other");
+    row[key] = (row[key] ?? 0) + p.tok_in + p.tok_out;
   }
   const rows = [...byTs.entries()].sort((a, b) => a[0] - b[0]).map(([, row]) => row as { ts: number; [k: string]: number });
-  const models = rows.some((r) => r.other > 0) ? [...top, "other"] : top;
+  const models = rows.some((r) => r[PIVOT_KEY + "other"] > 0) ? [...top, "other"] : top;
   return { models, rows };
 }
 
