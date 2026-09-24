@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { get, fmtN, fmtUSD, BreakdownRow, Summary } from "../api";
 import { useApi, usePoll, useSorted } from "../hooks";
 import { TimeChart } from "../Chart";
-import { totalInput, Empty, ErrorBanner, PageHead, SkeletonCards, StatCard } from "../components";
+import { cacheHitPct, totalInput, Empty, ErrorBanner, PageHead, SkeletonCards, StatCard } from "../components";
 
 const RANGES: [number, string][] = [[1, "1h"], [24, "24h"], [168, "7d"], [720, "30d"], [2160, "90d"]];
 const bucketFor = (hours: number) => (hours <= 1 ? "minute" : hours > 720 ? "day" : "hour");
@@ -10,6 +10,15 @@ const bucketFor = (hours: number) => (hours <= 1 ? "minute" : hours > 720 ? "day
 /** Cache Rate: share of requests that hit the cache (cache_read > 0). */
 export const cacheRate = (cached: number | undefined, requests: number) =>
   requests > 0 && cached !== undefined ? Math.round((cached / requests) * 100) : null;
+
+/** The three derived cells a CacheBreakTable row shows, as rendered:
+ * rate/cached degrade to null on pre-upgrade servers (cached_requests absent). */
+export const cacheRowCells = (r: BreakdownRow) => ({
+  total: totalInput(r),
+  reuse: cacheHitPct(r),
+  rate: cacheRate(r.cached_requests, r.requests),
+  cached: r.cached_requests,
+});
 
 function useSummary(hours: number): { sum: Summary | null; error: string; loading: boolean; reload: () => void } {
   const { data, error, loading, reload } = useApi<{ summary: Summary }>(`summary?hours=${hours}&bucket=${bucketFor(hours)}`);
@@ -36,9 +45,9 @@ export function CacheTab() {
   }, [hours]);
 
   const rate = sum ? cacheRate(sum.cached_requests, sum.requests) : null;
-  const ratio = sum
-    ? (() => { const total = totalInput(sum); return total > 0 ? Math.round((sum.cache_read / total) * 100) : 0; })()
-    : 0;
+  // cacheHitPct is the single source for the reuse math (cacheHitPct.test.ts
+  // locks its semantics); 0 for no-data matches its locked 0-traffic contract
+  const ratio = sum ? cacheHitPct(sum) : 0;
   const nPer = !!sum && sum.requests > 0;
 
   return (
@@ -94,9 +103,7 @@ export function CacheBreakTable({ rows }: { rows: BreakdownRow[] }) {
         </tr></thead>
         <tbody>
           {sorted.map((r) => {
-            const total = totalInput(r);
-            const reuse = total > 0 ? Math.round((r.cache_read / total) * 100) : 0;
-            const rate = r.requests > 0 ? Math.round(((r.cached_requests ?? 0) / r.requests) * 100) : 0;
+            const { total, reuse, rate, cached } = cacheRowCells(r);
             return (
               <tr key={r.name}>
                 <td>{r.name}</td>
@@ -105,8 +112,8 @@ export function CacheBreakTable({ rows }: { rows: BreakdownRow[] }) {
                 <td className="n">{fmtN(r.cache_read)}</td>
                 <td className="n">{fmtN(r.cache_write ?? 0)}</td>
                 <td className="n">{reuse}%</td>
-                <td className="n">{rate}%</td>
-                <td className="n">{fmtN(r.cached_requests ?? 0)}</td>
+                <td className="n">{rate === null ? "–" : `${rate}%`}</td>
+                <td className="n">{cached === undefined ? "–" : fmtN(cached)}</td>
               </tr>
             );
           })}

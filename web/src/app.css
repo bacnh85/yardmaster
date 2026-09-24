@@ -149,9 +149,13 @@ main > * + * { margin-top: 12px; }
 /* min() guard: never force a column wider than the viewport (mobile overflow);
    200px floor keeps 25px 10-digit values (12,450,332 ≈ 149px) from clipping */
 .grid.stats { grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); }
-/* fixed 5-up: auto-fit leaves the 5th card orphaned on a second row at 1280 */
+/* fixed 5-up: auto-fit leaves the 5th card orphaned on a second row at 1280;
+   ≤900px goes 2-col with the 5th card full-width (2+2+1, no orphan) */
 .grid.stats-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-@media (max-width: 900px) { .grid.stats-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) {
+  .grid.stats-5 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.stats-5 > :last-child { grid-column: 1 / -1; }
+}
 .grid.half { grid-template-columns: 1fr 1fr; }
 @media (max-width: 900px) { .grid.half { grid-template-columns: 1fr; } }
 
@@ -197,7 +201,8 @@ table.quota-t td { white-space: normal; } /* fixed cols are narrower than accoun
 
 /* cache tab: both breakdown tables share one column grid so "By provider"
    and "By model" line up (auto layout sizes columns per-table by content) */
-table.cache-t { table-layout: fixed; }
+table.cache-t { table-layout: fixed; min-width: 720px; } /* min-width: fixed cols must not crush — .table-wrap scrolls instead */
+table.cache-t td:nth-child(1) { overflow: hidden; text-overflow: ellipsis; } /* long model ids clip, never overlap */
 table.cache-t th:nth-child(1), table.cache-t td:nth-child(1) { width: 30%; text-align: left; }
 table.cache-t th:nth-child(2), table.cache-t td:nth-child(2) { width: 8%; }
 table.cache-t th:nth-child(3), table.cache-t td:nth-child(3) { width: 12%; }
