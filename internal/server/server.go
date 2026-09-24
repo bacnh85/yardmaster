@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -327,11 +328,20 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			writeJSON(map[string]any{"series": rows})
 		}
 	case path == "keys" && r.Method == "GET":
+		lastUsed, err := s.Store.KeyLastUsed() // nil store → empty map
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
 		out := make([]map[string]any, 0, len(s.Proxy.Reg.Config().Keys))
 		for _, k := range s.Proxy.Reg.Config().Keys {
 			out = append(out, map[string]any{
 				"name": k.Name, "key_suffix": suffix(k.Key), "allow": k.Allow, "rpm": k.RPM,
 				"usage": k.Usage, // nil = allowed (default ON)
+				"id":    keyID(k.Key),
+				// unix ms, same unit as last_used so the UI renders both with one formatter
+				"created_at": k.CreatedAt,
+				"last_used":  lastUsed[k.Name],
 			})
 		}
 		writeJSON(map[string]any{"keys": out})
@@ -386,7 +396,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			if len(allow) == 0 {
 				allow = []string{"*"}
 			}
-			c.Keys = append(c.Keys, &config.Key{Key: raw, Name: req.Name, Allow: allow, RPM: req.RPM, Usage: req.Usage})
+			c.Keys = append(c.Keys, &config.Key{
+				Key: raw, Name: req.Name, Allow: allow, RPM: req.RPM, Usage: req.Usage,
+				CreatedAt: time.Now().UnixMilli(), // unix ms, same unit as request ts
+			})
 			return nil
 		}) {
 			return
@@ -394,13 +407,15 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		// the raw key is shown exactly once, in this response
 		writeJSON(map[string]any{"ok": true, "key": raw})
 	case strings.HasPrefix(path, "keys/") && r.Method == "PUT":
-		// edit a key: {name?, allow?, rpm?, usage?} — nil pointers keep stored values
+		// edit a key: {name?, allow?, rpm?, usage?, key?} — nil pointers keep
+		// stored values; a non-empty key rotates the secret in place
 		name := strings.TrimPrefix(path, "keys/")
 		var req struct {
 			Name  *string   `json:"name"`
 			Allow *[]string `json:"allow"`
 			RPM   *int      `json:"rpm"`
 			Usage *bool     `json:"usage"`
+			Key   *string   `json:"key"`
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
 			http.Error(w, "bad json", 400)
@@ -431,11 +446,23 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				if req.Usage != nil {
 					k.Usage = req.Usage
 				}
+				if req.Key != nil && *req.Key != "" {
+					k.Key = *req.Key // rotation; empty string keeps the stored secret
+					k.CreatedAt = time.Now().UnixMilli() // the new credential starts its own clock
+				}
 				return nil
 			}
 			return fmt.Errorf("no key named %q", name)
 		}) {
 			return
+		}
+		// history follows the key: without this, renaming blanks "last used"
+		// and splits Usage into two buckets. Best-effort — a DB hiccup must
+		// not fail an otherwise-saved config edit.
+		if req.Name != nil && *req.Name != "" && *req.Name != name {
+			if err := s.Store.RenameKey(name, *req.Name); err != nil {
+				fmt.Printf("keys: re-attribute history %q → %q: %v\n", name, *req.Name, err)
+			}
 		}
 		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "keys/") && r.Method == "DELETE":
@@ -534,6 +561,82 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					if idx < len(x.Auth.KeyLabels) {
 						x.Auth.KeyLabels = append(x.Auth.KeyLabels[:idx], x.Auth.KeyLabels[idx+1:]...)
 					}
+					return nil
+				}
+			}
+			return fmt.Errorf("no provider named %q", name)
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
+	case strings.HasPrefix(path, "providers/") && strings.Contains(path, "/keys/") && r.Method == "PUT":
+		// edit one stored connection: {label?, key?} — nil/empty keeps. Index-
+		// addressed like DELETE (duplicate suffixes must target the right key).
+		rest := strings.TrimPrefix(path, "providers/")
+		slash := strings.Index(rest, "/keys/")
+		name, idxStr := rest[:slash], rest[slash+len("/keys/"):]
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil || idx < 0 {
+			http.Error(w, "key index must be an integer", 400)
+			return
+		}
+		var req struct {
+			Key   *string `json:"key"`
+			Label *string `json:"label"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			for _, x := range c.Providers {
+				if x.Name == name {
+					if idx >= len(x.Auth.Keys) {
+						return fmt.Errorf("key index %d out of range (%d keys on %q)", idx, len(x.Auth.Keys), name)
+					}
+					if req.Key != nil && *req.Key != "" {
+						for i, k := range x.Auth.Keys {
+							if k == *req.Key && i != idx {
+								return fmt.Errorf("key already present")
+							}
+						}
+						x.Auth.Keys[idx] = *req.Key
+					}
+					if req.Label != nil {
+						for len(x.Auth.KeyLabels) < idx+1 {
+							x.Auth.KeyLabels = append(x.Auth.KeyLabels, "")
+						}
+						x.Auth.KeyLabels[idx] = *req.Label
+					}
+					return nil
+				}
+			}
+			return fmt.Errorf("no provider named %q", name)
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
+	case strings.HasPrefix(path, "providers/") && strings.HasSuffix(path, "/subscription") && r.Method == "PUT":
+		// change the plan tier of one provider entry: {plan} — "" clears.
+		// Dedicated endpoint so the dashboard never has to round-trip the full
+		// providerForm (which would risk clobbering advanced fields).
+		name := strings.TrimSuffix(strings.TrimPrefix(path, "providers/"), "/subscription")
+		var req struct {
+			Plan string `json:"plan"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		plan := strings.ToLower(strings.TrimSpace(req.Plan))
+		if !config.ValidSubscription(plan) {
+			http.Error(w, "plan must be empty, goat, pro, max, or free", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			for _, x := range c.Providers {
+				if x.Name == name {
+					x.Subscription = plan
 					return nil
 				}
 			}
@@ -785,6 +888,14 @@ func suffix(k string) string {
 		return "…" + k[len(k)-6:]
 	}
 	return k
+}
+
+// keyID is a stable 32-hex reference handle for an inbound key, shown in the
+// dashboard (never the key itself). Derived, not stored: rename keeps it, key
+// rotation changes it — it identifies the credential instance.
+func keyID(k string) string {
+	h := sha256.Sum256([]byte(k))
+	return hex.EncodeToString(h[:16])
 }
 
 func nonNil(s []string) []string {

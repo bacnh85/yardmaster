@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels, bulkNextModels, effectiveCap, capIds, withCurated, toggleModels, isCuratedModel, canonModelId } from "./tabs/ProvidersTab";
+import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels, bulkNextModels, effectiveCap, capIds, withCurated, toggleModels, isCuratedModel, canonModelId, connSeedPlan, planTargetsToWrite } from "./tabs/ProvidersTab";
 import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan, olPlan, planLadder, normPlan } from "./presets";
 import type { CatalogModel, ProviderRow } from "./api";
+import type { ConnRow } from "./tabs/ProvidersTab";
 
 describe("providerBody", () => {
   it("coerces dispatch spacing to a number (type=number inputs yield strings)", () => {
@@ -322,6 +323,26 @@ describe("registry", () => {
   });
 
   describe("effectiveCap + capIds (subscription guardrail)", () => {
+    it("connSeedPlan/planTargetsToWrite: a label-only save never rewrites tiers (reviewer regression)", () => {
+      const conn = (label: string, suffix: string) => ({ label, suffix });
+      const heterogeneous: ConnRow = {
+        suffix: "…abc123", label: "OL one",
+        targets: [
+          { p: { ...baseRow, name: "ollama", preset: "ollama", connections: [conn("OL one", "…abc123")] }, idx: 0 },
+          { p: { ...baseRow, name: "ollama-claude", preset: "ollama", subscription: "pro", connections: [conn("OL one", "…abc123")] }, idx: 0 },
+        ],
+      };
+      // display shows the group's tier (first non-empty), not targets[0]'s absence
+      expect(connSeedPlan(heterogeneous)).toBe("pro");
+      // label-only save (plan unchanged from seed) → no subscription writes at all
+      expect(planTargetsToWrite(heterogeneous, "pro", "pro")).toEqual([]);
+      // picking "none" in the select is an explicit clear of every tiered target
+      expect(planTargetsToWrite(heterogeneous, "", "pro").map((p) => p.name)).toEqual(["ollama-claude"]);
+      // changing the tier fans out to every target not already on it
+      expect(planTargetsToWrite(heterogeneous, "max", "pro").map((p) => p.name)).toEqual(["ollama", "ollama-claude"]);
+      // a target already on the chosen tier is skipped (no redundant PUT)
+      expect(planTargetsToWrite(heterogeneous, "pro", "").map((p) => p.name)).toEqual(["ollama"]);
+    });
     it("normPlan maps legacy cross-ladder subscriptions onto the preset ladder", () => {
       expect(normPlan("ollama", "goat")).toBe("free"); // legacy goat = tier-0 free
       expect(normPlan("ollama", "free")).toBe("free");

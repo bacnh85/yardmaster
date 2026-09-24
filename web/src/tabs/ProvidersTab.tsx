@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult, QuotaGroup, CooldownRow } from "../api";
 import { useApi, usePoll } from "../hooks";
 import { Confirm, Empty, ErrorBanner, Modal, PageHead, Skeleton, toast } from "../components";
-import { IconPlay, IconX } from "../icons";
+import { IconEdit, IconPlay, IconX } from "../icons";
 import { QuotaTable, isQuotaProvider } from "./QuotaTab";
 import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPlan, planLadder, normPlan, CmdPlan } from "../presets";
 
@@ -588,6 +588,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   const [filter, setFilter] = useState("");
   const [serveWildcard, setServeWildcard] = useState<null | { m: Pick<CatalogModel, "id">; sub: ProviderRow; from?: ProviderRow }>(null);
   const [removing, setRemoving] = useState<ConnRow | null>(null);
+  const [editing, setEditing] = useState<ConnRow | null>(null);
   // manual model add: id the upstream catalog doesn't list (new/private models)
   const [manual, setManual] = useState<null | { id: string; family: string }>(null);
 
@@ -660,6 +661,61 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     }
     if (lastErr) toast(lastErr, "err");
     else toast(`connection ${row.label || row.suffix} removed`);
+    reload();
+  };
+
+  /** Edit one stored connection: label, optional key rotation, plan tier.
+   *  Fans out across the connection's wire entries (same shape as remove). */
+  const editConnection = async (row: ConnRow, d: ConnEdit, initialPlan: string) => {
+    const stored = labelWithCode(r.code, d.label.trim());
+    const nextKey = d.key.trim();
+    // Preflight rotation against EVERY target before the first write: the
+    // server rejects a duplicate key per provider, so without this a key that
+    // collides on one wire entry would rotate the others and split the
+    // connection into two rows (mixed secrets). Compare tails — GET only
+    // exposes "…<last6>" per connection.
+    if (nextKey) {
+      const tail = (s: string) => (s.startsWith("…") ? s.slice(1) : s);
+      for (const { p, idx } of row.targets) {
+        const clash = p.connections.find((c, i) => i !== idx &&
+          (nextKey === c.suffix || (c.suffix.startsWith("…") && nextKey.endsWith(tail(c.suffix)))));
+        if (clash) {
+          toast(`not rotated — this key is already stored on ${p.name} as "${clash.label}"`, "err");
+          return;
+        }
+      }
+    }
+    let lastErr = "";
+    const rotated: string[] = [];
+    const stale: string[] = [];
+    for (const { p, idx } of row.targets) {
+      try {
+        await put(`providers/${encodeURIComponent(p.name)}/keys/${idx}`, {
+          label: stored,
+          ...(nextKey ? { key: nextKey } : {}),
+        });
+        if (nextKey) rotated.push(p.name);
+      } catch (e2) {
+        lastErr = String(e2 instanceof Error ? e2.message : e2);
+        if (nextKey) stale.push(p.name);
+      }
+    }
+    // plan lives on the provider entry, not the key — apply it per target entry
+    if (r.plans) {
+      for (const p of planTargetsToWrite(row, d.plan, initialPlan)) {
+        try {
+          await put(`providers/${encodeURIComponent(p.name)}/subscription`, { plan: d.plan });
+        } catch (e2) { lastErr = String(e2 instanceof Error ? e2.message : e2); }
+      }
+    }
+    if (lastErr) {
+      // name the split explicitly instead of a bare error: rotated entries now
+      // hold the new secret, stale ones still hold the old one
+      const split = rotated.length > 0 && stale.length > 0
+        ? ` — ${rotated.join(", ")} rotated, ${stale.join(", ")} still on the old key`
+        : "";
+      toast(`${lastErr}${split}`, "err");
+    } else toast(`connection "${stored || row.suffix}" saved${nextKey ? " — key rotated" : ""}`);
     reload();
   };
 
@@ -918,6 +974,8 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
               {row.targets.every((t) => t.p.disabled) && <span className="badge warn">disabled</span>}
               <span className="spacer" />
               <button className="btn sm" onClick={() => retest(target)} disabled={target.models.length === 0}>retest</button>
+              <button className="icon-btn" aria-label={`edit connection ${row.label || row.suffix}`} title="edit label, key, plan"
+                onClick={() => setEditing(row)}><IconEdit size={14} /></button>
               <button className="icon-btn" aria-label={`remove connection ${row.label || row.suffix}`} title="remove"
                 onClick={() => setRemoving(row)}><IconX size={14} /></button>
             </div>
@@ -1134,11 +1192,91 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
           onDone={(ok) => { const r = removing; setRemoving(null); if (ok) removeConnection(r); }} />
       )}
 
+      {editing && (
+        <ConnEditModal r={r} row={editing} onSave={(d, initialPlan) => { const row = editing; setEditing(null); editConnection(row, d, initialPlan); }}
+          onClose={() => setEditing(null)} />
+      )}
+
       {serveWildcard && (
         <Confirm title={`Serve ${prefixedId(r.prefix, serveWildcard.m.id)} on ${serveWildcard.sub.name}?`} action="Serve only this model"
           body={<>{serveWildcard.sub.name} currently serves <b>every</b> model on its wire (no curated list). Serving just this one stops the others — prefer "expose all {wireFamily(serveWildcard.sub.wire)}" to keep them.</>}
           onDone={(ok) => { const { m, sub, from } = serveWildcard; setServeWildcard(null); if (ok) doServe(m, sub, serveTargetModels(sub, m.id).models, wireFamily(sub.wire), from); }} />
       )}
     </>
+  );
+}
+
+interface ConnEdit { label: string; key: string; plan: string }
+
+/** The tier a connection edit displays: the group's first non-empty
+ *  subscription (mirrors the planFilter init), "" only when no target carries
+ *  one. Seeding from targets[0] alone would display/clear a later entry's tier
+ *  on a label-only save. */
+export const connSeedPlan = (row: ConnRow): string =>
+  row.targets.map((t) => t.p).find((p) => p.subscription)?.subscription ?? "";
+
+/** Targets whose subscription a save rewrites: none when the user kept the
+ *  seeded selection (a label-only save must never converge heterogeneous tiers
+ *  or clear the ones it didn't display), else every target not already on the
+ *  chosen tier. plan "" = user picked "none" — clears targets that had one. */
+export const planTargetsToWrite = (row: ConnRow, plan: string, initialPlan: string) =>
+  plan === initialPlan ? [] : row.targets.map((t) => t.p).filter((p) => (p.subscription ?? "") !== plan);
+
+/** Edit one stored connection across the preset's wire entries: label,
+ *  optional key rotation (blank = keep), and — on plan presets — the plan
+ *  tier of the target provider entries. */
+function ConnEditModal({ r, row, onSave, onClose }: {
+  r: RegistryProvider; row: ConnRow; onSave: (d: ConnEdit, initialPlan: string) => void; onClose: () => void;
+}) {
+  // seed the group's first non-empty tier, RAW (not normPlan(...)): a legacy
+  // cross-ladder tier (goat on ollama) must round-trip untouched on a
+  // label-only save instead of being silently rewritten to free.
+  const seededPlan = connSeedPlan(row);
+  const [d, setD] = useState<ConnEdit>(() => ({
+    label: row.label.replace(new RegExp(`^${r.code} `), ""), // strip the stored code prefix for editing
+    key: "",
+    plan: seededPlan,
+  }));
+  return (
+    <Modal title={`Edit connection: ${row.label || row.suffix}`} onClose={onClose}>
+      <form onSubmit={(e) => { e.preventDefault(); onSave(d, seededPlan); }} style={{ display: "grid", gap: 12 }}>
+        <div className="form-grid">
+          <div className="field full">
+            <label htmlFor="ce-label">label</label>
+            <input id="ce-label" value={d.label} autoFocus onChange={(e) => setD({ ...d, label: e.target.value })}
+              placeholder="you@example.com" />
+            <div className="field-hint">stored as "{labelWithCode(r.code, d.label.trim()) || `${r.code} your-label`}"</div>
+          </div>
+          <div className="field full">
+            <label htmlFor="ce-key">replace API key <span className="muted">(leave blank to keep current)</span></label>
+            <input id="ce-key" type="password" value={d.key} placeholder="sk-…" autoComplete="off"
+              onChange={(e) => setD({ ...d, key: e.target.value })} />
+            <div className="field-hint">the new key replaces {row.suffix} on {row.targets.length === 1 ? "this entry" : `all ${row.targets.length} wire entries`}</div>
+          </div>
+          {r.plans && (
+            <div className="field">
+              <label htmlFor="ce-plan">subscription plan</label>
+              <select id="ce-plan" value={d.plan} onChange={(e) => setD({ ...d, plan: e.target.value })}>
+                <option value="">none</option>
+                {planLadder(r.id).map((p) => <option key={p} value={p}>{p}</option>)}
+                {/* legacy cross-ladder tier (goat on ollama): keep it visible and
+                    selectable, never silently remapped — picking a ladder tier
+                    replaces it explicitly */}
+                {seededPlan && !planLadder(r.id).includes(seededPlan as CmdPlan) && (
+                  <option value={seededPlan}>{seededPlan} (legacy)</option>
+                )}
+              </select>
+              <div className="field-hint">caps model exposure sweeps for this entry</div>
+            </div>
+          )}
+        </div>
+        <div className="row end">
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" type="submit">
+            {d.key.trim() ? "Save & rotate key" : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }

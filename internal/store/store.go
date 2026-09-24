@@ -79,6 +79,9 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts)`,
 	`CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model)`,
 	`CREATE INDEX IF NOT EXISTS idx_requests_provider ON requests(provider)`,
+	// keys-page last-used + BreakdownBy("key_name") group by an unindexed
+	// column without this (full scan per dashboard load, growing with history)
+	`CREATE INDEX IF NOT EXISTS idx_requests_key_name ON requests(key_name)`,
 	`CREATE TABLE IF NOT EXISTS oauth_tokens (
 		provider TEXT NOT NULL,
 		acct TEXT NOT NULL,
@@ -476,4 +479,37 @@ func (s *Store) CacheTokensByModel(d time.Duration) ([]CacheTokenRow, error) {
 		}
 	}
 	return out, nil
+}
+
+// KeyLastUsed returns key_name -> newest request ts (unix ms) for the inbound
+// keys page ("last used" column). Keys never seen in a request are absent.
+func (s *Store) KeyLastUsed() (map[string]int64, error) {
+	out := map[string]int64{}
+	if s == nil {
+		return out, nil
+	}
+	rows, err := s.db.Query(`SELECT key_name, MAX(ts) FROM requests GROUP BY key_name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var ts int64
+		if rows.Scan(&name, &ts) == nil && name != "" {
+			out[name] = ts
+		}
+	}
+	return out, nil
+}
+
+// RenameKey re-attributes request history after an inbound key rename, so
+// last-used and the Usage breakdown follow the key instead of splitting into
+// two buckets (history is name-addressed, not id-addressed).
+func (s *Store) RenameKey(oldName, newName string) error {
+	if s == nil || oldName == "" || newName == "" || oldName == newName {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE requests SET key_name = ? WHERE key_name = ?`, newName, oldName)
+	return err
 }

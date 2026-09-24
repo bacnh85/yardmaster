@@ -4,6 +4,9 @@ import { useApi } from "../hooks";
 import { Confirm, CopyBtn, Empty, ErrorBanner, Modal, PageHead, toast } from "../components";
 import { IconPlus } from "../icons";
 
+/** unix ms → local date-time; "—" for legacy keys (no timestamp recorded). */
+const fmtWhen = (ms?: number) => (ms ? new Date(ms).toLocaleString() : "—");
+
 const ENDPOINTS: [string, string, string][] = [
   ["POST", "/v1/chat/completions", "OpenAI wire (streaming supported)"],
   ["POST", "/v1/messages", "Anthropic wire (streaming supported)"],
@@ -22,6 +25,7 @@ export function EndpointsTab() {
   const [created, setCreated] = useState<KeyCreated | null>(null);
   const [err, setErr] = useState("");
   const [revoking, setRevoking] = useState<KeyRow | null>(null);
+  const [editing, setEditing] = useState<KeyRow | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -64,6 +68,24 @@ export function EndpointsTab() {
       toast(`usage ${usage ? "allowed" : "revoked"} for "${k.name}"`);
     } catch (e2) {
       toast(String(e2), "err");
+    }
+  };
+
+  const saveEdit = async (k: KeyRow, d: KeyDraft) => {
+    try {
+      const allowList = d.allow.split(",").map((s) => s.trim()).filter(Boolean);
+      await put(`keys/${encodeURIComponent(k.name)}`, {
+        name: d.name.trim(),
+        allow: allowList.length ? allowList : ["*"],
+        rpm: Number(d.rpm) || 0,
+        usage: d.usage,
+        ...(d.key.trim() ? { key: d.key.trim() } : {}), // blank = keep the secret
+      });
+      setEditing(null);
+      reload();
+      toast(`key "${d.name.trim()}" saved${d.key.trim() ? " — secret rotated" : ""}`);
+    } catch (e2) {
+      toast(String(e2 instanceof Error ? e2.message : e2), "err");
     }
   };
 
@@ -114,12 +136,19 @@ export function EndpointsTab() {
           : keys.length === 0 ? <Empty>no keys configured</Empty> : (
             <div className="table-wrap" style={{ marginTop: 12 }}>
               <table>
-                <thead><tr><th>name</th><th>key</th><th>allowed models</th><th className="n">rpm limit</th><th>usage api</th><th /></tr></thead>
+                <thead><tr>
+                  <th>name</th><th>API key ID</th><th>key</th>
+                  <th>created</th><th>last used</th>
+                  <th>allowed models</th><th className="n">rpm</th><th>usage api</th><th />
+                </tr></thead>
                 <tbody>
                   {keys.map((k) => (
                     <tr key={k.name}>
                       <td>{k.name}</td>
+                      <td className="mono" title="stable reference — sha256 of the key (first 16 bytes)">{k.id ?? "—"}</td>
                       <td className="mono">{k.key_suffix}</td>
+                      <td className="faint">{fmtWhen(k.created_at)}</td>
+                      <td className="faint">{fmtWhen(k.last_used)}</td>
                       <td className="mono">{k.allow.join(", ")}</td>
                       <td className="n">{k.rpm > 0 ? k.rpm.toLocaleString() : "–"}</td>
                       <td>
@@ -132,7 +161,10 @@ export function EndpointsTab() {
                           <option value="revoked">revoked</option>
                         </select>
                       </td>
-                      <td><button className="btn sm danger" onClick={() => setRevoking(k)}>revoke</button></td>
+                      <td className="row" style={{ gap: 6 }}>
+                        <button className="btn sm" aria-label={`edit key ${k.name}`} onClick={() => setEditing(k)}>edit</button>
+                        <button className="btn sm danger" aria-label={`revoke key ${k.name}`} onClick={() => setRevoking(k)}>revoke</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -176,6 +208,61 @@ export function EndpointsTab() {
           </form>
         </Modal>
       )}
+
+      {editing && (
+        <KeyEdit k={editing} onSave={(d) => saveEdit(editing, d)} onClose={() => setEditing(null)} />
+      )}
     </>
+  );
+}
+
+interface KeyDraft { name: string; allow: string; rpm: number; usage: boolean; key: string }
+
+/** Edit an existing inbound key: rename, scope, rate limit, usage permission,
+ *  and optional secret rotation (blank key field = keep the stored secret). */
+function KeyEdit({ k, onSave, onClose }: { k: KeyRow; onSave: (d: KeyDraft) => void; onClose: () => void }) {
+  const [d, setD] = useState<KeyDraft>(() => ({
+    name: k.name, allow: k.allow.join(", "), rpm: k.rpm, usage: k.usage !== false, key: "",
+  }));
+  return (
+    <Modal title={`Edit key: ${k.name}`} onClose={onClose}>
+      <form onSubmit={(e) => { e.preventDefault(); if (d.name.trim()) onSave(d); }} style={{ display: "grid", gap: 12 }}>
+        <div className="form-grid">
+          <div className="field full">
+            <label htmlFor="ek-name">name</label>
+            <input id="ek-name" value={d.name} required autoFocus onChange={(e) => setD({ ...d, name: e.target.value })} />
+          </div>
+          <div className="field full">
+            <label htmlFor="ek-key">replace API key <span className="muted">(leave blank to keep current)</span></label>
+            <input id="ek-key" type="password" value={d.key} placeholder="ar-…" autoComplete="off"
+              onChange={(e) => setD({ ...d, key: e.target.value })} />
+            <div className="field-hint">rotating a key changes its API key ID; clients must switch to the new value immediately</div>
+          </div>
+          <div className="field full">
+            <label htmlFor="ek-allow">allowed models</label>
+            <input id="ek-allow" placeholder="glm-* or * (optional)" value={d.allow}
+              onChange={(e) => setD({ ...d, allow: e.target.value })} />
+            <div className="field-hint">comma-separated globs; empty = all models</div>
+          </div>
+          <div className="field">
+            <label htmlFor="ek-rpm">rpm limit</label>
+            <input id="ek-rpm" type="number" min={0} value={d.rpm}
+              onChange={(e) => setD({ ...d, rpm: Number(e.target.value) || 0 })} />
+            <div className="field-hint">0 = unlimited</div>
+          </div>
+          <div className="field">
+            <label>usage api</label>
+            <label className="checkbox"><input type="checkbox" checked={d.usage}
+              onChange={(e) => setD({ ...d, usage: e.target.checked })} /> allow GET /v1/usage</label>
+          </div>
+        </div>
+        <div className="row end">
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" type="submit" disabled={!d.name.trim()}>
+            {d.key.trim() ? "Save & rotate key" : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }

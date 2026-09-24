@@ -689,6 +689,7 @@ func TestProviderSubscriptionField(t *testing.T) {
 	if loaded, _ = config.Load(cfgPath); loaded.Providers[1].Subscription != "max" {
 		t.Fatalf("created provider subscription lost: %+v", loaded.Providers[1])
 	}
+
 	// "free" is a valid tier (Ollama's ladder), stored and exposed like the rest
 	code, body = admin("POST", "providers", strings.NewReader(`{"name":"ol","wire":"openai","base_url":"https://ollama.com/v1","models":["m"],"subscription":"free"}`))
 	if code != 200 {

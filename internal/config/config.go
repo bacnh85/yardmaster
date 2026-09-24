@@ -92,6 +92,9 @@ type Key struct {
 	Allow []string `yaml:"allow"`           // route/model patterns; ["*"] = all
 	RPM   int      `yaml:"rpm"`             // inbound requests-per-minute limit; 0 = unlimited
 	Usage *bool    `yaml:"usage,omitempty"` // nil = may read GET /v1/usage (default ON); false = revoked
+	// CreatedAt is when the key was issued (unix ms, same unit as the store's
+	// request ts so one formatter renders both). 0 on legacy hand-written keys.
+	CreatedAt int64 `yaml:"created_at,omitempty"`
 }
 
 // UsageAllowed reports whether the key may read the usage endpoint.

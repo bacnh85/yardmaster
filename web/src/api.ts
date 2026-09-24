@@ -44,7 +44,12 @@ export interface BreakdownRow {
   cache_read: number; cache_write?: number; cached_requests?: number; cost: number; ttft_p50_ms: number | null;
 }
 export interface ModelSeriesPoint { ts: number; model: string; tok_in: number; tok_out: number; cost: number }
-export interface KeyRow { name: string; key_suffix: string; allow: string[]; rpm: number; usage?: boolean | null }
+export interface KeyRow {
+  name: string; key_suffix: string; allow: string[]; rpm: number; usage?: boolean | null;
+  id?: string; // 32-hex derived reference handle (absent from older servers)
+  created_at?: number; // unix ms; 0/undefined = legacy key, unknown
+  last_used?: number; // unix ms; 0/undefined = never used
+}
 export interface ProviderRow {
   name: string; wire: string; base_url: string; models: string[];
   prefix?: string; // absent from older servers → prefill degrades to ""
