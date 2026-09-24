@@ -25,7 +25,8 @@ function tooltipPlugin() {
   function show(u: uPlot) {
     const i = u.cursor.idx;
     if (i == null) { hide(); return; }
-    const fmtTs = (t: number) => new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    // t is already epoch ms (seconds × 1000 below) — new Date(t) here, NOT ×1000 again
+    const fmtTs = (ms: number) => new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     const compact = (v: number) =>
       Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(1) + "M"
       : Math.abs(v) >= 1e3 ? (v / 1e3).toFixed(Math.abs(v) >= 1e4 ? 0 : 1) + "k"
@@ -121,7 +122,14 @@ export function TimeChart({
             fill: i === 0 ? fill : undefined,
             spanGaps: true,
             scale: s.axis === 2 ? "2" : "y",
-            points: { show: data.length < 30 },
+            // hover markers on EVERY series at the cursor (uPlot cursor dots
+            // inherit points.show styling, so always-on points with a density
+            // filter that hides everything except the hovered index)
+            points: {
+              show: true,
+              filter: (u: uPlot, seriesIdx: number, _show: boolean, _gaps?: number[][] | null) =>
+                u.cursor.idxs?.[seriesIdx] != null ? [u.cursor.idxs[seriesIdx] as number] : [],
+            },
             ...(smooth ? { paths: uPlot.paths.spline?.() } : {}),
           })),
         ],
@@ -149,7 +157,7 @@ export function TimeChart({
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
     return () => { ro.disconnect(); mo.disconnect(); plot.current?.destroy(); plot.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.length > 0, height, JSON.stringify(series), data.length < 30, smooth]);
+  }, [data.length > 0, height, JSON.stringify(series), smooth]);
 
   // poll ticks: update data in place — same canvas, no teardown, no scroll shift
   useEffect(() => {

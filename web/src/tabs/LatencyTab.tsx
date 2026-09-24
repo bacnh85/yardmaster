@@ -24,7 +24,7 @@ export function LatencyTab() {
           </div>
           <div className="card">
             <h3>Errors per hour (24h)</h3>
-            <TimeChart data={sum.series} height={200} series={[{ key: "errors", label: "errors" }]} />
+            <TimeChart data={sum.series} height={200} smooth series={[{ key: "errors", label: "errors" }]} />
           </div>
         </>
       ) : <Empty>no data</Empty>}

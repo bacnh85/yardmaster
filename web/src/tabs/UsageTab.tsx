@@ -123,7 +123,7 @@ export function UsageTab() {
           </div>
           <div className="card">
             <h3>Requests &amp; errors</h3>
-            <TimeChart data={sum.series} height={180}
+            <TimeChart data={sum.series} height={180} smooth
               series={[{ key: "requests", label: "requests" }, { key: "errors", label: "errors" }]} />
           </div>
           {pivot.rows.length > 0 && (

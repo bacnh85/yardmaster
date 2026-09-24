@@ -72,7 +72,7 @@ export function CacheTab() {
           </div>
           <div className="card">
             <h3>Cached vs fresh input</h3>
-            <TimeChart data={sum.series} height={220}
+            <TimeChart data={sum.series} height={220} smooth
               series={[{ key: "cache_read", label: "cache read" }, { key: "tok_in", label: "fresh input" }]} />
           </div>
           <div className="card"><h3>By provider</h3><CacheBreakTable rows={byProvider} /></div>

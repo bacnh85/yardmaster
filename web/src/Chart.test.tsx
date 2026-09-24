@@ -83,6 +83,20 @@ describe("TimeChart lifecycle", () => {
     expect((opts.plugins as unknown[]).length).toBe(1); // tooltip plugin present
   });
 
+  it("hover markers: points always on with a cursor-index filter (density-independent)", () => {
+    mount(<TimeChart data={pts(40)} series={SERIES} />);
+    const ser = (plots[0].opts as uPlot.Options).series as uPlot.Series[];
+    expect(ser[1].points?.show).toBe(true); // not the old data.length<30 flip
+    const filter = ser[1].points?.filter as (
+      u: uPlot, seriesIdx: number, show: boolean, gaps?: number[][]
+    ) => number[];
+    const u = { cursor: { idxs: [null, 7] } } as unknown as uPlot;
+    expect(filter(u, 1, true)).toEqual([7]); // hovered index → marker
+    expect(filter(u, 1, true, undefined)).toEqual([7]);
+    const none = { cursor: { idxs: [null, null] } } as unknown as uPlot;
+    expect(filter(none, 1, true)).toEqual([]); // no hover → no markers
+  });
+
   it("builds once and setData's in place when only data changes (poll tick)", () => {
     mount(<TimeChart data={pts(24)} series={SERIES} />);
     rerender(<TimeChart data={pts(24, 2_000_000_000_000)} series={SERIES} />);
@@ -119,15 +133,13 @@ describe("TimeChart lifecycle", () => {
   it("crosses the 30-point threshold → rebuild; same side of it → setData", () => {
     mount(<TimeChart data={pts(24)} series={SERIES} />);
     rerender(<TimeChart data={pts(25)} series={SERIES} />);
-    expect(plots).toHaveLength(1); // 24→25: both < 30
-    rerender(<TimeChart data={pts(30)} series={SERIES} />);
-    expect(plots).toHaveLength(2); // 25→30: points.show flips → rebuild
-    expect(plots[0].destroyed).toBe(1);
+    expect(plots).toHaveLength(1); // in place (marker density is no longer a build dep)
     rerender(<TimeChart data={pts(31)} series={SERIES} />);
-    expect(plots).toHaveLength(2); // both ≥ 30 → in place
-    const SRC = pts(31);
-    expect(plots[1].setDataCalls.at(-1)).toEqual([SRC.map((p) => p.ts / 1000), SRC.map((p) => p.requests)]);
-    expect(plots[1].destroyed).toBe(0);
+    expect(plots).toHaveLength(1); // in place — points.show is always true now
+    rerender(<TimeChart data={pts(31, 9e12)} series={SERIES} />);
+    const SRC = pts(31, 9e12);
+    expect(plots[0].setDataCalls.at(-1)).toEqual([SRC.map((p) => p.ts / 1000), SRC.map((p) => p.requests)]);
+    expect(plots[0].destroyed).toBe(0);
   });
 
   it("rebuilds on data-theme change, redrawing the latest committed data", () => {
