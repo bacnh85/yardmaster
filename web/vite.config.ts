@@ -11,8 +11,8 @@ export default defineConfig({
   build: { outDir: "dist", emptyOutDir: true },
   server: {
     proxy: {
-      "/admin": "http://localhost:8787",
-      "/v1": "http://localhost:8787",
+      "/admin": process.env.YM_DEV_TARGET || "http://localhost:8787",
+      "/v1": process.env.YM_DEV_TARGET || "http://localhost:8787",
     },
   },
 });

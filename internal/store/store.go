@@ -204,13 +204,15 @@ func (s *Store) Close() error {
 // ---- queries (admin API) ----
 
 type Summary struct {
-	Requests   int64         `json:"requests"`
-	Errors     int64         `json:"errors"`
-	TokIn      int64         `json:"tok_in"`
-	TokOut     int64         `json:"tok_out"`
-	CacheRead  int64         `json:"cache_read"`
-	CacheWrite int64         `json:"cache_write"`
-	CostUSD    float64       `json:"cost_usd"`
+	Requests       int64         `json:"requests"`
+	Errors         int64         `json:"errors"`
+	TokIn          int64         `json:"tok_in"`
+	TokOut         int64         `json:"tok_out"`
+	CacheRead      int64         `json:"cache_read"`
+	CacheWrite     int64         `json:"cache_write"`
+	CachedRequests int64         `json:"cached_requests"` // requests with cache_read > 0
+	CacheSavedUSD  float64       `json:"cache_saved_usd"` // computed in the server layer (needs per-model prices)
+	CostUSD        float64       `json:"cost_usd"`
 	TTFTp50    *float64      `json:"ttft_p50_ms"`
 	TTFTp95    *float64      `json:"ttft_p95_ms"`
 	AvgDurMs   float64       `json:"avg_dur_ms"`
@@ -224,6 +226,7 @@ type SeriesPoint struct {
 	Errors   int64   `json:"errors"`
 	TokIn    int64   `json:"tok_in"`
 	TokOut   int64   `json:"tok_out"`
+	CacheRd  int64   `json:"cache_read"` // cached-vs-fresh chart; cache-exclusive like TokIn
 	Cost     float64 `json:"cost"`
 }
 
@@ -236,10 +239,11 @@ func (s *Store) SummarySince(d time.Duration, bucket string) (*Summary, error) {
 			COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0),
 			COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
+			COALESCE(SUM(CASE WHEN cache_read > 0 THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(cost_usd),0), COALESCE(AVG(dur_ms),0)
 		FROM requests WHERE ts >= ?`, since).
 		Scan(&sum.Requests, &sum.Errors, &sum.TokIn, &sum.TokOut,
-			&sum.CacheRead, &sum.CacheWrite, &sum.CostUSD, &sum.AvgDurMs)
+			&sum.CacheRead, &sum.CacheWrite, &sum.CachedRequests, &sum.CostUSD, &sum.AvgDurMs)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +270,7 @@ func (s *Store) SummarySince(d time.Duration, bucket string) (*Summary, error) {
 	group := bucketExpr(bucket)
 	rows, err := s.db.Query(`SELECT `+group+`, COUNT(*),
 			SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
-			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cost_usd),0)
+			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cache_read),0), COALESCE(SUM(cost_usd),0)
 		FROM requests WHERE ts >= ? GROUP BY 1 ORDER BY 1`, since)
 	if err != nil {
 		return nil, err
@@ -274,7 +278,7 @@ func (s *Store) SummarySince(d time.Duration, bucket string) (*Summary, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var p SeriesPoint
-		if err := rows.Scan(&p.Bucket, &p.Requests, &p.Errors, &p.TokIn, &p.TokOut, &p.Cost); err == nil {
+		if err := rows.Scan(&p.Bucket, &p.Requests, &p.Errors, &p.TokIn, &p.TokOut, &p.CacheRd, &p.Cost); err == nil {
 			sum.Series = append(sum.Series, p)
 		}
 	}
@@ -372,15 +376,16 @@ func (s *Store) Recent(limit int) ([]Row, error) {
 }
 
 type Breakdown struct {
-	Name     string   `json:"name"`
-	Requests int64    `json:"requests"`
-	Errors   int64    `json:"errors"`
-	TokIn    int64    `json:"tok_in"`
-	TokOut   int64    `json:"tok_out"`
-	CacheRd  int64    `json:"cache_read"`
-	CacheWrt int64    `json:"cache_write"` // totalInput needs it: card/table reconciliation
-	Cost     float64  `json:"cost"`
-	TTFTp50  *float64 `json:"ttft_p50_ms"`
+	Name       string   `json:"name"`
+	Requests   int64    `json:"requests"`
+	Errors     int64    `json:"errors"`
+	TokIn      int64    `json:"tok_in"`
+	TokOut     int64    `json:"tok_out"`
+	CacheRd    int64    `json:"cache_read"`
+	CacheWrt   int64    `json:"cache_write"` // totalInput needs it: card/table reconciliation
+	CachedReqs int64    `json:"cached_requests"` // requests with cache_read > 0
+	Cost       float64  `json:"cost"`
+	TTFTp50    *float64 `json:"ttft_p50_ms"`
 }
 
 // BreakdownBy groups usage over a period by column ("model"|"provider"|"key_name").
@@ -392,6 +397,7 @@ func (s *Store) BreakdownBy(col string, d time.Duration) ([]Breakdown, error) {
 	rows, err := s.db.Query(`SELECT `+col+`, COUNT(*),
 			SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
 			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
+			COALESCE(SUM(CASE WHEN cache_read > 0 THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(cost_usd),0)
 		FROM requests WHERE ts >= ? GROUP BY 1 ORDER BY COUNT(*) DESC`, since)
 	if err != nil {
@@ -401,7 +407,7 @@ func (s *Store) BreakdownBy(col string, d time.Duration) ([]Breakdown, error) {
 	out := make([]Breakdown, 0)
 	for rows.Next() {
 		var b Breakdown
-		if err := rows.Scan(&b.Name, &b.Requests, &b.Errors, &b.TokIn, &b.TokOut, &b.CacheRd, &b.CacheWrt, &b.Cost); err == nil {
+		if err := rows.Scan(&b.Name, &b.Requests, &b.Errors, &b.TokIn, &b.TokOut, &b.CacheRd, &b.CacheWrt, &b.CachedReqs, &b.Cost); err == nil {
 			out = append(out, b)
 		}
 	}
@@ -442,4 +448,32 @@ func percentiles(v []float64, ps ...float64) []*float64 {
 		out[i] = &x
 	}
 	return out
+}
+
+// CacheTokenRow is one model's cached-token totals — the light query the
+// server prices into cache_saved_usd. Deliberately NOT BreakdownBy("model"):
+// that carries the per-group TTFT percentile pass (O(n²) sort), which must not
+// run on every polled summary.
+type CacheTokenRow struct {
+	Model      string
+	CacheRead  int64
+	CacheWrite int64
+}
+
+func (s *Store) CacheTokensByModel(d time.Duration) ([]CacheTokenRow, error) {
+	since := time.Now().Add(-d).UnixMilli()
+	rows, err := s.db.Query(`SELECT model, COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0)
+		FROM requests WHERE ts >= ? GROUP BY model`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CacheTokenRow{}
+	for rows.Next() {
+		var r CacheTokenRow
+		if err := rows.Scan(&r.Model, &r.CacheRead, &r.CacheWrite); err == nil {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }

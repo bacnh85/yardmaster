@@ -43,7 +43,8 @@ routing, honest stats, and isolated auth adapters.
   path on any wire.
 - **Stats**: SQLite request log (async batched), per-model/provider/key
   breakdowns, TTFT p50/p95, cache hit rate, cost accounting (config-editable
-  per-model prices; built-in estimates), live SSE feed, embedded dashboard.
+  per-model prices; built-in estimates), live SSE feed, embedded dashboard
+  with a dedicated Cache tab (hit rate, token reuse, est. cost saved).
 
 ## Quick start
 

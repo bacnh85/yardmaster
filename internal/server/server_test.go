@@ -32,6 +32,101 @@ func oaiChunk(delta map[string]any, finish any) map[string]any {
 	}
 }
 
+// cacheSaved prices cached input at (full input − cache rate) per model using
+// the same config.Cost the proxy bills with; never negative (an "expensive"
+// cache read clamps to 0, not a refund).
+func TestCacheSaved(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	// m1: 2M cached reads at $1/M input, free cache reads → saved $2.
+	// m2: cache read priced ABOVE input ($3 > $1) → clamped to 0.
+	st.Submit(&store.Record{Ts: now, Key: "k", Model: "m1", Provider: "p", Status: 200, TokIn: 10, CacheRead: 2_000_000})
+	st.Submit(&store.Record{Ts: now, Key: "k", Model: "m2", Provider: "p", Status: 200, TokIn: 10, CacheRead: 500_000})
+	if err := st.Close(); err != nil { // drain the async batch writer
+		t.Fatal(err)
+	}
+	st2, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	cfg := &config.Config{
+		Costs: map[string]*config.Cost{"m1": {Input: 1, Output: 2, CacheRead: 0}, "m2": {Input: 1, Output: 2, CacheRead: 3}},
+	}
+	cfg.Defaults()
+	cfg.Validate()
+	srv := New(nil, nil, st2, "", "", "test")
+	srv.Proxy = &proxy.Proxy{Cost: cfg.CostFor}
+	sum, err := st2.SummarySince(time.Hour, "hour")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.cacheSaved(sum, time.Hour)
+	if sum.CacheSavedUSD < 1.999 || sum.CacheSavedUSD > 2.001 {
+		t.Fatalf("cache_saved_usd = %f, want 2.0 (m1 $2 + m2 clamped to 0)", sum.CacheSavedUSD)
+	}
+	// nil-Cost proxies must not panic — field is optional
+	srv2 := New(nil, nil, st2, "", "", "test")
+	sum2, err := st2.SummarySince(time.Hour, "hour")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2.cacheSaved(sum2, time.Hour) // Proxy is nil → no-op
+}
+
+// HTTP wiring + window semantics: the summary ENDPOINT must carry
+// cache_saved_usd (a deleted s.cacheSaved call would silently $0 the card)
+// and only count in-window rows.
+func TestSummaryCacheSavedEndpoint(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	st.Submit(&store.Record{Ts: now, Key: "k", Model: "m1", Provider: "p", Status: 200, TokIn: 1, CacheRead: 1_000_000}) // $1
+	st.Submit(&store.Record{Ts: now - 2*int64(time.Hour), Key: "k", Model: "m1", Provider: "p", Status: 200, TokIn: 1, CacheRead: 5_000_000})
+	if err := st.Close(); err != nil { // drain the async batch writer
+		t.Fatal(err)
+	}
+	st2, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	cfg := &config.Config{Costs: map[string]*config.Cost{"m1": {Input: 1, Output: 2, CacheRead: 0}}}
+	cfg.Defaults()
+	cfg.Validate()
+	srv := New(nil, nil, st2, "", "secretpw", "test")
+	srv.Proxy = &proxy.Proxy{Cost: cfg.CostFor}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/admin/api/summary?hours=1", nil)
+	req.SetBasicAuth("", "secretpw")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("summary: %d", resp.StatusCode)
+	}
+	var out struct {
+		Summary store.Summary `json:"summary"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Summary.CacheSavedUSD != 1.0 {
+		t.Fatalf("cache_saved_usd = %f, want 1.0 (out-of-window row must be excluded)", out.Summary.CacheSavedUSD)
+	}
+}
+
 func TestServerEndToEnd(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ah := r.Header.Get("Authorization"); ah != "Bearer sk-up" {

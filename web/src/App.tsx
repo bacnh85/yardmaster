@@ -3,11 +3,12 @@ import { get, login } from "./api";
 import { Toaster } from "./components";
 import { TABS, tabFromHash, providerDetailFromHash, type Tab } from "./route";
 import {
-  IconActivity, IconChart, IconGauge, IconList, IconKey, IconServer, IconSettings,
+  IconActivity, IconChart, IconCache, IconGauge, IconList, IconKey, IconServer, IconSettings,
   IconShield, IconSun, IconMoon,
 } from "./icons";
 import { LiveTab } from "./tabs/LiveTab";
 import { UsageTab } from "./tabs/UsageTab";
+import { CacheTab } from "./tabs/CacheTab";
 import { QuotaTab } from "./tabs/QuotaTab";
 import { LatencyTab } from "./tabs/LatencyTab";
 import { RequestsTab } from "./tabs/RequestsTab";
@@ -20,6 +21,7 @@ const NAV: { group: string; tabs: { id: Tab; label: string; icon: React.ReactNod
     group: "Proxy", tabs: [
       { id: "live", label: "Live", icon: <IconActivity /> },
       { id: "usage", label: "Usage", icon: <IconChart /> },
+      { id: "cache", label: "Cache", icon: <IconCache /> },
       { id: "quota", label: "Quota", icon: <IconShield /> },
       { id: "latency", label: "Latency", icon: <IconGauge /> },
       { id: "requests", label: "Requests", icon: <IconList /> },
@@ -121,6 +123,7 @@ export default function App() {
       <main>
         {tab === "live" && <LiveTab />}
         {tab === "usage" && <UsageTab />}
+        {tab === "cache" && <CacheTab />}
         {tab === "quota" && <QuotaTab />}
         {tab === "latency" && <LatencyTab />}
         {tab === "requests" && <RequestsTab />}

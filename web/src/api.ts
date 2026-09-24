@@ -28,9 +28,10 @@ export const get = (path: string) => fetch(`/admin/api/${path}`).then(j);
 
 export interface Summary {
   requests: number; errors: number; tok_in: number; tok_out: number;
-  cache_read: number; cache_write: number; cost_usd: number;
+  cache_read: number; cache_write: number; cached_requests?: number;
+  cache_saved_usd?: number; cost_usd: number;
   ttft_p50_ms: number | null; ttft_p95_ms: number | null; avg_dur_ms: number;
-  series: { ts: number; requests: number; errors: number; tok_in: number; tok_out: number; cost: number }[];
+  series: { ts: number; requests: number; errors: number; tok_in: number; tok_out: number; cache_read?: number; cost: number }[];
 }
 export interface ReqRow {
   id: number; ts: number; key: string; model: string; provider: string;
@@ -40,7 +41,7 @@ export interface ReqRow {
 }
 export interface BreakdownRow {
   name: string; requests: number; errors: number; tok_in: number; tok_out: number;
-  cache_read: number; cache_write?: number; cost: number; ttft_p50_ms: number | null;
+  cache_read: number; cache_write?: number; cached_requests?: number; cost: number; ttft_p50_ms: number | null;
 }
 export interface ModelSeriesPoint { ts: number; model: string; tok_in: number; tok_out: number; cost: number }
 export interface KeyRow { name: string; key_suffix: string; allow: string[]; rpm: number; usage?: boolean | null }

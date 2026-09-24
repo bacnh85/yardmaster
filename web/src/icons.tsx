@@ -9,6 +9,7 @@ const S = ({ size = 16, children }: P & { children: React.ReactNode }) => (
 
 export const IconActivity = (p: P) => <S {...p}><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></S>;
 export const IconChart = (p: P) => <S {...p}><path d="M3 3v18h18" /><path d="M7 15v3M12 10v8M17 6v12" /></S>;
+export const IconCache = (p: P) => <S {...p}><ellipse cx="12" cy="5.5" rx="8" ry="2.8" /><path d="M4 5.5v6.5c0 1.5 3.6 2.8 8 2.8s8-1.3 8-2.8V5.5" /><path d="M4 12v6.5c0 1.5 3.6 2.8 8 2.8s8-1.3 8-2.8V12" /></S>;
 export const IconGauge = (p: P) => <S {...p}><path d="M12 14l4-4" /><path d="M3.5 18a9 9 0 1 1 17 0" /></S>;
 export const IconShield = (p: P) => <S {...p}><path d="M12 22s8-3.6 8-10V5l-8-3-8 3v7c0 6.4 8 10 8 10Z" /></S>;
 export const IconList = (p: P) => <S {...p}><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></S>;

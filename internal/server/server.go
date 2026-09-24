@@ -288,6 +288,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		inflight, total := s.Proxy.Stats()
 		sum.Bucket = q.Get("bucket")
+		s.cacheSaved(sum, time.Duration(hours)*time.Hour)
 		writeJSON(map[string]any{"summary": sum, "inflight": inflight, "total": total})
 	case path == "requests" && r.Method == "GET":
 		limit, _ := strconv.Atoi(q.Get("limit"))
@@ -754,6 +755,29 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// cacheSaved fills sum.CacheSavedUSD: cached input priced at the full input
+// rate minus what the cache actually charged, per model, using the same
+// config.Cost the proxy bills with. Estimate by definition — models without a
+// price entry contribute nothing.
+func (s *Server) cacheSaved(sum *store.Summary, d time.Duration) {
+	if s.Proxy == nil || s.Proxy.Cost == nil {
+		return
+	}
+	// light token-only query — BreakdownBy would run the O(n²) TTFT percentile
+	// pass on every polled summary
+	rows, err := s.Store.CacheTokensByModel(d)
+	if err != nil {
+		return
+	}
+	var saved float64
+	for _, b := range rows {
+		c := s.Proxy.Cost(b.Model)
+		saved += float64(b.CacheRead)/1e6*max(0, c.Input-c.CacheRead) +
+			float64(b.CacheWrite)/1e6*max(0, c.Input-c.CacheWrite)
+	}
+	sum.CacheSavedUSD = saved
 }
 
 func suffix(k string) string {
