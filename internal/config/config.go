@@ -115,10 +115,10 @@ func AuthKindDefaults(kind string) (endpoint, clientID string, ok bool) {
 }
 
 // ValidSubscription reports whether s is an acceptable provider subscription
-// plan tier: "" (none) | goat | pro | max.
+// plan tier: "" (none) | goat | pro | max | free (Ollama's lowest tier).
 func ValidSubscription(s string) bool {
 	switch s {
-	case "", "goat", "pro", "max":
+	case "", "goat", "pro", "max", "free":
 		return true
 	}
 	return false
@@ -236,7 +236,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("provider %s: rotation must be first|round_robin", p.Name)
 		}
 		if !ValidSubscription(p.Subscription) {
-			return fmt.Errorf("provider %s: subscription must be empty|goat|pro|max", p.Name)
+			return fmt.Errorf("provider %s: subscription must be empty|goat|pro|max|free", p.Name)
 		}
 		if p.Wire == "responses" && p.Auth.Type == "" {
 			p.Auth.Type = "static"

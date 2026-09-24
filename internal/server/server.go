@@ -833,7 +833,7 @@ type providerForm struct {
 	Prefix             *string           `json:"prefix"`   // nil = omitted (keep stored); "" = none; else routing prefix
 	Session            *string           `json:"session"`  // nil = omitted (keep stored); "" = none; "opencode" = session headers
 	Rotation           *string           `json:"rotation"` // nil = omitted (keep stored); first | round_robin
-	Subscription       *string           `json:"subscription"` // nil = omitted (keep stored); "" = none; goat|pro|max
+	Subscription       *string           `json:"subscription"` // nil = omitted (keep stored); "" = none; goat|pro|max|free
 	Preset             string            `json:"preset"`
 	Disabled           *bool             `json:"disabled"`             // nil = omitted (keep stored)
 	DispatchIntervalMS *int              `json:"dispatch_interval_ms"` // nil = omitted (keep stored)
@@ -885,7 +885,7 @@ func (f providerForm) provider() (*config.Provider, error) {
 	if f.Subscription != nil {
 		subscription = strings.ToLower(strings.TrimSpace(*f.Subscription))
 		if !config.ValidSubscription(subscription) {
-			return nil, fmt.Errorf("subscription must be empty, goat, pro, or max")
+			return nil, fmt.Errorf("subscription must be empty, goat, pro, max, or free")
 		}
 	}
 	disabled := false

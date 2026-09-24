@@ -4,7 +4,7 @@ import { useApi, usePoll } from "../hooks";
 import { Confirm, Empty, ErrorBanner, Modal, PageHead, Skeleton, toast } from "../components";
 import { IconPlay, IconX } from "../icons";
 import { QuotaTable, isQuotaProvider } from "./QuotaTab";
-import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPlan, CmdPlan } from "../presets";
+import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPlan, planLadder, normPlan, CmdPlan } from "../presets";
 
 interface ProviderForm {
   name: string; wire: string; base_url: string; models: string; prefix: string;
@@ -169,9 +169,10 @@ export const bulkNextModels = (cur: string[], shownIds: string[], familyIds: str
 
 /** Plan-tier cap for expose-all/bulk-toggle sweeps: the stored subscription
  *  bounds what any sweep can add — the user's filter can only narrow within
- *  it (tier order goat < pro < max). "" on either side = uncapped by it. */
+ *  it (tier order goat|free < pro < max; goat/free never coexist in a group).
+ *  "" on either side = uncapped by it. */
 export const effectiveCap = (planFilter: "all" | CmdPlan, subscription: string): CmdPlan => {
-  const tier = (p: string) => ({ goat: 0, pro: 1, max: 2 } as Record<string, number>)[p] ?? -1;
+  const tier = (p: string) => ({ goat: 0, free: 0, pro: 1, max: 2 } as Record<string, number>)[p] ?? -1;
   if (planFilter === "all") return (subscription as CmdPlan) || "";
   if (!subscription) return planFilter;
   return tier(planFilter) <= tier(subscription) ? planFilter : (subscription as CmdPlan);
@@ -560,10 +561,11 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   // than the subscription can never lift the guardrail.
   const [planFilter, setPlanFilter] = useState<"all" | CmdPlan>(() => {
     if (!r.plans) return "all";
-    const sub = group.find((p) => p.subscription)?.subscription;
-    if (sub === "goat" || sub === "pro" || sub === "max") return sub;
-    const v = localStorage.getItem(`plan-${r.id}`);
-    return v === "goat" || v === "pro" || v === "max" || v === "all" ? v : "goat";
+    const sub = normPlan(r.id, group.find((p) => p.subscription)?.subscription || "");
+    if (sub) return sub;
+    const v = localStorage.getItem(`plan-${r.id}`) ?? "";
+    const ladder = ["all", ...planLadder(r.id)] as string[];
+    return ladder.includes(v) ? (v as "all" | CmdPlan) : planLadder(r.id)[0];
   });
   // re-sync when the group's subscription changes (add-connection form, dashboard
   // edit elsewhere): the initializer above only runs at mount
@@ -573,7 +575,9 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     if (lastSub.current === null) { lastSub.current = groupSub; return; } // skip the mount run
     if (groupSub !== lastSub.current) {
       lastSub.current = groupSub;
-      if (r.plans) pickPlan(groupSub === "" ? "all" : (groupSub as "all" | CmdPlan));
+      // a sub outside this preset's ladder (legacy goat on ollama) normalizes;
+      // an unknown non-empty value filters to "all"
+      if (r.plans) pickPlan(groupSub === "" ? "all" : (normPlan(r.id, groupSub) || "all"));
     }
   }, [groupSub]); // eslint-disable-line react-hooks/exhaustive-deps
   const pickPlan = (v: "all" | CmdPlan) => {

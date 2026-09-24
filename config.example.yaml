@@ -52,7 +52,7 @@ providers:
     # rotation: round_robin        # rotate starting key/account per request
     #                              # (default first = config order; spreads quota)
   # subscription: goat            # curation guardrail: dashboard filters/expose-alls
-    #                             # cap to this plan tier (""|goat|pro|max)
+    #                             # cap to this plan tier (""|goat|pro|max|free)
   # Full ZCode route (what the signed ZCode desktop hits today) — use this base
   # URL while chasing the 0.67 campaign coefficient; keep zcode_signing: true:
   #   base_url: https://zcode.z.ai/api/v1/ultra-zai/anthropic

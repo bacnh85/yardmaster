@@ -16,7 +16,7 @@ export interface RegistryProvider {
   desc: string;
   code: string;      // short code: monogram + connection label prefix (e.g. "OCG")
   prefix: string;    // routing prefix; models exposed to agents as "prefix/model"
-  plans?: boolean;   // catalog supports plan-tier filtering (cmdPlan)
+  plans?: boolean;   // catalog supports plan-tier filtering (cmdPlan / olPlan)
   planOf?: (id: string) => CmdPlan; // plan classifier; defaults to cmdPlan when plans is set
   entries: RegistryEntry[];
 }
@@ -118,7 +118,28 @@ const CC_MAX = [
   "claude-fable-5", "claude-fable-5-1", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "sakana/fugu-ultra",
 ];
 
-export type CmdPlan = "goat" | "pro" | "max" | ""; // "" = new/unclassified
+export type CmdPlan = "goat" | "pro" | "max" | "free" | ""; // "" = new/unclassified
+
+/** Plan-name ladders per plan-capable preset, low→high. "free" exists because
+ *  Ollama's ladder is its own (Free < Pro < Max; Team has Pro-level access). */
+const PLAN_LADDERS: Record<string, readonly CmdPlan[]> = {
+  cmdcode: ["goat", "pro", "max"],
+  ollama: ["free", "pro", "max"],
+};
+
+/** Plan names a preset's filters/pickers offer, low→high (default: CommandCode's). */
+export const planLadder = (presetId: string): readonly CmdPlan[] =>
+  PLAN_LADDERS[presetId] ?? ["goat", "pro", "max"];
+
+/** Map a stored subscription onto a preset's ladder: tier-0 names are
+ *  interchangeable across ladders (legacy goat on Ollama = free), anything
+ *  else the ladder doesn't know is uncapped. */
+export const normPlan = (presetId: string, sub: string): CmdPlan => {
+  const ladder = planLadder(presetId);
+  if (ladder.includes(sub as CmdPlan)) return sub as CmdPlan;
+  if (sub === "goat" || sub === "free") return ladder[0];
+  return "";
+};
 
 /** Plan tier for a CommandCode catalog id (case-insensitive). */
 export function cmdPlan(id: string): CmdPlan {
@@ -139,11 +160,9 @@ const OL_FREE = [
   "nemotron-3-nano:30b", "nemotron-3-super", "nemotron-3-ultra",
 ];
 
-/** Plan tier for an Ollama Cloud catalog id. Free models → "goat" (the tier
- *  lattice's lowest slot, so the subscription guardrail machinery applies);
- *  paid models → "pro" (Pro/Max/Team all unlock the full catalog). */
+/** Plan tier for an Ollama Cloud catalog id, on Ollama's own ladder. */
 export function olPlan(id: string): CmdPlan {
-  return OL_FREE.includes(id.toLowerCase()) ? "goat" : "pro";
+  return OL_FREE.includes(id.toLowerCase()) ? "free" : "pro";
 }
 
 /** Find a config provider's registry entry: by preset id, else by exact name (legacy configs). */

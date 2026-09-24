@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_FORM, providerBody, providerUpdateBody, rowToForm, groupFor, connectedCount, connRows, labelWithCode, familyFor, serveTargetModels, bulkNextModels, effectiveCap, capIds, withCurated, toggleModels, isCuratedModel, canonModelId } from "./tabs/ProvidersTab";
-import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan, olPlan } from "./presets";
+import { REGISTRY, registryFor, entryFor, wireFamily, presetToForm, cmdPlan, olPlan, planLadder, normPlan } from "./presets";
 import type { CatalogModel, ProviderRow } from "./api";
 
 describe("providerBody", () => {
@@ -176,7 +176,7 @@ describe("registry", () => {
     // clients); /v1/models is public, catalog metadata comes from models.dev ollama-cloud
     const ol = REGISTRY.find((r) => r.id === "ollama")!;
     expect(ol.plans).toBe(true);
-    expect(ol.planOf?.("gpt-oss:20b")).toBe("goat"); // free tier
+    expect(ol.planOf?.("gpt-oss:20b")).toBe("free"); // Ollama's own lowest tier
     expect(ol.planOf?.("glm-5.3")).toBe("pro");
     expect(ol.entries).toHaveLength(1);
     expect(ol.entries[0]).toMatchObject({ name: "ollama", wire: "openai", base_url: "https://ollama.com/v1", family: "chat" });
@@ -197,13 +197,13 @@ describe("registry", () => {
   });
 
   it("classifies Ollama Cloud models per plan (live free-tier list)", () => {
-    // the 6 free models → "goat" (tier-lattice lowest slot); everything else → "pro"
-    expect(olPlan("gemma4:31b")).toBe("goat");
-    expect(olPlan("gpt-oss:20b")).toBe("goat");
-    expect(olPlan("gpt-oss:120b")).toBe("goat");
-    expect(olPlan("nemotron-3-nano:30b")).toBe("goat");
-    expect(olPlan("nemotron-3-super")).toBe("goat");
-    expect(olPlan("nemotron-3-ultra")).toBe("goat");
+    // the 6 free models → "free" (Ollama's own ladder: free < pro < max); everything else → "pro"
+    expect(olPlan("gemma4:31b")).toBe("free");
+    expect(olPlan("gpt-oss:20b")).toBe("free");
+    expect(olPlan("gpt-oss:120b")).toBe("free");
+    expect(olPlan("nemotron-3-nano:30b")).toBe("free");
+    expect(olPlan("nemotron-3-super")).toBe("free");
+    expect(olPlan("nemotron-3-ultra")).toBe("free");
     expect(olPlan("glm-5.3")).toBe("pro");
     expect(olPlan("deepseek-v4-pro:0813")).toBe("pro");
     expect(olPlan("kimi-k3")).toBe("pro");
@@ -322,6 +322,24 @@ describe("registry", () => {
   });
 
   describe("effectiveCap + capIds (subscription guardrail)", () => {
+    it("normPlan maps legacy cross-ladder subscriptions onto the preset ladder", () => {
+      expect(normPlan("ollama", "goat")).toBe("free"); // legacy goat = tier-0 free
+      expect(normPlan("ollama", "free")).toBe("free");
+      expect(normPlan("ollama", "pro")).toBe("pro");
+      expect(normPlan("ollama", "max")).toBe("max");
+      expect(normPlan("ollama", "")).toBe("");
+      expect(normPlan("ollama", "bogus")).toBe("");
+      expect(normPlan("cmdcode", "free")).toBe("goat"); // reverse mapping
+      expect(planLadder("cmdcode")).toEqual(["goat", "pro", "max"]);
+      expect(planLadder("ollama")).toEqual(["free", "pro", "max"]);
+      expect(planLadder("deepseek")).toEqual(["goat", "pro", "max"]); // default ladder
+    });
+    it("sweeps with a legacy stored goat sub cap to the ollama free tier (not zero models)", () => {
+      const ids = ["gpt-oss:20b", "glm-5.3", "kimi-k3"];
+      const cap = effectiveCap("all", normPlan("ollama", "goat"));
+      expect(cap).toBe("free");
+      expect(capIds(ids, cap, olPlan)).toEqual(["gpt-oss:20b"]);
+    });
     it("stored subscription bounds the sweep — user filter can only narrow within it", () => {
       expect(effectiveCap("pro", "goat")).toBe("goat"); // filter above stored tier → capped down
       expect(effectiveCap("max", "pro")).toBe("pro");
@@ -338,7 +356,7 @@ describe("registry", () => {
     });
     it("capIds honors a preset-specific planOf (ollama free-tier guardrail)", () => {
       const ids = ["gpt-oss:20b", "glm-5.3", "kimi-k3"];
-      expect(capIds(ids, "goat", olPlan)).toEqual(["gpt-oss:20b"]); // free models only
+      expect(capIds(ids, "free", olPlan)).toEqual(["gpt-oss:20b"]); // free models only
       expect(capIds(ids, "pro", olPlan)).toEqual(["glm-5.3", "kimi-k3"]);
     });
   });
