@@ -396,6 +396,7 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
               <label htmlFor="pf-subscription">subscription plan</label>
               <select id="pf-subscription" value={form.subscription} onChange={set("subscription")}>
                 <option value="">none</option>
+                <option value="free">free</option>
                 <option value="goat">goat</option>
                 <option value="pro">pro</option>
                 <option value="max">max</option>
@@ -793,7 +794,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     // strict: unknown-family models are never swept onto a guessed wire — they
     // get an explicit per-row "serve on…" picker instead. Sweeps are capped by
     // the stored subscription; the plan filter can only narrow within it.
-    const cap = effectiveCap(planFilter, sub.subscription || "");
+    const cap = effectiveCap(planFilter, normPlan(r.id, sub.subscription || ""));
     const ids = capIds(
       catalog.models.filter((m) => familyFor(group, m) === e.family).map((m) => m.id),
       cap,
@@ -834,7 +835,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
       // wildcard hides materialize the UNcapped family complement — the exact
       // per-row checkbox semantics (hiding can only narrow a wildcard)
       const famIds = catalog.models.filter((x) => familyFor(group, x) === fam).map((x) => x.id);
-      const universe = on ? capIds(famIds, effectiveCap(planFilter, sub.subscription || ""), r.planOf) : famIds;
+      const universe = on ? capIds(famIds, effectiveCap(planFilter, normPlan(r.id, sub.subscription || "")), r.planOf) : famIds;
       const shownIds = shown.filter((x) => familyFor(group, x) === fam).map((x) => x.id);
       const next = bulkNextModels(sub.models, shownIds, universe, on);
       if (next === null) {
@@ -872,7 +873,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
       <div className="card">
         <div className="row spread baseline">
           <h3>Connections</h3>
-          <button className="btn primary sm" onClick={() => { setSubPlan((group.find((p) => p.subscription)?.subscription as "" | CmdPlan) || ""); setAdding((a) => !a); }}>{adding ? "close" : "+ add"}</button>
+          <button className="btn primary sm" onClick={() => { setSubPlan(normPlan(r.id, group.find((p) => p.subscription)?.subscription || "")); setAdding((a) => !a); }}>{adding ? "close" : "+ add"}</button>
         </div>
         {adding && (
           <form className="form-grid" onSubmit={addConnection} aria-label="add connection" style={{ margin: "12px 0" }}>
@@ -890,9 +891,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                 <label htmlFor="conn-subscription">subscription plan</label>
                 <select id="conn-subscription" value={subPlan} onChange={(e) => setSubPlan(e.target.value as "" | CmdPlan)}>
                   <option value="">none</option>
-                  <option value="goat">goat</option>
-                  <option value="pro">pro</option>
-                  <option value="max">max</option>
+                  {planLadder(r.id).map((p) => <option key={p} value={p}>{p}</option>)}
                 </select>
               </div>
             )}
@@ -1004,7 +1003,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
           <div className="toolbar">
             {r.plans && (
               <div className="seg" role="group" aria-label="plan tier filter">
-                {(["all", "goat", "pro", "max"] as const).map((f) => (
+                {(["all", ...planLadder(r.id)] as const).map((f) => (
                   <button key={`plan-${f}`} aria-pressed={planFilter === f}
                     title={`show only ${f === "all" ? "every" : f + "-plan"} models`}
                     onClick={() => pickPlan(f)}>{f === "all" ? "all plans" : f}</button>
