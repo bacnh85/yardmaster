@@ -31,9 +31,10 @@ import (
 )
 
 const (
-	WireOpenAI    = "openai"
-	WireAnthropic = "anthropic"
-	WireResponses = "responses" // OpenAI Responses API (Codex backend)
+	WireOpenAI     = "openai"
+	WireAnthropic  = "anthropic"
+	WireResponses  = "responses" // OpenAI Responses API (Codex backend)
+	WireClassifier = "classifier" // System One decision models (TypeSafe Jev)
 )
 
 type Proxy struct {
@@ -152,6 +153,13 @@ func (p *Proxy) ServeResponses(w http.ResponseWriter, r *http.Request) {
 	p.serve(w, r, WireResponses)
 }
 
+// ServeClassifier handles POST /v1/systemone (System One decisions in —
+// {model, state, questions}; non-streaming JSON in/out). /v1/decisions and
+// /v1/classifier are aliases routed to the same handler.
+func (p *Proxy) ServeClassifier(w http.ResponseWriter, r *http.Request) {
+	p.serve(w, r, WireClassifier)
+}
+
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string) {
 	start := time.Now()
 	p.total.Add(1)
@@ -178,6 +186,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 	if req != nil {
 		model, _ = req["model"].(string)
 		stream, _ = req["stream"].(bool)
+	}
+	if clientWire == WireClassifier {
+		stream = false // decision models are request/response only
 	}
 	rec := &store.Record{
 		Ts:     start.UnixMilli(),
@@ -430,6 +441,10 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 			url += "/chat/completions"
 		} else if pv.Wire == WireResponses {
 			url += "/responses"
+		} else if pv.Wire == WireClassifier {
+			// TypeSafe System One surface: api.typesafe.ai/v1 and
+			// openrouter.ai/api/v1 both append /systemone (verified live)
+			url += "/systemone"
 		} else {
 			url = anthropicEndpoint(url)
 		}

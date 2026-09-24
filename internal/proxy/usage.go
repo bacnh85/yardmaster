@@ -73,6 +73,15 @@ func (t *UsageTee) consumeLine() {
 }
 
 func (t *UsageTee) parse(m map[string]any) {
+	if t.wire == "classifier" {
+		// System One decision bodies: usage is {input_tokens, output_tokens},
+		// output always free/0 — no cache fields exist on this wire
+		if u, ok := m["usage"].(map[string]any); ok && u != nil {
+			t.usage.In = num(u["input_tokens"])
+			t.usage.Out = num(u["output_tokens"])
+		}
+		return
+	}
 	if t.wire == "anthropic" {
 		switch m["type"] {
 		case "message": // full non-streaming message body

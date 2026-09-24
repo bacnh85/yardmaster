@@ -172,6 +172,10 @@ var DefaultCosts = map[string]*Cost{
 	"claude-haiku-4.5": {Input: 1.00, Output: 5.00, CacheRead: 0.10},
 	"gpt-5.5":          {Input: 1.25, Output: 10.00, CacheRead: 0.12},
 	"kimi-k3":          {Input: 0.60, Output: 2.50, CacheRead: 0.06},
+	// TypeSafe Jev (System One decision model, $42/Btok input, output free).
+	// "jev" prefix-matches jev-latest/jev-1.13.0 via the family-prefix fallback.
+	"typesafe/jev-1.13": {Input: 0.042},
+	"jev":               {Input: 0.042},
 	"minimax-m3":       {Input: 0.30, Output: 1.20, CacheRead: 0.03},
 	"qwen3.7-max":      {Input: 0.60, Output: 2.40, CacheRead: 0.06},
 	"grok-4.5":         {Input: 3.00, Output: 15.00, CacheRead: 0.30},
@@ -223,8 +227,13 @@ func (c *Config) Validate() error {
 		if p.BaseURL == "" {
 			return fmt.Errorf("provider %s: missing base_url", p.Name)
 		}
-		if p.Wire != "openai" && p.Wire != "anthropic" && p.Wire != "responses" {
-			return fmt.Errorf("provider %s: wire must be openai|anthropic|responses", p.Name)
+		if p.Wire != "openai" && p.Wire != "anthropic" && p.Wire != "responses" && p.Wire != "classifier" {
+			return fmt.Errorf("provider %s: wire must be openai|anthropic|responses|classifier", p.Name)
+		}
+		// classifier providers speak /systemone (typed decisions), never chat —
+		// a wildcard would resolve any model id onto a wire that can't serve it
+		if p.Wire == "classifier" && len(p.Models) == 0 {
+			return fmt.Errorf("provider %s: classifier wire requires a curated models list", p.Name)
 		}
 		if p.Auth.Type == "" {
 			p.Auth.Type = "static"
@@ -266,6 +275,10 @@ func (c *Config) Validate() error {
 		}
 	}
 	pnames := names
+	wires := map[string]string{}
+	for _, p := range c.Providers {
+		wires[p.Name] = p.Wire
+	}
 	for _, r := range c.Routes {
 		if r.Match == "" {
 			return fmt.Errorf("route missing match")
@@ -276,6 +289,9 @@ func (c *Config) Validate() error {
 		for _, n := range r.Chain {
 			if !pnames[n] {
 				return fmt.Errorf("route %q references unknown provider %q", r.Match, n)
+			}
+			if wires[n] == "classifier" {
+				return fmt.Errorf("route %q: classifier provider %q cannot serve chat routes", r.Match, n)
 			}
 		}
 		// weights are legal whenever the EFFECTIVE strategy is weighted-rr —

@@ -2,7 +2,8 @@
 
 Self-hosted LLM proxy for CLI coding agents. One API URL + key for all your
 agents; one config entry per upstream provider. Go, single static binary,
-embedded dashboard.
+embedded dashboard. Wires: `openai | anthropic | responses | classifier`
+(System One decision models — see `docs/classifier.md`).
 
 Built to replace OmniRoute / CLIProxyAPI / 9router with something minimal:
 no MITM, no token compression, no OAuth monolith — just fast streaming

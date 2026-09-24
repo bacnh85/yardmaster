@@ -54,6 +54,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/responses", s.wrap(s.Proxy.ServeResponses))
 	mux.HandleFunc("POST /v1/messages", s.wrap(s.Proxy.ServeMessages))
 	mux.HandleFunc("POST /v1/messages/count_tokens", s.wrap(s.wrapCountTokens))
+	// System One decision wire: /v1/systemone canonical (TypeSafe-SDK and
+	// OpenRouter-SystemOne compatible via TYPESAFE_BASE_URL=https://<host>/v1);
+	// /v1/decisions + /v1/classifier are aliases of the same handler.
+	mux.HandleFunc("POST /v1/systemone", s.wrap(s.Proxy.ServeClassifier))
+	mux.HandleFunc("POST /v1/decisions", s.wrap(s.Proxy.ServeClassifier))
+	mux.HandleFunc("POST /v1/classifier", s.wrap(s.Proxy.ServeClassifier))
 	mux.HandleFunc("GET /v1/models", s.wrap(s.handleModels))
 	mux.HandleFunc("GET /v1/usage", s.wrap(s.handleUsage))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -499,9 +505,15 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		// 400 (not Probe's 502) when the key index doesn't exist — the client
 		// picked the key, so it's a bad request, not an upstream failure.
 		// Omitted key_index (0) hits the first key like before; negative → first.
-		if pv := providerByName(s.Proxy.Reg.Config().Providers, req.Provider); pv != nil && len(pv.Auth.Keys) > 0 && req.KeyIndex >= len(pv.Auth.Keys) {
-			http.Error(w, "key index out of range", 400)
-			return
+		if pv := providerByName(s.Proxy.Reg.Config().Providers, req.Provider); pv != nil {
+			if pv.Wire == proxy.WireClassifier {
+				http.Error(w, "classifier models are decision models — they don't answer chat probes", 400)
+				return
+			}
+			if len(pv.Auth.Keys) > 0 && req.KeyIndex >= len(pv.Auth.Keys) {
+				http.Error(w, "key index out of range", 400)
+				return
+			}
 		}
 		msgs := make([]proxy.ChatMessage, len(req.Messages))
 		for i, m := range req.Messages {

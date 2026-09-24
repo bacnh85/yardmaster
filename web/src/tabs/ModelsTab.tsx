@@ -190,12 +190,13 @@ export function ModelsTab() {
                         {m.reasoning && <span className="badge muted" title="extended thinking">think</span>}
                         {m.tool_call && <span className="badge muted" title="tool calling">tools</span>}
                         {m.image && <span className="badge muted" title="image input">img</span>}
+                        {m.family === "classifier" && <span className="badge" title="System One decision model — typed answers, no chat">clf</span>}
                         {m.manual && <span className="badge muted" title="added by hand">manual</span>}
                       </td>
                       <td>
                         <button className="btn sm" aria-label={`playground ${m.id}`}
-                          title="open in playground"
-                          disabled={!m.providers.some((p) => p.exposed)}
+                          title={m.family === "classifier" ? "decision model — no chat playground" : "open in playground"}
+                          disabled={!m.providers.some((p) => p.exposed) || m.family === "classifier"}
                           onClick={() => {
                             const first = m.providers.find((p) => p.exposed);
                             setPg({ model: m.id, provider: first?.name ?? "" });

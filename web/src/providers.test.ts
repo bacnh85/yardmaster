@@ -105,9 +105,10 @@ describe("zai preset defaults", () => {
     expect(d.extra_headers).toEqual({ "anthropic-beta": "fast-mode-2026-02-01" });
     expect(d.body_overrides).toEqual({ speed: "fast" });
   });
-  it("only zai carries defaults — other presets create bare providers", () => {
+  it("only zai and classifier entries carry defaults — others create bare providers", () => {
     for (const r of REGISTRY.filter((r) => r.id !== "zai")) {
       for (const e of r.entries) {
+        if (e.wire === "classifier") continue; // curated jev ids ship as defaults
         expect(e.defaults).toBeUndefined();
       }
     }
@@ -123,10 +124,10 @@ const baseRow: ProviderRow = {
 describe("prefix registry", () => {
   it("every registry provider carries a short routing prefix", () => {
     expect(REGISTRY.map((r) => [r.id, r.prefix])).toEqual([
-      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"], ["ollama", "ol"],
+      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"], ["typesafe", "jev"], ["ollama", "ol"],
     ]);
     expect(REGISTRY.map((r) => [r.id, r.code])).toEqual([
-      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"], ["ollama", "OL"],
+      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"], ["typesafe", "TS"], ["ollama", "OL"],
     ]);
   });
 });
@@ -152,7 +153,7 @@ describe("registry", () => {
   });
 
   it("has the providers the product must support", () => {
-    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "ollama", "opencode-go", "openrouter", "zai"]);
+    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "ollama", "opencode-go", "openrouter", "typesafe", "zai"]);
     const zen = REGISTRY.find((r) => r.id === "opencode-go")!;
     expect(zen.entries).toHaveLength(3); // one config provider per wire family
     for (const e of zen.entries) {

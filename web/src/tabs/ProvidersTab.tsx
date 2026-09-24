@@ -380,6 +380,7 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
                 <option value="openai">openai</option>
                 <option value="anthropic">anthropic</option>
                 <option value="responses">responses</option>
+                <option value="classifier">classifier (System One /systemone)</option>
               </select>
             </div>
             <div className="field">
@@ -1148,8 +1149,8 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                           <td className="num">{fmtPrice(m.output)}</td>
                           <td className="num col-md">{cached ? `${fmtPrice(m.cache_read)} / ${fmtPrice(m.cache_write)}` : "—"}</td>
                           <td>
-                            <button className="btn sm" disabled={!entry} aria-label={`test ${prefixedId(r.prefix, m.id)}`}
-                              title={entry ? `test via ${entry.name}` : "unknown wire — expose the model first"}
+                            <button className="btn sm" disabled={!entry || m.family === "classifier"} aria-label={`test ${prefixedId(r.prefix, m.id)}`}
+                              title={m.family === "classifier" ? "decision model — no chat playground" : entry ? `test via ${entry.name}` : "unknown wire — expose the model first"}
                               onClick={() => testModel(entry, m)}>
                               <IconPlay size={12} />
                             </button>

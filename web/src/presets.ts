@@ -2,10 +2,10 @@
  *  A registry provider maps to one or more config providers (Zen needs one per wire). */
 export interface RegistryEntry {
   name: string;      // config provider name to create, e.g. "opencode-go"
-  wire: "openai" | "anthropic" | "responses";
+  wire: "openai" | "anthropic" | "responses" | "classifier";
   base_url: string;
   session?: string;
-  family: string;    // chat | anthropic | responses — which catalog models this entry serves
+  family: string;    // chat | anthropic | responses | classifier — which catalog models this entry serves
   familyLabel: string;
   defaults?: Record<string, unknown>; // merged into the create POST (provider tricks: cache injection, fast mode, …)
 }
@@ -69,9 +69,17 @@ export const REGISTRY: RegistryProvider[] = [
   },
   {
     id: "openrouter", title: "OpenRouter (OR)", code: "OR", prefix: "or",
-    desc: "457 models across 60+ vendors on one OpenAI-compatible endpoint — live pricing, prepaid credits, :free tier",
+    desc: "457 models across 60+ vendors on one OpenAI-compatible endpoint — live pricing, prepaid credits, :free tier. Jev (System One decisions) rides the classifier entry.",
     entries: [
       { name: "openrouter", wire: "openai", base_url: "https://openrouter.ai/api/v1", family: "chat", familyLabel: "All vendors · chat completions · :free tier" },
+      { name: "openrouter-classifier", wire: "classifier", base_url: "https://openrouter.ai/api/v1", family: "classifier", familyLabel: "TypeSafe Jev · System One decisions", defaults: { models: ["typesafe/jev-1.13", "~typesafe/jev-latest"] } },
+    ],
+  },
+  {
+    id: "typesafe", title: "TypeSafe (TS)", code: "TS", prefix: "jev",
+    desc: "TypeSafe System One decision models direct — Jev answers Choice/Noul/Score questions with probabilities; $0.042/Mtok input, output free",
+    entries: [
+      { name: "typesafe", wire: "classifier", base_url: "https://api.typesafe.ai/v1", family: "classifier", familyLabel: "Jev · decision model", defaults: { models: ["jev-latest", "jev-1.13.0"] } },
     ],
   },
   {
@@ -184,7 +192,7 @@ export function entryFor(r: RegistryProvider, p: { preset: string; name: string;
 
 /** Which catalog family a provider wire serves (preselects filters). */
 export const wireFamily = (wire: string): string =>
-  wire === "anthropic" ? "anthropic" : wire === "responses" ? "responses" : "chat";
+  wire === "anthropic" ? "anthropic" : wire === "responses" ? "responses" : wire === "classifier" ? "classifier" : "chat";
 
 /** Form fields a registry entry fills (legacy single-entry helper, still used by custom form). */
 export const presetToForm = (e: RegistryEntry) => ({

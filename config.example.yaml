@@ -68,6 +68,26 @@ providers:
     prefix: or
     auth: { type: static, keys: ["sk-or-..."] }
     models: [deepseek/deepseek-chat, deepseek/deepseek-r1]
+  # Jev (System One decision model) rides the same OpenRouter key on the
+  # classifier wire — /systemone, not /chat/completions. Jev is NOT in
+  # OpenRouter's /models catalog, so the curated list is required.
+  # - name: openrouter-classifier
+  #   base_url: https://openrouter.ai/api/v1
+  #   wire: classifier
+  #   prefix: or
+  #   auth: { type: static, keys: ["sk-or-..."] }
+  #   models: [typesafe/jev-1.13, "~typesafe/jev-latest"]
+
+  # --- TypeSafe System One direct (Jev decision model) ---
+  # Same request shape as OpenRouter's classifier surface: POST
+  # {base_url}/systemone with {model, state, questions}. $0.042/Mtok input,
+  # output tokens free. Dashboard preset: one-click create.
+  # - name: typesafe
+  #   base_url: https://api.typesafe.ai/v1
+  #   wire: classifier
+  #   prefix: jev
+  #   auth: { type: static, keys: ["ts-..."] }
+  #   models: [jev-latest, jev-1.13.0]
 
   # --- Ollama Cloud (https://ollama.com) ---
   # Open models served from Ollama's cloud. Dashboard preset: one-click create.

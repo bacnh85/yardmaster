@@ -323,8 +323,8 @@ func (r *Registry) Models() []string {
 		}
 	}
 	for _, p := range r.cfg.Providers {
-		if p.Disabled {
-			continue // disabled providers serve nothing, so advertise nothing
+		if p.Disabled || p.Wire == "classifier" {
+			continue // disabled providers and decision models advertise nothing
 		}
 		for _, m := range p.Models {
 			for _, id := range advertised(p.Prefix, m) {

@@ -102,3 +102,20 @@ func TestUsageAnthropicZaiStreamCacheInDelta(t *testing.T) {
 		t.Fatalf("got in=%d cacheR=%d out=%d, want 27/2688/8", u.In, u.CacheR, u.Out)
 	}
 }
+
+// System One decision bodies: usage is {input_tokens, output_tokens} and
+// output is always free — nothing else on this wire parses as usage.
+func TestUsageClassifierSystemOne(t *testing.T) {
+	u := ParseUsageJSON("classifier", []byte(`{"model":"typesafe/jev-1.13.0","answers":{"q":{"type":"noul","noul":0.96}},"usage":{"input_tokens":609,"output_tokens":0}}`))
+	if u.In != 609 || u.Out != 0 {
+		t.Fatalf("got in=%d out=%d, want 609/0", u.In, u.Out)
+	}
+	if u.Estimate {
+		t.Fatal("exact usage must not degrade to estimate")
+	}
+	// missing usage → estimate fallback (estBytes/4), never 0/0 silently
+	e := ParseUsageJSON("classifier", []byte(`{"answers":{}}`))
+	if !e.Estimate || e.In == 0 {
+		t.Fatalf("missing usage: got %+v, want estimate>0", e)
+	}
+}

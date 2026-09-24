@@ -232,6 +232,13 @@ func (s *Server) catalog(ctx context.Context, name string) ([]ModelMeta, error) 
 	if pv == nil {
 		return nil, fmt.Errorf("no provider %q", name)
 	}
+	// classifier providers speak /systemone, not chat: the shared base_url
+	// cache would otherwise serve another provider's chat rows (e.g. the 458
+	// OpenRouter chat models) under this provider. Curated-only metas instead.
+	if pv.Wire == proxy.WireClassifier {
+		_, devFlat := modelsDevSnapshot()
+		return curatedMetas(pv, nil, nil, devFlat), nil
+	}
 	var cached []ModelMeta
 	if e, ok := catalogCache.Load(pv.BaseURL); ok {
 		ce := e.(catalogEntry)
@@ -272,6 +279,7 @@ func (s *Server) catalog(ctx context.Context, name string) ([]ModelMeta, error) 
 // (context, pricing, capabilities) as upstream-listed ones. Family is never
 // taken from models.dev here: the curating entry's wire decides it.
 func curatedMetas(pv *config.Provider, cached []ModelMeta, dev map[string]modelsDevProvider, devFlat map[string]modelsDevModel) []ModelMeta {
+	isClassifier := pv.Wire == proxy.WireClassifier
 	known := make(map[string]bool, len(cached))
 	for _, m := range cached {
 		known[canonModelID(m.ID)] = true
@@ -296,7 +304,11 @@ func curatedMetas(pv *config.Provider, cached []ModelMeta, dev map[string]models
 		// -1 = unknown pricing, never 0 (fmtPrice renders 0 as "free"): a cold
 		// models.dev snapshot must degrade to "—", not to a free claim
 		mm := ModelMeta{ID: id, Manual: true, Input: -1, Output: -1}
-		if dm, ok := byID[canonModelID(id)]; ok {
+		if isClassifier {
+			// family follows the serving wire, never models.dev (which has no
+			// typesafe entry anyway) — drives the classifier badge + exclusions
+			mm.Family = "classifier"
+		} else if dm, ok := byID[canonModelID(id)]; ok {
 			applyDev(&mm, dm, false)
 		} else if dm, ok := devFlat[canonModelID(id)]; ok {
 			applyFlat(&mm, dm)
