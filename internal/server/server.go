@@ -485,18 +485,41 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			Model     string `json:"model"`
 			Prompt    string `json:"prompt"`
 			MaxTokens int    `json:"max_tokens"`
+			KeyIndex  int    `json:"key_index"`
+			Messages  []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil ||
-			req.Provider == "" || req.Model == "" || req.Prompt == "" {
-			http.Error(w, "provider, model and prompt are required", 400)
+			req.Provider == "" || req.Model == "" || (req.Prompt == "" && len(req.Messages) == 0) {
+			http.Error(w, "provider, model and prompt (or messages) are required", 400)
 			return
 		}
-		res, err := s.Proxy.Probe(r.Context(), req.Provider, req.Model, req.Prompt, req.MaxTokens)
+		// 400 (not Probe's 502) when the key index doesn't exist — the client
+		// picked the key, so it's a bad request, not an upstream failure.
+		// Omitted key_index (0) hits the first key like before; negative → first.
+		if pv := providerByName(s.Proxy.Reg.Config().Providers, req.Provider); pv != nil && len(pv.Auth.Keys) > 0 && req.KeyIndex >= len(pv.Auth.Keys) {
+			http.Error(w, "key index out of range", 400)
+			return
+		}
+		msgs := make([]proxy.ChatMessage, len(req.Messages))
+		for i, m := range req.Messages {
+			msgs[i] = proxy.ChatMessage{Role: m.Role, Content: m.Content}
+		}
+		if len(msgs) == 0 {
+			msgs = []proxy.ChatMessage{{Role: "user", Content: req.Prompt}}
+		}
+		res, err := s.Proxy.Probe(r.Context(), req.Provider, req.Model, msgs, req.MaxTokens, req.KeyIndex)
 		if err != nil {
 			http.Error(w, err.Error(), 502)
 			return
 		}
 		writeJSON(res)
+	case path == "catalog" && r.Method == "GET":
+		// aggregate model catalog across every enabled provider, deduped by
+		// canonical id; exposed=1 keeps only models some provider serves
+		writeJSON(map[string]any{"models": s.catalogRows(r.Context(), q.Get("exposed") == "1")})
 	case strings.HasPrefix(path, "providers/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		name := strings.TrimSuffix(strings.TrimPrefix(path, "providers/"), "/models")
 		models, err := s.catalog(r.Context(), name)

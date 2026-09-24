@@ -1,5 +1,5 @@
-export type Tab = "live" | "usage" | "cache" | "quota" | "latency" | "requests" | "endpoints" | "providers" | "settings";
-export const TABS: Tab[] = ["live", "usage", "cache", "quota", "latency", "requests", "endpoints", "providers", "settings"];
+export type Tab = "live" | "usage" | "cache" | "quota" | "latency" | "requests" | "endpoints" | "models" | "providers" | "settings";
+export const TABS: Tab[] = ["live", "usage", "cache", "quota", "latency", "requests", "endpoints", "models", "providers", "settings"];
 
 // hash -> tab. Supported: "#/usage" (canonical), "#tab=usage", "#pw=x&tab=usage"
 // (deep-link login; pw is consumed elsewhere). "keys" maps to "endpoints" in

@@ -13,6 +13,12 @@ import (
 	"github.com/bacnh85/yardmaster/internal/translate"
 )
 
+// ChatMessage is one playground conversation turn.
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // ProbeResult is the playground response for one one-shot request.
 type ProbeResult struct {
 	Text    string  `json:"text"`
@@ -23,10 +29,12 @@ type ProbeResult struct {
 	DurMs   float64 `json:"dur_ms"`
 }
 
-// Probe sends a one-shot non-streaming chat request to one provider (first
-// static key) and returns the assistant text + usage. OpenAI chat wire is the
-// hub: buildUpstream translates it to the provider's wire.
-func (p *Proxy) Probe(ctx context.Context, name, model, prompt string, maxTokens int) (ProbeResult, error) {
+// Probe sends a one-shot non-streaming chat request to one provider and
+// returns the assistant text + usage. keyIndex picks the static key
+// (out-of-range/negative → first, matching the old always-Keys[0] behavior).
+// OpenAI chat wire is the hub: buildUpstream translates it to the provider's
+// wire. Non-empty messages replaces the single user message from prompt.
+func (p *Proxy) Probe(ctx context.Context, name, model string, messages []ChatMessage, maxTokens, keyIndex int) (ProbeResult, error) {
 	var pv *config.Provider
 	for _, x := range p.Reg.Config().Providers {
 		if x.Name == name {
@@ -40,15 +48,25 @@ func (p *Proxy) Probe(ctx context.Context, name, model, prompt string, maxTokens
 	if pv.Auth.Type == "oauth" || len(pv.Auth.Keys) == 0 {
 		return ProbeResult{}, fmt.Errorf("provider %q has no static API key", name)
 	}
+	if keyIndex < 0 || keyIndex >= len(pv.Auth.Keys) {
+		keyIndex = 0
+	}
 	if maxTokens <= 0 || maxTokens > 4096 {
 		maxTokens = 256
 	}
+	if len(messages) == 0 {
+		messages = []ChatMessage{{Role: "user", Content: "hi"}}
+	}
 	upModel := provider.UpstreamModel(pv, model)
+	msgs := make([]any, len(messages))
+	for i, m := range messages {
+		msgs[i] = map[string]any{"role": m.Role, "content": m.Content}
+	}
 	req := map[string]any{
 		"model": upModel, "stream": false, "max_tokens": maxTokens,
-		"messages": []any{map[string]any{"role": "user", "content": prompt}},
+		"messages": msgs,
 	}
-	tgt := &provider.Target{Provider: pv, APIKey: pv.Auth.Keys[0], AuthType: "static"}
+	tgt := &provider.Target{Provider: pv, APIKey: pv.Auth.Keys[keyIndex], AuthType: "static"}
 	httpReq, err := p.buildUpstream(ctx, tgt, WireOpenAI, upModel, req, nil, true, "")
 	if err != nil {
 		return ProbeResult{}, err

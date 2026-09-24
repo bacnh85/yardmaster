@@ -179,6 +179,7 @@ func TestKeyRotationRestampsCreatedAt(t *testing.T) {
 		return keyRow{}
 	}
 	orig := get()
+	time.Sleep(2 * time.Millisecond) // rotation re-stamps at ms granularity — same-ms rotate would trip the re-stamp assert
 	if code, b := adminDo(t, ts, "PUT", "keys/rot", `{"key":"ar-rotated-secret"}`); code != 200 {
 		t.Fatalf("rotate: %d %s", code, b)
 	}

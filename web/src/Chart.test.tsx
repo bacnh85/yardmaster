@@ -30,6 +30,9 @@ vi.mock("uplot", () => ({
       plots.push(p);
       return p;
     }
+    // real uPlot carries the path-builder factories (spline etc.); the mock
+    // mirrors the ones TimeChart may call at opts-build time
+    static paths = { spline: () => (u: unknown) => null };
   },
 }));
 vi.mock("uplot/dist/uPlot.min.css", () => ({}));
@@ -66,6 +69,20 @@ function mount(ui: React.ReactNode) {
 const rerender = (ui: React.ReactNode) => act(() => root!.render(ui));
 
 describe("TimeChart lifecycle", () => {
+  it("smooth sets spline paths, legend.live is always false (tooltip replaces it)", () => {
+    mount(<TimeChart data={pts(24)} series={SERIES} />);
+    let opts = plots[0].opts as uPlot.Options;
+    expect((opts.legend as uPlot.Legend).live).toBe(false);
+    expect((opts.series as uPlot.Series[])[1].paths).toBeUndefined(); // default stays linear
+
+    plots.length = 0;
+    mount(<TimeChart data={pts(24)} series={SERIES} smooth />);
+    opts = plots[0].opts as uPlot.Options;
+    expect(typeof (opts.series as uPlot.Series[])[1].paths).toBe("function"); // spline builder
+    expect((opts.legend as uPlot.Legend).live).toBe(false);
+    expect((opts.plugins as unknown[]).length).toBe(1); // tooltip plugin present
+  });
+
   it("builds once and setData's in place when only data changes (poll tick)", () => {
     mount(<TimeChart data={pts(24)} series={SERIES} />);
     rerender(<TimeChart data={pts(24, 2_000_000_000_000)} series={SERIES} />);

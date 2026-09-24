@@ -13,6 +13,7 @@ import { QuotaTab } from "./tabs/QuotaTab";
 import { LatencyTab } from "./tabs/LatencyTab";
 import { RequestsTab } from "./tabs/RequestsTab";
 import { EndpointsTab } from "./tabs/EndpointsTab";
+import { ModelsTab } from "./tabs/ModelsTab";
 import { ProvidersTab } from "./tabs/ProvidersTab";
 import { SettingsTab } from "./tabs/SettingsTab";
 
@@ -30,6 +31,7 @@ const NAV: { group: string; tabs: { id: Tab; label: string; icon: React.ReactNod
   {
     group: "Access", tabs: [
       { id: "endpoints", label: "Endpoints", icon: <IconKey /> },
+      { id: "models", label: "Models", icon: <IconList /> },
       { id: "providers", label: "Providers", icon: <IconServer /> },
     ],
   },
@@ -128,6 +130,7 @@ export default function App() {
         {tab === "latency" && <LatencyTab />}
         {tab === "requests" && <RequestsTab />}
         {tab === "endpoints" && <EndpointsTab />}
+        {tab === "models" && <ModelsTab />}
         {tab === "providers" && (
           <ProvidersTab detail={providerDetail} onOpenDetail={openProviderDetail} onCloseDetail={closeProviderDetail} />
         )}

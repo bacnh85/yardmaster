@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult, QuotaGroup, CooldownRow } from "../api";
-import { useApi, usePoll } from "../hooks";
+import { useApi, usePoll, useSorted } from "../hooks";
 import { Confirm, Empty, ErrorBanner, Modal, PageHead, Skeleton, toast } from "../components";
 import { IconEdit, IconPlay, IconX } from "../icons";
+import { Playground, type PgTarget } from "../Playground";
 import { QuotaTable, isQuotaProvider } from "./QuotaTab";
-import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPlan, planLadder, normPlan, CmdPlan } from "../presets";
+import { REGISTRY, RegistryProvider, RegistryEntry, entryFor, wireFamily, cmdPlan, planLadder, normPlan, CmdPlan, registryFor } from "../presets";
 
 interface ProviderForm {
   name: string; wire: string; base_url: string; models: string; prefix: string;
@@ -222,6 +223,20 @@ export const withCurated = (catalog: CatalogModel[], group: ProviderRow[]): Cata
 export const isCuratedModel = (group: ProviderRow[], id: string): boolean =>
   group.some((p) => p.models.includes(id));
 
+/** Playground targets for a model: every provider in the group whose models
+ *  list contains it (or is a wildcard). preferred names the family provider
+ *  resolved by the ▶ handler — used alone when the model isn't exposed yet
+ *  (catalog-only rows are still testable through their wire's key). */
+export const pgTargetsFor = (group: ProviderRow[], id: string, preferred?: string): PgTarget[] => {
+  const hits = group.filter((p) => p.models.length === 0 || p.models.includes(id));
+  const pool = hits.length > 0 ? hits : group.filter((p) => p.name === preferred);
+  return pool.map((p) => ({
+    provider: p.name,
+    models: p.models,
+    connections: p.connections,
+  }));
+};
+
 /** Next models list for one row's checkbox. Curated removal uses the entry's own
  *  list as the universe so bulkNextModels still refuses (null) when the hide
  *  would empty a curated entry ([] = wildcard serve-everything); show and
@@ -319,7 +334,7 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<ProviderRow | null>(null);
-  const [pg, setPg] = useState<null | { provider: string; model: string; prompt: string; busy: boolean; err: string; res: ProbeResult | null }>(null);
+  const [pg, setPg] = useState<null | { provider: string; model: string }>(null);
 
   const set = (k: keyof ProviderForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setForm((f) => f && { ...f, [k]: e.target.type === "checkbox" ? (e.target as HTMLInputElement).checked : e.target.value });
@@ -344,17 +359,7 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
     catch (e2) { toast(String(e2), "err"); }
   };
   const openPlayground = (p: ProviderRow) =>
-    setPg({ provider: p.name, model: p.models[0] ?? "", prompt: "Reply with the single word: pong", busy: false, err: "", res: null });
-  const runPlayground = async () => {
-    if (!pg || !pg.model || !pg.prompt.trim() || pg.busy) return;
-    setPg({ ...pg, busy: true, err: "", res: null });
-    try {
-      const res = (await post("playground", { provider: pg.provider, model: pg.model, prompt: pg.prompt, max_tokens: 256 })) as ProbeResult;
-      setPg((s) => s && { ...s, busy: false, res });
-    } catch (e2) {
-      setPg((s) => s && { ...s, busy: false, err: String(e2 instanceof Error ? e2.message : e2) });
-    }
-  };
+    setPg({ provider: p.name, model: p.models[0] ?? "" });
 
   return (
     <>
@@ -493,46 +498,19 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
 
       {pg && (
         <Modal title={`Playground: ${pg.provider}`} onClose={() => setPg(null)} wide>
-          <div className="form-grid">
-            <div className="field">
-              <label htmlFor="pg-model">model</label>
-              <select id="pg-model" value={pg.model} onChange={(e) => setPg({ ...pg, model: e.target.value })}>
-                {pg.model === "" && <option value="">(configure provider models first)</option>}
-                {(provs.find((p) => p.name === pg.provider)?.models ?? []).map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            </div>
-            <div className="field full">
-              <label htmlFor="pg-prompt">prompt</label>
-              <textarea id="pg-prompt" rows={3} value={pg.prompt} onChange={(e) => setPg({ ...pg, prompt: e.target.value })} />
-            </div>
-          </div>
-          <div className="row" style={{ marginTop: 12 }}>
-            <button className="btn primary" onClick={runPlayground} disabled={pg.busy || !pg.model || !pg.prompt.trim()}>
-              {pg.busy ? "running…" : "run"}
-            </button>
-          </div>
-          {pg.err && <div className="form-error" style={{ marginTop: 12 }}>{pg.err}</div>}
-          {pg.res && <PlaygroundResult res={pg.res} />}
+          {pg.model ? (
+            <Playground
+              key={`${pg.provider}:${pg.model}`}
+              targets={[{ provider: pg.provider, models: provs.find((p) => p.name === pg.provider)?.models ?? [], connections: provs.find((p) => p.name === pg.provider)?.connections ?? [] }]}
+              model={pg.model}
+              onModel={(m) => setPg((s) => s && { ...s, model: m })}
+            />
+          ) : (
+            <Empty>this provider has no models configured — add some first</Empty>
+          )}
         </Modal>
       )}
     </>
-  );
-}
-
-function PlaygroundResult({ res }: { res: ProbeResult }) {
-  return (
-    <div style={{ marginTop: 12 }}>
-      <div className="field"><label>response</label></div>
-      <div className="config-pre" style={{ whiteSpace: "pre-wrap" }}>{res.text || "(empty response)"}</div>
-      <div className="provider-meta" style={{ marginTop: 8 }}>
-        <span><span className="muted">tokens:</span> {res.tok_in} in / {res.tok_out} out</span>
-        <span><span className="muted">TTFT:</span> {res.ttft_ms}ms</span>
-        <span><span className="muted">duration:</span> {res.dur_ms}ms</span>
-        <span><span className="muted">est. cost:</span> ${res.cost_usd.toFixed(6)}</span>
-      </div>
-    </div>
   );
 }
 
@@ -550,8 +528,8 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   const [key, setKey] = useState("");
   const [subPlan, setSubPlan] = useState<"" | CmdPlan>("");
   const [addBusy, setAddBusy] = useState(false);
-  // per-model playground result
-  const [test, setTest] = useState<null | { model: string; busy: boolean; err: string; res: ProbeResult | null }>(null);
+  // per-model playground: the ▶ button pre-selects model + wire entry
+  const [test, setTest] = useState<null | { model: string; entry?: string; busy: boolean; err: string; res: ProbeResult | null }>(null);
   const [catalog, setCatalog] = useState<null | { loading: boolean; err: string; models: CatalogModel[] }>(null);
   const catReq = useRef(0);
   const [familyFilter, setFamilyFilter] = useState<"all" | "exposed" | "free" | "paid">("all");
@@ -830,18 +808,14 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     serveOn({ id }, family);
   };
 
-  const testModel = async (entry: RegistryEntry | undefined, m: CatalogModel) => {
+  /** ▶ test: open the shared playground pre-selected on this model — the
+   *  conversation thread, key picker and metrics live there now. */
+  const testModel = (entry: RegistryEntry | undefined, m: CatalogModel) => {
     const sub = entry ? group.find((p) => p.name === entry.name) : undefined;
     if (!sub) { toast("no provider serves this model family", "err"); return; }
-    setTest({ model: m.id, busy: true, err: "", res: null });
-    try {
-      const res = (await post("playground", { provider: sub.name, model: m.id, prompt: "Reply with the single word: pong", max_tokens: 32 })) as ProbeResult;
-      setTest({ model: m.id, busy: false, err: "", res });
-    } catch (e2) {
-      setTest({ model: m.id, busy: false, err: String(e2 instanceof Error ? e2.message : e2).slice(0, 200), res: null });
-    }
+    setTest({ model: m.id, entry: sub.name, busy: false, err: "", res: null });
+    requestAnimationFrame(() => document.querySelector(".pg")?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
   };
-
   /** Expose every catalog model of one wire family on its entry's models list. */
   const exposeAll = async (e: RegistryEntry) => {
     if (!catalog?.models.length) { toast("load the catalog first", "err"); return; }
@@ -870,6 +844,15 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     (m.manual || planFilter === "all" || planOf(m.id) === planFilter) &&
     (familyFilter === "all" || (familyFilter === "exposed" ? isVisible(m) : m.manual ? false : familyFilter === "free" ? m.free : !m.free)) &&
     (!filter || prefixedId(r.prefix, m.id).includes(filter)));
+  // sort rows: -1 prices → null so "—" rows sort last (cmpVals null-last);
+  // cached price keeps the 0 = no-cache convention (sorts as 0)
+  const sortRows = useMemo(() => shown.map((m) => ({ m,
+    model: prefixedId(r.prefix, m.id), family: familyFor(group, m),
+    context: m.context ?? 0, max_output: m.max_output ?? 0,
+    in_price: m.input < 0 ? null : m.input, out_price: m.output < 0 ? null : m.output,
+    cache_price: m.cache_read > 0 || m.cache_write > 0 ? m.cache_read : null,
+  })), [shown, r.prefix, group]);
+  const sorted = useSorted(sortRows, "model", 1);
   // rows without a resolvable wire ("serve on…", no checkbox) can never be
   // toggled — the bulk toggle's state and click must ignore them, or the
   // button reads "[ ] show all" forever and clicking it looks dead
@@ -1107,14 +1090,19 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                 <table>
                   <thead>
                     <tr>
-                      <th>visible</th><th>model</th><th className="col-lg">family</th>
-                      <th className="num">context</th><th className="num col-md">max out</th>
-                      <th className="num">$ in</th><th className="num">$ out</th><th className="num col-md">$ cache r/w</th>
+                      <th>visible</th>
+                      {sorted.th("model", "model")}
+                      {sorted.th("family", "family", false, "col-lg")}
+                      {sorted.th("context", "context", true)}
+                      {sorted.th("max_output", "max out", true, "col-md")}
+                      {sorted.th("in_price", "$ in", true)}
+                      {sorted.th("out_price", "$ out", true)}
+                      {sorted.th("cache_price", "$ cache r/w", true, "col-md")}
                       <th>test</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {shown.map((m) => {
+                    {sorted.sorted.map(({ m }) => {
                       const entry = r.entries.find((e) => e.family === familyFor(group, m));
                       const cached = m.cache_read > 0 || m.cache_write > 0;
                       return (
@@ -1160,7 +1148,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                           <td className="num">{fmtPrice(m.output)}</td>
                           <td className="num col-md">{cached ? `${fmtPrice(m.cache_read)} / ${fmtPrice(m.cache_write)}` : "—"}</td>
                           <td>
-                            <button className="btn sm" disabled={!entry || test?.busy} aria-label={`test ${prefixedId(r.prefix, m.id)}`}
+                            <button className="btn sm" disabled={!entry} aria-label={`test ${prefixedId(r.prefix, m.id)}`}
                               title={entry ? `test via ${entry.name}` : "unknown wire — expose the model first"}
                               onClick={() => testModel(entry, m)}>
                               <IconPlay size={12} />
@@ -1175,10 +1163,12 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
             )}
             {test && (
               <div style={{ marginTop: 12 }}>
-                <div className="field"><label>test: {prefixedId(r.prefix, test.model)}</label></div>
-                {test.busy && <div className="faint" style={{ padding: 8 }}>running…</div>}
-                {test.err && <div className="form-error">{test.err}</div>}
-                {test.res && <PlaygroundResult res={test.res} />}
+                <Playground
+                  key={`${test.model}`}
+                  targets={pgTargetsFor(group, test.model, test.entry)}
+                  model={test.model}
+                  onModel={() => {}} // detail table tests probe one fixed model
+                />
               </div>
             )}
           </>

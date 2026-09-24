@@ -11,6 +11,7 @@
   --chart-fill: rgba(17, 94, 89, 0.08);
   --grid: #E7E5E4; --axis: #78716C;
   --shadow: 0 1px 2px rgb(28 25 23 / 0.06), 0 1px 3px rgb(28 25 23 / 0.05);
+  --elevation-md: 0 4px 12px rgb(28 25 23 / 0.10); /* popover/live panel (DESIGN.md md) */
   --skeleton: linear-gradient(90deg, #E7E5E4 25%, #F0EFED 37%, #E7E5E4 63%);
   --radius-sm: 6px; --radius-md: 10px;
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -395,10 +396,49 @@ th.sortable:focus-visible, tr.clickable:focus-visible {
 .empty { color: var(--faint); padding: 24px; text-align: center; }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); font-size: 12px; }
-.chart { width: 100%; }
+.chart { width: 100%; position: relative; } /* anchor for .u-tip */
 .chart .empty { padding: 48px 24px; }
 .uplot { width: 100%; }
 .uplot .u-legend { font-size: 12px; }
+/* hover tooltip (tooltipPlugin): popover = md elevation per DESIGN.md */
+.u-tip {
+  position: absolute; z-index: 5; pointer-events: none;
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  box-shadow: var(--elevation-md);
+  padding: 6px 10px; font-size: 12px; white-space: nowrap;
+}
+.u-tip-head { color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.u-tip-row { display: flex; align-items: center; gap: 6px; }
+.u-tip-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.u-tip-label { color: var(--muted); }
+.u-tip-val { font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 12px; }
+
+/* shared playground (Models tab + provider detail) */
+.pg { display: grid; gap: 12px; }
+.pg-pickers { display: flex; gap: 12px; flex-wrap: wrap; }
+.pg-pickers .field select { min-width: 200px; }
+.pg-thread {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 340px; overflow-y: auto;
+  background: var(--surface2); border-radius: var(--radius-sm); padding: 12px;
+}
+.pg-msg { max-width: 85%; font-size: 13px; }
+.pg-msg.user { align-self: flex-end; }
+.pg-msg .pg-role { display: block; font-size: 11px; color: var(--faint); margin-bottom: 2px; }
+.pg-msg .pg-text {
+  white-space: pre-wrap; word-break: break-word;
+  background: var(--surface); border-radius: var(--radius-sm); padding: 8px 10px;
+}
+.pg-msg.assistant .pg-text { background: var(--accent-soft); }
+.pg-thinking { padding: 2px 0; }
+.pg-metrics { margin: 0; }
+.pg-input { display: flex; gap: 8px; align-items: flex-end; }
+.pg-input textarea { flex: 1; resize: none; min-height: 37px; }
+
+/* filter chips (Models toolbar): a seg-style toggle for boolean flags */
+.chip { padding: 2px 10px; font-size: 13px; color: var(--muted); }
+.chip[aria-pressed="true"], .chip.chip-on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
 .config-pre {
   background: var(--surface2); padding: 12px; border-radius: var(--radius-sm);
   overflow-x: auto; font-size: 12px; margin: 8px 0;

@@ -118,7 +118,7 @@ export function UsageTab() {
           </div>
           <div className="card">
             <h3>Tokens &amp; cost</h3>
-            <TimeChart data={sum.series} height={220}
+            <TimeChart data={sum.series} height={220} smooth
               series={[{ key: "tok_in", label: "tok in" }, { key: "tok_out", label: "tok out" }, { key: "cost", label: "cost (USD)", axis: 2 }]} />
           </div>
           <div className="card">
@@ -129,7 +129,7 @@ export function UsageTab() {
           {pivot.rows.length > 0 && (
             <div className="card">
               <h3>Tokens by model</h3>
-              <TimeChart data={pivot.rows} height={220}
+              <TimeChart data={pivot.rows} height={220} smooth
                 series={pivot.models.map((m) => ({ key: m, label: m }))} />
             </div>
           )}
