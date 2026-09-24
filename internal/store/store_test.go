@@ -80,6 +80,27 @@ func TestBreakdownCarriesCacheWrite(t *testing.T) {
 		t.Fatalf("card total %d != breakdown total %d — tables would under-count",
 			sum.TokIn+sum.CacheRead+sum.CacheWrite, sumTokIn+sumCR+sumCW)
 	}
+	// Cache-tab fields: exactly one of the two rows hit (cache_read > 0)
+	if sum.CachedRequests != 1 {
+		t.Fatalf("summary cached_requests = %d, want 1", sum.CachedRequests)
+	}
+	for _, b := range rows {
+		want := int64(1)
+		if b.Name == "m2" {
+			want = 0
+		}
+		if b.CachedReqs != want {
+			t.Fatalf("breakdown %s cached_requests = %d, want %d", b.Name, b.CachedReqs, want)
+		}
+	}
+	// series carries cache_read for the cached-vs-fresh chart
+	var seriesCR int64
+	for _, p := range sum.Series {
+		seriesCR += p.CacheRd
+	}
+	if seriesCR != 30 {
+		t.Fatalf("series cache_read = %d, want 30", seriesCR)
+	}
 }
 
 // TimeSeriesByModel groups by (bucket, model); tok_in stays cache-exclusive
@@ -210,7 +231,10 @@ func TestSummarySinceLongRangeSkipsPercentiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 5*time.Second {
+	// ponytail: wall-clock bound only catches an O(n²) regression (minutes);
+	// 5s flaked in CI (-race + 2-core runner + 93k rows) — 30s still fails
+	// loud if percentile collection ever comes back
+	if time.Since(start) > 30*time.Second {
 		t.Fatalf("year-range summary too slow: %v (ttft skip regressed?)", time.Since(start))
 	}
 	if sum.TTFTp50 != nil {
