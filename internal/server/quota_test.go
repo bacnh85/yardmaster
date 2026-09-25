@@ -811,3 +811,73 @@ func TestQuotaOpenRouterCredits(t *testing.T) {
 		t.Errorf("upstream fetches %d, want 4", hits)
 	}
 }
+
+// Deleting a connection key must drop its usage row immediately: the key
+// handlers invalidate the shared 60s quota cache, so the next plain GET (no
+// ?refresh=1, no sleep) rebuilds without the removed key.
+func TestQuotaDeleteInvalidatesCache(t *testing.T) {
+	hits := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(ccCreditsJSON))
+	}))
+	defer up.Close()
+	resetQuotaCache(t, &hits, up.URL)
+
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "cmdcode", BaseURL: "https://api.commandcode.ai/provider/v1", Wire: "openai", Preset: "cmdcode",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"k1-secret", "k2-secret"}, KeyLabels: []string{"Alpha", "Beta"}}},
+		},
+	}
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	reg := provider.New(cfg)
+	p := proxy.NewProxy(reg, st, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, cfgPath, "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	adminDo(t, ts, "GET", "quota", "")
+	var out struct {
+		Quotas []struct {
+			Accounts []map[string]any `json:"accounts"`
+		} `json:"quotas"`
+	}
+	decode := func() int {
+		code, b := adminDo(t, ts, "GET", "quota", "")
+		if code != 200 {
+			t.Fatalf("quota GET: %d %s", code, b)
+		}
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatalf("decode: %v\n%s", err, b)
+		}
+		return len(out.Quotas[0].Accounts)
+	}
+	// warm the cache: two accounts visible
+	if n := decode(); n != 2 {
+		t.Fatalf("warm: %d accounts, want 2", n)
+	}
+	// delete key 1 (index-addressed) — the cache must NOT serve the stale 2-row report
+	if code, b := adminDo(t, ts, "DELETE", "providers/cmdcode/keys/0", ""); code != 200 {
+		t.Fatalf("key delete: %d %s", code, b)
+	}
+	if n := decode(); n != 1 {
+		t.Fatalf("post-delete: %d accounts, want 1 (cache was not invalidated)", n)
+	}
+	if out.Quotas[0].Accounts[0]["label"] != "Beta" {
+		t.Errorf("remaining account %v, want Beta", out.Quotas[0].Accounts[0]["label"])
+	}
+}

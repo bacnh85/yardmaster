@@ -53,10 +53,11 @@ type Provider struct {
 }
 
 type AuthConf struct {
-	Type      string       `yaml:"type"` // static | oauth
-	Keys      []string     `yaml:"keys"`
-	KeyLabels []string     `yaml:"key_labels"` // optional, index-aligned with Keys
-	OAuth     []*OAuthAcct `yaml:"oauth_accounts"`
+	Type        string   `yaml:"type"` // static | oauth
+	Keys        []string `yaml:"keys"`
+	KeyLabels   []string `yaml:"key_labels"`   // optional, index-aligned with Keys
+	KeyDisabled []bool   `yaml:"key_disabled"` // optional, index-aligned with Keys; true = key excluded from dispatch
+	OAuth       []*OAuthAcct `yaml:"oauth_accounts"`
 }
 
 // KeyLabel returns the display label for key i (default "Key N").

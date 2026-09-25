@@ -249,6 +249,20 @@ describe("registry", () => {
     expect(rows[0].targets).toHaveLength(3);
   });
 
+  it("derives disabled from the targets: enabled iff any target key is enabled", () => {
+    const zen = REGISTRY.find((r) => r.id === "opencode-go")!;
+    const provs = [
+      row({ name: "opencode-go", preset: "opencode-go", connections: [{ label: "A", suffix: "…aaa", disabled: true }] }),
+      row({ name: "opencode-go-claude", preset: "opencode-go", wire: "anthropic", connections: [{ label: "A", suffix: "…aaa", disabled: false }] }),
+    ];
+    expect(connRows(groupFor(zen, provs))[0].disabled).toBe(false);
+    const allOff = [
+      row({ name: "opencode-go", preset: "opencode-go", connections: [{ label: "A", suffix: "…aaa", disabled: true }] }),
+      row({ name: "opencode-go-claude", preset: "opencode-go", wire: "anthropic", connections: [{ label: "A", suffix: "…aaa", disabled: true }] }),
+    ];
+    expect(connRows(groupFor(zen, allOff))[0].disabled).toBe(true);
+  });
+
   it("keeps distinct keys in separate connection rows", () => {
     const zen = REGISTRY.find((r) => r.id === "opencode-go")!;
     const provs = [
@@ -328,7 +342,7 @@ describe("registry", () => {
     it("connSeedPlan/planTargetsToWrite: a label-only save never rewrites tiers (reviewer regression)", () => {
       const conn = (label: string, suffix: string) => ({ label, suffix });
       const heterogeneous: ConnRow = {
-        suffix: "…abc123", label: "OL one",
+        suffix: "…abc123", label: "OL one", disabled: false,
         targets: [
           { p: { ...baseRow, name: "ollama", preset: "ollama", connections: [conn("OL one", "…abc123")] }, idx: 0 },
           { p: { ...baseRow, name: "ollama-claude", preset: "ollama", subscription: "pro", connections: [conn("OL one", "…abc123")] }, idx: 0 },

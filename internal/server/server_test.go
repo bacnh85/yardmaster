@@ -849,7 +849,7 @@ func TestCatalogDoesNotMutateConfigModels(t *testing.T) {
 	resetModelsDevCache()
 	t.Cleanup(func() { modelsDevURL = oldURL; resetModelsDevCache() })
 
-	models, err := s.catalog(context.Background(), "ocg") // upstream :1 is unreachable → fallback
+	models, err := s.catalog(context.Background(), "ocg", false) // upstream :1 is unreachable → fallback
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -906,7 +906,7 @@ func TestCatalogManualModelsEnriched(t *testing.T) {
 	cfg := buildCfg()
 	srv := New(proxy.NewProxy(provider.New(cfg), st, cfg.CostFor), auth.NewKeyStore(cfg.Keys), st, "", "pw", "test")
 
-	metas, err := srv.catalog(context.Background(), "zai")
+	metas, err := srv.catalog(context.Background(), "zai", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -954,7 +954,7 @@ func TestCatalogManualModelsEnriched(t *testing.T) {
 	cfg2.Defaults()
 	cfg2.Validate()
 	srv2 := New(proxy.NewProxy(provider.New(cfg2), st, cfg2.CostFor), auth.NewKeyStore(cfg2.Keys), st, "", "pw", "test")
-	m2, err := srv2.catalog(context.Background(), "zai-claude")
+	m2, err := srv2.catalog(context.Background(), "zai-claude", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1135,7 +1135,7 @@ func TestUpstreamModelsEndpoints(t *testing.T) {
 	p.Version = "test"
 	srv := New(p, auth.NewKeyStore(cfg.Keys), st, "", "pw", "test")
 
-	metas, err := srv.catalog(context.Background(), "cmdcode")
+	metas, err := srv.catalog(context.Background(), "cmdcode", false)
 	if err != nil {
 		t.Fatal(err)
 	}

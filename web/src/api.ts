@@ -62,7 +62,7 @@ export interface ProviderRow {
   zcode_signing?: boolean; // absent from older servers → prefill degrades to false
   extra_headers?: Record<string, string> | null;
   body_overrides?: Record<string, unknown> | null;
-  connections: { label: string; suffix: string }[];
+  connections: { label: string; suffix: string; disabled?: boolean }[];
   accounts: { name: string; kind: string; disabled: boolean; expires_at: number; state?: string; last_error?: string }[];
 }
 export interface RouteRow {

@@ -187,7 +187,16 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 				targets = append(targets, &Target{Provider: p, AuthType: "oauth", AcctName: a.Name})
 			}
 		default: // static
-			keys := append([]string(nil), p.Auth.Keys...)
+			// per-connection disable: a key flagged key_disabled never dispatches
+			// (flags are index-aligned with the STORED keys — filter in one pass,
+			// never mutate in place or the indexes shift out of alignment)
+			keys := make([]string, 0, len(p.Auth.Keys))
+			for i, k := range p.Auth.Keys {
+				if i < len(p.Auth.KeyDisabled) && p.Auth.KeyDisabled[i] {
+					continue
+				}
+				keys = append(keys, k)
+			}
 			if effectiveRotation(p, r.cfg.Routing.Rotation) == "round_robin" {
 				keys = rotate(keys, nextCount(&r.rr, p.Name))
 			}

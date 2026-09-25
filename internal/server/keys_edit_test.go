@@ -461,3 +461,81 @@ func TestProviderConnectionEditPadsMissingLabels(t *testing.T) {
 		t.Errorf("idx 1 label after idx 0 edit: %v, want L1", got)
 	}
 }
+
+// Per-connection enable/disable: PUT keys/<idx> {"disabled":bool} flags the
+// key, GET providers reports it, routing (Registry.Resolve) skips the key, a
+// label/key round-trip preserves the flag, and a full provider PUT with
+// keyDisabled omitted keeps it.
+func TestProviderConnectionDisable(t *testing.T) {
+	ts, cfg, _ := keysEditHarness(t)
+
+	connsOf := func(name string) []map[string]any {
+		code, b := adminDo(t, ts, "GET", "providers", "")
+		if code != 200 {
+			t.Fatalf("providers GET: %d %s", code, b)
+		}
+		var out struct {
+			Providers []struct {
+				Name        string           `json:"name"`
+				Connections []map[string]any `json:"connections"`
+			} `json:"providers"`
+		}
+		json.Unmarshal(b, &out)
+		for _, p := range out.Providers {
+			if p.Name == name {
+				return p.Connections
+			}
+		}
+		t.Fatalf("provider %s missing", name)
+		return nil
+	}
+
+	// disable key idx 0
+	if code, b := adminDo(t, ts, "PUT", "providers/reg/keys/0", `{"disabled":true}`); code != 200 {
+		t.Fatalf("disable: %d %s", code, b)
+	}
+	c := connsOf("reg")
+	if c[0]["disabled"] != true || c[1]["disabled"] != false {
+		t.Fatalf("flags after disable: %+v", c)
+	}
+
+	// routing must skip the disabled key: Resolve yields only sk-two's target.
+	// (mutate() hot-swaps a fresh config into the server's own registry, so the
+	// harness cfg pointer is stale — flag it directly to exercise Registry.)
+	cfg.Providers[0].Auth.KeyDisabled = []bool{true, false}
+	reg := provider.New(cfg)
+	targets := reg.Resolve("m", []string{"*"})
+	if len(targets) != 1 || targets[0].APIKey != "sk-two" {
+		t.Fatalf("routing after disable: %+v, want only sk-two", targets)
+	}
+
+	// a label edit (key/label round-trip) must preserve the disabled flag
+	if code, b := adminDo(t, ts, "PUT", "providers/reg/keys/0", `{"label":"OL one"}`); code != 200 {
+		t.Fatalf("label edit: %d %s", code, b)
+	}
+	c = connsOf("reg")
+	if c[0]["disabled"] != true {
+		t.Fatalf("flag lost on label edit: %+v", c)
+	}
+
+	// full provider PUT (model toggles etc. — keyDisabled omitted) keeps flags
+	if code, b := adminDo(t, ts, "PUT", "providers/reg", `{"name":"reg","wire":"openai","base_url":"http://127.0.0.1:1","models":["m"],"preset":"ollama","subscription":"free"}`); code != 200 {
+		t.Fatalf("provider put: %d %s", code, b)
+	}
+	if c := connsOf("reg"); c[0]["disabled"] != true || c[1]["disabled"] != false {
+		t.Fatalf("flags lost on provider PUT: %+v", c)
+	}
+
+	// re-enable
+	if code, b := adminDo(t, ts, "PUT", "providers/reg/keys/0", `{"disabled":false}`); code != 200 {
+		t.Fatalf("enable: %d %s", code, b)
+	}
+	cfg.Providers[0].Auth.KeyDisabled = []bool{false, false}
+	targets = provider.New(cfg).Resolve("m", []string{"*"})
+	if len(targets) != 2 {
+		t.Fatalf("routing after re-enable: %d targets, want 2", len(targets))
+	}
+	if c := connsOf("reg"); c[0]["disabled"] != false {
+		t.Fatalf("flag after re-enable: %+v", c)
+	}
+}

@@ -7,7 +7,7 @@ import { IconPlay } from "./icons";
 export interface PgTarget {
   provider: string; // config provider name (key source)
   models: string[];
-  connections: { label: string; suffix: string }[]; // key picker options
+  connections: { label: string; suffix: string; disabled?: boolean }[]; // key picker options
 }
 
 /** Shared chat playground: model + key pickers, conversation thread, Enter-to-send.
@@ -75,7 +75,7 @@ export function Playground({ targets, model, onModel }: {
           <label htmlFor="pg-key">Select key</label>
           <select id="pg-key" value={Math.min(keyIndex, Math.max(0, keys.length - 1))}
             onChange={(e) => setKeyIndex(Number(e.target.value))}>
-            {keys.map((c, i) => <option key={`${c.suffix}-${i}`} value={i}>{c.label || "key"} …{c.suffix}</option>)}
+            {keys.map((c, i) => <option key={`${c.suffix}-${i}`} value={i}>{c.label || "key"} …{c.suffix}{c.disabled ? " (disabled)" : ""}</option>)}
           </select>
         </div>
       </div>

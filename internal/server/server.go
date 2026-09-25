@@ -356,7 +356,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		for _, p := range s.Proxy.Reg.Config().Providers {
 			conns := make([]map[string]any, 0, len(p.Auth.Keys))
 			for i, k := range p.Auth.Keys {
-				conns = append(conns, map[string]any{"label": p.Auth.KeyLabel(i), "suffix": suffix(k)})
+				conns = append(conns, map[string]any{"label": p.Auth.KeyLabel(i), "suffix": suffix(k),
+					"disabled": i < len(p.Auth.KeyDisabled) && p.Auth.KeyDisabled[i]})
 			}
 			out = append(out, map[string]any{
 				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
@@ -534,7 +535,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(map[string]any{"models": s.catalogRows(r.Context(), q.Get("exposed") == "1")})
 	case strings.HasPrefix(path, "providers/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		name := strings.TrimSuffix(strings.TrimPrefix(path, "providers/"), "/models")
-		models, err := s.catalog(r.Context(), name)
+		// ?refresh=1 busts the base_url catalog cache — the dashboard refresh
+		// button must fetch upstream, not re-serve the 1h-cached entry
+		models, err := s.catalog(r.Context(), name, q.Get("refresh") == "1")
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
@@ -572,6 +575,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}) {
 			return
 		}
+		invalidateQuotaReport()
 		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "providers/") && strings.Contains(path, "/keys/") && r.Method == "DELETE":
 		rest := strings.TrimPrefix(path, "providers/")
@@ -596,6 +600,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					if idx < len(x.Auth.KeyLabels) {
 						x.Auth.KeyLabels = append(x.Auth.KeyLabels[:idx], x.Auth.KeyLabels[idx+1:]...)
 					}
+					// ...and the per-connection disabled flags
+					if idx < len(x.Auth.KeyDisabled) {
+						x.Auth.KeyDisabled = append(x.Auth.KeyDisabled[:idx], x.Auth.KeyDisabled[idx+1:]...)
+					}
 					return nil
 				}
 			}
@@ -603,6 +611,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}) {
 			return
 		}
+		invalidateQuotaReport()
 		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "providers/") && strings.Contains(path, "/keys/") && r.Method == "PUT":
 		// edit one stored connection: {label?, key?} — nil/empty keeps. Index-
@@ -616,8 +625,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var req struct {
-			Key   *string `json:"key"`
-			Label *string `json:"label"`
+			Key      *string `json:"key"`
+			Label    *string `json:"label"`
+			Disabled *bool   `json:"disabled"` // nil = keep stored per-connection enable state
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
 			http.Error(w, "bad json", 400)
@@ -643,6 +653,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 						}
 						x.Auth.KeyLabels[idx] = *req.Label
 					}
+					if req.Disabled != nil {
+						for len(x.Auth.KeyDisabled) < idx+1 {
+							x.Auth.KeyDisabled = append(x.Auth.KeyDisabled, false)
+						}
+						x.Auth.KeyDisabled[idx] = *req.Disabled
+					}
 					return nil
 				}
 			}
@@ -650,6 +666,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}) {
 			return
 		}
+		invalidateQuotaReport()
 		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "providers/") && strings.HasSuffix(path, "/subscription") && r.Method == "PUT":
 		// change the plan tier of one provider entry: {plan} — "" clears.
@@ -723,9 +740,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					if f.Keys == nil {
 						p.Auth.Keys = x.Auth.Keys
 					}
-					if f.KeyLabels == nil {
-						p.Auth.KeyLabels = x.Auth.KeyLabels // survive key edits unless explicitly sent
-					}
+			if f.KeyLabels == nil {
+				p.Auth.KeyLabels = x.Auth.KeyLabels // survive key edits unless explicitly sent
+			}
+			if f.KeyDisabled == nil {
+				p.Auth.KeyDisabled = x.Auth.KeyDisabled // omitted (model toggles etc.) keeps per-connection flags
+			}
 					if f.Prefix == nil {
 						p.Prefix = x.Prefix // omitted field keeps the stored prefix
 					}
@@ -802,6 +822,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("no provider named %q", name)
 			}
 			c.Providers = kept
+			invalidateQuotaReport()
 			// scrub routes that pointed at the removed provider — weights stay
 			// index-aligned with the chain so a weighted-rr route survives
 			routes := c.Routes[:0]
@@ -976,6 +997,7 @@ type providerForm struct {
 	Models             []string          `json:"models"`
 	Keys               []string          `json:"keys"`
 	KeyLabels          []string          `json:"keyLabels"`
+	KeyDisabled        []bool            `json:"keyDisabled"` // index-aligned with Keys; nil = keep stored
 	Prefix             *string           `json:"prefix"`   // nil = omitted (keep stored); "" = none; else routing prefix
 	Session            *string           `json:"session"`  // nil = omitted (keep stored); "" = none; "opencode" = session headers
 	Rotation           *string           `json:"rotation"` // nil = omitted (keep stored); first | round_robin
@@ -1043,7 +1065,7 @@ func (f providerForm) provider() (*config.Provider, error) {
 		Prefix:             prefix,
 		Wire:               f.Wire,
 		BaseURL:            f.BaseURL,
-		Auth:               config.AuthConf{Type: "static", Keys: f.Keys, KeyLabels: f.KeyLabels},
+		Auth:               config.AuthConf{Type: "static", Keys: f.Keys, KeyLabels: f.KeyLabels, KeyDisabled: f.KeyDisabled},
 		Models:             f.Models,
 		Session:            session,
 		Preset:             f.Preset,

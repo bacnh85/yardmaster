@@ -42,7 +42,7 @@ func (s *Server) catalogRows(ctx context.Context, exposedOnly bool) []CatalogRow
 		if p.Disabled {
 			continue
 		}
-		metas, err := s.catalog(ctx, p.Name)
+		metas, err := s.catalog(ctx, p.Name, false)
 		if err != nil {
 			continue
 		}

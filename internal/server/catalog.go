@@ -220,8 +220,9 @@ var catalogCache sync.Map // provider base_url -> catalogEntry
 // enriched with models.dev metadata, plus the provider's curated ids the
 // upstream omits (manually added models) enriched the same way. Never fails
 // hard — falls back to the provider's configured model list when /models is
-// unavailable.
-func (s *Server) catalog(ctx context.Context, name string) ([]ModelMeta, error) {
+// unavailable. refresh=true busts the base_url cache (dashboard "refresh"
+// button must fetch upstream, not re-serve the 1h-cached entry).
+func (s *Server) catalog(ctx context.Context, name string, refresh bool) ([]ModelMeta, error) {
 	var pv *config.Provider
 	for _, x := range s.Proxy.Reg.Config().Providers {
 		if x.Name == name {
@@ -238,6 +239,11 @@ func (s *Server) catalog(ctx context.Context, name string) ([]ModelMeta, error) 
 	if pv.Wire == proxy.WireClassifier {
 		_, devFlat := modelsDevSnapshot()
 		return curatedMetas(pv, nil, nil, devFlat), nil
+	}
+	if refresh {
+		// cache is keyed by base_url and shared by providers over one gateway
+		// (cmdcode + cmdcode-claude) — one delete refreshes every wire entry.
+		catalogCache.Delete(pv.BaseURL)
 	}
 	var cached []ModelMeta
 	if e, ok := catalogCache.Load(pv.BaseURL); ok {
@@ -542,7 +548,7 @@ func (s *Server) WarmCatalogs(ctx context.Context) {
 			if p.Disabled {
 				continue
 			}
-			_, _ = s.catalog(ctx, p.Name) // best-effort; catalog() never fails hard
+			_, _ = s.catalog(ctx, p.Name, false) // best-effort; catalog() never fails hard
 		}
 		select {
 		case <-ctx.Done():

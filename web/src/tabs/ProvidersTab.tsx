@@ -120,8 +120,9 @@ export const labelWithCode = (code: string, label: string): string => {
 
 /** One UI connection row per distinct key suffix across a preset's wire entries.
  *  A suffix seen on the SAME provider twice = two distinct keys (server delete is
- *  index-addressed, server_test covers duplicate suffixes) — those never merge. */
-export interface ConnRow { suffix: string; label: string; targets: { p: ProviderRow; idx: number }[] }
+ *  index-addressed, server_test covers duplicate suffixes) — those never merge.
+ *  disabled = every target carries the per-connection key_disabled flag. */
+export interface ConnRow { suffix: string; label: string; disabled: boolean; targets: { p: ProviderRow; idx: number }[] }
 export const connRows = (group: ProviderRow[]): ConnRow[] => {
   const bySuffix = new Map<string, ConnRow>();
   const rows: ConnRow[] = [];
@@ -131,10 +132,12 @@ export const connRows = (group: ProviderRow[]): ConnRow[] => {
       if (!row.label) row.label = c.label;
       row.targets.push({ p, idx });
     } else {
-      const fresh: ConnRow = { suffix: c.suffix, label: c.label, targets: [{ p, idx }] };
+      const fresh: ConnRow = { suffix: c.suffix, label: c.label, disabled: false, targets: [{ p, idx }] };
       rows.push(fresh);
       if (!row) bySuffix.set(c.suffix, fresh);
     }
+    const cur = (row ?? rows[rows.length - 1]);
+    cur.disabled = cur.targets.every((t) => t.p.connections[t.idx]?.disabled);
   });
   return rows;
 };
@@ -582,11 +585,13 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     ? quotaReq.data?.quotas.find((g) => g.providers.some((n) => group.some((p) => p.name === n)))
     : undefined;
 
-  const fetchCatalog = () => {
+  const fetchCatalog = (force = false) => {
     if (!catalogSource) return;
     const req = ++catReq.current;
     setCatalog({ loading: true, err: "", models: [] });
-    get(`providers/${encodeURIComponent(catalogSource.name)}/models`)
+    // ?refresh=1 busts the server's 1h base_url cache — the button must fetch
+    // upstream, not re-serve the cached entry
+    get(`providers/${encodeURIComponent(catalogSource.name)}/models${force ? "?refresh=1" : ""}`)
       .then((d) => {
         if (req !== catReq.current) return;
         setCatalog({ loading: false, err: "", models: (d as { models: CatalogModel[] }).models });
@@ -640,6 +645,21 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
     }
     if (lastErr) toast(lastErr, "err");
     else toast(`connection ${row.label || row.suffix} removed`);
+    reload();
+  };
+
+  /** Enable/disable one connection across its wire entries: the key stays
+   *  stored (usage, labels intact) but dispatch skips it. Same fan-out as
+   *  remove/edit. */
+  const toggleConnection = async (row: ConnRow) => {
+    const on = !row.disabled;
+    let lastErr = "";
+    for (const { p, idx } of row.targets) {
+      try { await put(`providers/${encodeURIComponent(p.name)}/keys/${idx}`, { disabled: !on }); }
+      catch (e2) { lastErr = String(e2 instanceof Error ? e2.message : e2); }
+    }
+    if (lastErr) toast(lastErr, "err");
+    else toast(`connection ${row.label || row.suffix} ${on ? "enabled" : "disabled — dispatch skips its key"}`);
     reload();
   };
 
@@ -918,7 +938,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
         {adding && (
           <form className="form-grid" onSubmit={addConnection} aria-label="add connection" style={{ margin: "12px 0" }}>
             <div className="field">
-              <label htmlFor="conn-label">label</label>
+              <label htmlFor="conn-label">Label</label>
               <input id="conn-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="you@example.com" />
               <div className="field-hint">stored as "{labelWithCode(r.code, label.trim()) || `${r.code} your-label`}"</div>
             </div>
@@ -956,7 +976,11 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
                 <span className="sr-only"> key …{row.suffix}</span>
               </span>
               {row.targets.every((t) => t.p.disabled) && <span className="badge warn">disabled</span>}
+              {row.disabled && <span className="badge warn" title="dispatch skips this key">connection disabled</span>}
               <span className="spacer" />
+              <button className="btn sm" onClick={() => toggleConnection(row)}>
+                {row.disabled ? "enable" : "disable"}
+              </button>
               <button className="btn sm" onClick={() => retest(target)} disabled={target.models.length === 0}>retest</button>
               <button className="icon-btn" aria-label={`edit connection ${row.label || row.suffix}`} title="edit label, key, plan"
                 onClick={() => setEditing(row)}><IconEdit size={14} /></button>
@@ -1010,7 +1034,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
             <button className="btn sm" aria-label="add model" title="expose a model the provider's catalog doesn't list"
               onClick={() => setManual((v) => (v ? null : { id: "", family: r.entries[0]?.family ?? "" }))}
               disabled={!catalogSource}>+ add model</button>
-            <button className="btn sm primary" onClick={fetchCatalog} disabled={!catalogSource || catalog?.loading}>
+            <button className="btn sm primary" onClick={() => fetchCatalog(true)} disabled={!catalogSource || catalog?.loading}>
               {catalog?.loading ? "fetching…" : catalog ? "refresh" : "load catalog"}
             </button>
           </div>

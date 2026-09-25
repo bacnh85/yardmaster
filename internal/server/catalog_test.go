@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/bacnh85/yardmaster/internal/config"
+	"github.com/bacnh85/yardmaster/internal/provider"
+	"github.com/bacnh85/yardmaster/internal/proxy"
 )
 
 // flexString/tokToMtok: OpenRouter's per-token pricing strings ("0.0000007",
@@ -106,5 +108,58 @@ func TestUpstreamModelsOpenRouter(t *testing.T) {
 	p := got[3]
 	if p.Input != 0 || p.Output != 0 || p.Free {
 		t.Errorf("absent pricing fields = in=%v out=%v free=%v, want 0/0/false (upstream leaves flags unset)", p.Input, p.Output, p.Free)
+	}
+}
+
+// refresh=true must bust the base_url catalog cache: the dashboard refresh
+// button re-GETs providers/<n>/models?refresh=1 and must see upstream additions
+// immediately, not after the 1h TTL.
+func TestCatalogRefreshBustsCache(t *testing.T) {
+	var body = `{"data":[{"id":"model-a"}]}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	}))
+	defer up.Close()
+	catalogCache.Delete(up.URL)
+	t.Cleanup(func() { catalogCache.Delete(up.URL) })
+
+	cfg := &config.Config{
+		Keys: []*config.Key{{Key: "ar-x", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "p", BaseURL: up.URL, Wire: "openai", Auth: config.AuthConf{Keys: []string{"k"}}},
+		},
+	}
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	s := New(nil, nil, nil, "", "pw", "test")
+	s.Proxy = &proxy.Proxy{Reg: provider.New(cfg), Cost: cfg.CostFor}
+
+	count := func(models []ModelMeta) int { return len(models) }
+
+	// first load caches upstream's single model
+	m1, err := s.catalog(context.Background(), "p", false)
+	if err != nil || count(m1) != 1 {
+		t.Fatalf("first load: %d models err=%v, want 1", count(m1), err)
+	}
+	// upstream gains a model; a cached (non-refresh) GET must NOT see it
+	body = `{"data":[{"id":"model-a"},{"id":"model-b"}]}`
+	m2, err := s.catalog(context.Background(), "p", false)
+	if err != nil || count(m2) != 1 {
+		t.Fatalf("cached load saw fresh data: %d models err=%v, want 1", count(m2), err)
+	}
+	// refresh busts the cache and picks up the addition
+	m3, err := s.catalog(context.Background(), "p", true)
+	if err != nil || count(m3) != 2 {
+		t.Fatalf("refreshed load: %d models err=%v, want 2", count(m3), err)
+	}
+	ids := map[string]bool{}
+	for _, m := range m3 {
+		ids[m.ID] = true
+	}
+	if !ids["model-a"] || !ids["model-b"] {
+		t.Errorf("refreshed ids %v, want model-a+model-b", ids)
 	}
 }

@@ -517,6 +517,16 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"quotas": rep})
 }
 
+// invalidateQuotaReport drops the shared 60s quota cache after a key mutation
+// (add/rotate/delete) — without it a deleted connection's usage row lingers up
+// to a minute. A build already in flight may re-store pre-delete data once:
+// worst case one extra 60s window.
+func invalidateQuotaReport() {
+	quotaMu.Lock()
+	quotaReport, quotaUntil = nil, time.Time{}
+	quotaMu.Unlock()
+}
+
 // cachedQuotaReport returns the shared 60s-cached upstream quota report,
 // rebuilding it (detached from any request context — an aborted caller must
 // never write "context canceled" into the shared cache) when stale. Concurrent
