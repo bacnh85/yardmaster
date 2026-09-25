@@ -174,7 +174,9 @@ var DefaultCosts = map[string]*Cost{
 	"kimi-k3":          {Input: 0.60, Output: 2.50, CacheRead: 0.06},
 	// TypeSafe Jev (System One decision model, $42/Btok input, output free).
 	// "jev" prefix-matches jev-latest/jev-1.13.0 via the family-prefix fallback.
+	// typesafe/jev (bare, Command Code's id) bills $0.04/M input on GOAT+.
 	"typesafe/jev-1.13": {Input: 0.042},
+	"typesafe/jev":      {Input: 0.04},
 	"jev":               {Input: 0.042},
 	"minimax-m3":       {Input: 0.30, Output: 1.20, CacheRead: 0.03},
 	"qwen3.7-max":      {Input: 0.60, Output: 2.40, CacheRead: 0.06},

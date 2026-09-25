@@ -89,6 +89,17 @@ providers:
   #   auth: { type: static, keys: ["ts-..."] }
   #   models: [jev-latest, jev-1.13.0]
 
+  # --- Command Code Jev (decision model, GOAT+ plans) ---
+  # $0.04/M input at cost, output free, same credits as chat models. Id is the
+  # bare "typesafe/jev" and it is NOT in cmdcode's /models catalog — the
+  # curated list is required. Dashboard preset: one-click create.
+  # - name: cmdcode-classifier
+  #   base_url: https://api.commandcode.ai/provider/v1
+  #   wire: classifier
+  #   prefix: cmd-jev
+  #   auth: { type: static, keys: ["$CMD_API_KEY"] }
+  #   models: [typesafe/jev]
+
   # --- Ollama Cloud (https://ollama.com) ---
   # Open models served from Ollama's cloud. Dashboard preset: one-click create.
   # /v1/models is public (catalog enriched from models.dev); GET /api/usage

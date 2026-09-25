@@ -161,12 +161,13 @@ describe("registry", () => {
       expect(e.session).toBe("opencode");
     }
     expect(zen.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat", "responses"]);
-    // CommandCode: Claude models serve /messages only → dedicated anthropic entry
+    // CommandCode: Claude models serve /messages only → dedicated anthropic entry;
+    // Jev (GOAT+ decision model) rides a third, classifier entry
     const cc = REGISTRY.find((r) => r.id === "cmdcode")!;
     expect(cc.plans).toBe(true);
-    expect(cc.entries).toHaveLength(2);
+    expect(cc.entries).toHaveLength(3);
     expect(new Set(cc.entries.map((e) => e.base_url)).size).toBe(1);
-    expect(cc.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat"]);
+    expect(cc.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat", "classifier"]);
     // DeepSeek serves all three wires from one API key (docs 2026-09-21):
     // /chat/completions, /anthropic/v1/messages, /responses — one entry per family
     const ds = REGISTRY.find((r) => r.id === "deepseek")!;

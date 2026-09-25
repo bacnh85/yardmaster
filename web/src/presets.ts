@@ -65,6 +65,9 @@ export const REGISTRY: RegistryProvider[] = [
     entries: [
       { name: "cmdcode", wire: "openai", base_url: "https://api.commandcode.ai/provider/v1", family: "chat", familyLabel: "Open models (GOAT+)" },
       { name: "cmdcode-claude", wire: "anthropic", base_url: "https://api.commandcode.ai/provider/v1", family: "anthropic", familyLabel: "Claude (Pro/Max)" },
+      // Jev (decision model, GOAT+): not in cmdcode's /models catalog — verified
+      // live; the curated list is required. Same /systemone surface as typesafe.
+      { name: "cmdcode-classifier", wire: "classifier", base_url: "https://api.commandcode.ai/provider/v1", family: "classifier", familyLabel: "Jev · decision model (GOAT+)", defaults: { models: ["typesafe/jev"] } },
     ],
   },
   {

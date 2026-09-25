@@ -58,4 +58,12 @@ func TestJevCostLookup(t *testing.T) {
 			t.Fatalf("CostFor(%s) output = %v, want 0 (output tokens free)", m, got.Output)
 		}
 	}
+	// Command Code's bare id bills $0.04/M on GOAT+ — must hit its own entry,
+	// not the "jev" prefix (checked before the family-prefix fallback, but the
+	// exact key must exist so cmd/typesafe/jev resolves to 0.04, not 0.042)
+	for _, m := range []string{"typesafe/jev", "cmd/typesafe/jev"} {
+		if got := c.CostFor(m).Input; got != 0.04 {
+			t.Fatalf("CostFor(%s) input = %v, want 0.04 (Command Code rate)", m, got)
+		}
+	}
 }
