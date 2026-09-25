@@ -13,10 +13,11 @@ import (
 
 // Target is one concrete dispatch destination: a provider with a specific key.
 type Target struct {
-	Provider *config.Provider
-	APIKey   string
-	AuthType string // static | oauth
-	AcctName string // oauth account name (empty for static)
+	Provider      *config.Provider
+	APIKey        string
+	AuthType      string // static | oauth
+	AcctName      string // oauth account name (empty for static)
+	ModelOverride string // combo requests: the natural upstream id (empty = use requested)
 }
 
 // Registry resolves models to ordered dispatch targets and owns per-key limiters.
@@ -81,16 +82,139 @@ func SplitPrefix(cfg *config.Config, model string) (prefix, bare string, matched
 	return "", model, false
 }
 
+// comboMatches returns the combo for "combo/<name>" requests, nil otherwise.
+func (r *Registry) comboMatches(model string) *config.Combo {
+	name, ok := strings.CutPrefix(model, "combo/")
+	if !ok {
+		return nil
+	}
+	for _, cb := range r.cfg.Combos {
+		if cb.Name == name {
+			return cb
+		}
+	}
+	return nil
+}
+
+// comboClone is a shallow provider copy scoped to one combo member: auth
+// narrowed to the member's selected key labels / account names (empty = all).
+func comboClone(p *config.Provider, member *config.ComboMember) *config.Provider {
+	if len(member.Keys) == 0 {
+		return p
+	}
+	want := map[string]bool{}
+	for _, k := range member.Keys {
+		want[k] = true
+	}
+	cp := *p // shallow — downstream only reads
+	cp.Auth.Keys = nil
+	cp.Auth.KeyLabels = nil
+	cp.Auth.KeyDisabled = nil
+	for i, k := range p.Auth.Keys {
+		if want[p.Auth.KeyLabel(i)] {
+			cp.Auth.Keys = append(cp.Auth.Keys, k)
+			cp.Auth.KeyLabels = append(cp.Auth.KeyLabels, p.Auth.KeyLabel(i))
+			if i < len(p.Auth.KeyDisabled) {
+				cp.Auth.KeyDisabled = append(cp.Auth.KeyDisabled, p.Auth.KeyDisabled[i])
+			}
+		}
+	}
+	for _, a := range p.Auth.OAuth {
+		if want[a.Name] {
+			cp.Auth.OAuth = append(cp.Auth.OAuth, a)
+		}
+	}
+	return &cp
+}
+
+// comboMember is one resolved member: its provider scoped to the selected
+// connections, plus the upstream model id to dispatch under.
+type comboMember struct {
+	p   *config.Provider
+	model string
+}
+
+// comboMembers maps combo members to scoped providers: priority order by
+// default; weighted-rr rotates the head proportionally (same shape as routes).
+func (r *Registry) comboMembers(cb *config.Combo) []comboMember {
+	members := cb.Members
+	eff := cb.Strategy
+	if eff == "" {
+		eff = r.cfg.Routing.Strategy
+	}
+	if eff == "weighted-rr" && len(members) > 1 {
+		weights := make([]int, len(members))
+		any := false
+		for i, m := range members {
+			if m.Weight > 0 {
+				any = true
+			}
+			weights[i] = m.Weight
+		}
+		// blank weight = 1: a literal 0 would starve the member (wrrPick never
+		// picks x < 0) — and the UI weight field is optional per row
+		if any {
+			for i, w := range weights {
+				if w == 0 {
+					weights[i] = 1
+				}
+			}
+		}
+		head := wrrPick(&r.wrr, config.ComboID(cb.Name), weights, len(members))
+		rotated := make([]*config.ComboMember, 0, len(members))
+		rotated = append(rotated, members[head])
+		rotated = append(rotated, members[:head]...)
+		rotated = append(rotated, members[head+1:]...)
+		members = rotated
+	}
+	out := make([]comboMember, 0, len(members))
+	for _, m := range members {
+		for _, p := range r.cfg.Providers {
+			if p.Name == m.Provider {
+				model := m.Model
+				if model == "" {
+					model = cb.Model
+				}
+				out = append(out, comboMember{p: comboClone(p, m), model: model})
+				break
+			}
+		}
+	}
+	return out
+}
+
+// comboTargets expands a combo into ordered dispatch targets: one pass over
+// resolved members (curation checked against the MEMBER's upstream id, since
+// providers may curate different ids for the same model), each target carrying
+// that member's model as the dispatch override.
+func (r *Registry) comboTargets(cb *config.Combo) []*Target {
+	var targets []*Target
+	for _, m := range r.comboMembers(cb) {
+		for _, t := range r.buildTargets([]*config.Provider{m.p}, m.model, m.model, false) {
+			t.ModelOverride = m.model
+			targets = append(targets, t)
+		}
+	}
+	if len(targets) > 8 {
+		targets = targets[:8] // same failover fan-out cap as the route path
+	}
+	return targets
+}
+
 // Resolve returns the ordered dispatch targets for a model.
-// First matching route wins; no route → any provider whose Models list
-// contains the model (config order). A "prefix/model" request restricts
-// candidates to providers carrying that prefix. Providers that can't serve
-// the model (non-empty Models list without it) are skipped inside chains.
+// Combos win first ("combo/<name>" → pooled members), then routes; no route
+// → any provider whose Models list contains the model (config order). A
+// "prefix/model" request restricts candidates to providers carrying that
+// prefix. Providers that can't serve the model (non-empty Models list without
+// it) are skipped inside chains.
 func (r *Registry) Resolve(model string, allow []string) []*Target {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if !KeyAllowed(allow, model) {
 		return nil
+	}
+	if cb := r.comboMatches(model); cb != nil {
+		return r.comboTargets(cb)
 	}
 	prefix, bare, prefixed := SplitPrefix(r.cfg, model)
 	var provs []*config.Provider
@@ -156,18 +280,32 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 	if prefixed {
 		name = bare
 	}
+	targets := r.buildTargets(provs, name, model, prefixed)
+	if len(targets) > 8 {
+		targets = targets[:8] // ponytail: cap failover fan-out; more is a config smell
+	}
+	return targets
+}
+
+// buildTargets expands scoped providers into ordered dispatch targets (oauth
+// accounts or static keys, honoring per-key disable flags and rotation).
+// name is the id providers' Models lists are matched against (bare for
+// prefixed requests), full the requested id for full-id-curated natural ids.
+// Shared by the combo and route/auto paths — cooldowns and limiters key on the
+// returned targets, never on this call.
+func (r *Registry) buildTargets(provs []*config.Provider, name, full string, prefixed bool) []*Target {
 	var targets []*Target
 	for _, p := range provs {
 		if p.Disabled {
 			continue
-		}
+			}
 		// full-id-curated natural id (prefix == vendor namespace): this
 		// provider matched on the full model id, not the stripped bare —
 		// decided per provider so a disabled full-id sibling can't flip the
 		// match name for everyone sharing the prefix
 		pname := name
-		if prefixed && (contains(p.Models, model) || containsMap(p.ModelMap, model)) {
-			pname = model
+		if prefixed && (contains(p.Models, full) || containsMap(p.ModelMap, full)) {
+			pname = full
 		}
 		if len(p.Models) > 0 && !contains(p.Models, pname) && !containsMap(p.ModelMap, pname) {
 			continue
@@ -204,9 +342,6 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 				targets = append(targets, &Target{Provider: p, APIKey: k, AuthType: "static"})
 			}
 		}
-	}
-	if len(targets) > 8 {
-		targets = targets[:8] // ponytail: cap failover fan-out; more is a config smell
 	}
 	return targets
 }
@@ -322,6 +457,12 @@ func (r *Registry) Models() []string {
 	defer r.mu.RUnlock()
 	seen := map[string]bool{}
 	var out []string
+	for _, cb := range r.cfg.Combos {
+		if id := config.ComboID(cb.Name); !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
 	for _, rt := range r.cfg.Routes {
 		if !seen[rt.Match] && rt.Match != "*" {
 			seen[rt.Match] = true

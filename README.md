@@ -41,6 +41,12 @@ yardmaster's design goals are different:
   usage) between the wires. `GET /v1/models` lists the enriched catalog.
 - **Ordered failover**: model → provider chain; any upstream >=400 falls
   through to the next provider/key; the last real upstream error is surfaced.
+- **Combos**: one virtual model id pooling the same model across providers —
+  `combo/deepseek-v4.1-flash` fans out over OpenCode Go, Command Code, the
+  DeepSeek API (per-member upstream ids, pin specific keys/accounts or leave
+  all on auto), with priority or weighted-rr dispatch over the existing
+  failover/cooldown machinery. Routing analytics (which member served what,
+  failover rate, cost split) in the dashboard Combos tab.
 - **Z.ai GLM Coding Plan support** (`session`-style providers, see config):
   Anthropic wire, `cache_control` injection (cache reads ≈ 0.1x input — the
   subscription multiplier), fast mode, adaptive thinking, and a per-key

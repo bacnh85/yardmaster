@@ -373,7 +373,7 @@ th.sortable:focus-visible, tr.clickable:focus-visible {
   border-radius: var(--radius-md); box-shadow: var(--shadow);
   width: 100%; max-width: 440px; max-height: 80vh; display: flex; flex-direction: column;
 }
-.modal.wide { max-width: 640px; }
+.modal.wide { max-width: 960px; }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 14px 16px; border-bottom: 1px solid var(--line);

@@ -4,9 +4,10 @@ import { Toaster } from "./components";
 import { TABS, tabFromHash, providerDetailFromHash, type Tab } from "./route";
 import {
   IconActivity, IconChart, IconCache, IconGauge, IconList, IconKey, IconServer, IconSettings,
-  IconShield, IconSun, IconMoon,
+  IconShield, IconSun, IconMoon, IconShuffle,
 } from "./icons";
 import { LiveTab } from "./tabs/LiveTab";
+import { CombosTab } from "./tabs/CombosTab";
 import { UsageTab } from "./tabs/UsageTab";
 import { CacheTab } from "./tabs/CacheTab";
 import { QuotaTab } from "./tabs/QuotaTab";
@@ -33,6 +34,7 @@ const NAV: { group: string; tabs: { id: Tab; label: string; icon: React.ReactNod
       { id: "endpoints", label: "Endpoints", icon: <IconKey /> },
       { id: "models", label: "Models", icon: <IconList /> },
       { id: "providers", label: "Providers", icon: <IconServer /> },
+      { id: "combos", label: "Combos", icon: <IconShuffle /> },
     ],
   },
   { group: "System", tabs: [{ id: "settings", label: "Settings", icon: <IconSettings /> }] },
@@ -134,6 +136,7 @@ export default function App() {
         {tab === "providers" && (
           <ProvidersTab detail={providerDetail} onOpenDetail={openProviderDetail} onCloseDetail={closeProviderDetail} />
         )}
+        {tab === "combos" && <CombosTab />}
         {tab === "settings" && <SettingsTab />}
       </main>
       <Toaster />

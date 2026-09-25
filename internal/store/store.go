@@ -434,6 +434,66 @@ func (s *Store) BreakdownBy(col string, d time.Duration) ([]Breakdown, error) {
 	return out, nil
 }
 
+// ComboUsageRow is one (combo model, provider) slice of combo traffic: which
+// member of combo/<name> served what over the window.
+type ComboUsageRow struct {
+	ComboID   string   `json:"combo"`
+	Provider  string   `json:"provider"`
+	Requests  int64    `json:"requests"`
+	Errors    int64    `json:"errors"`
+	TokIn     int64    `json:"tok_in"`
+	TokOut    int64    `json:"tok_out"`
+	CacheRd   int64    `json:"cache_read"`
+	Cost      float64  `json:"cost"`
+	Failovers int64    `json:"failovers"` // requests with attempts > 1 (member skip)
+	AvgTries  float64  `json:"avg_attempts"`
+	TTFTp50   *float64 `json:"ttft_p50_ms"`
+}
+
+// ComboUsageSince groups combo-prefixed traffic by (model, provider) over a
+// window — the routing analytics behind the dashboard Combos tab. No schema
+// change: Record.Model already carries the virtual combo id and Record.Provider
+// the member that served.
+func (s *Store) ComboUsageSince(d time.Duration) ([]ComboUsageRow, error) {
+	since := time.Now().Add(-d).UnixMilli()
+	rows, err := s.db.Query(`SELECT model, provider, COUNT(*),
+			SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
+			COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(cache_read),0),
+			COALESCE(SUM(cost_usd),0),
+			SUM(CASE WHEN attempts > 1 THEN 1 ELSE 0 END),
+			AVG(attempts)
+		FROM requests WHERE ts >= ? AND model LIKE 'combo/%' GROUP BY model, provider ORDER BY model, COUNT(*) DESC`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ComboUsageRow, 0)
+	for rows.Next() {
+		var r ComboUsageRow
+		if err := rows.Scan(&r.ComboID, &r.Provider, &r.Requests, &r.Errors, &r.TokIn, &r.TokOut, &r.CacheRd, &r.Cost, &r.Failovers, &r.AvgTries); err == nil {
+			out = append(out, r)
+		}
+	}
+	// ttft p50 per (model, provider) — same small-scale second pass as BreakdownBy
+	ttrows, err := s.db.Query(`SELECT model, provider, ttft_ms FROM requests WHERE ts >= ? AND model LIKE 'combo/%' AND ttft_ms > 0`, since)
+	if err != nil {
+		return out, nil
+	}
+	defer ttrows.Close()
+	byGroup := map[string][]float64{}
+	for ttrows.Next() {
+		var m, p string
+		var v float64
+		if ttrows.Scan(&m, &p, &v) == nil {
+			byGroup[m+"\x00"+p] = append(byGroup[m+"\x00"+p], v)
+		}
+	}
+	for i := range out {
+		out[i].TTFTp50 = percentiles(byGroup[out[i].ComboID+"\x00"+out[i].Provider], 0.5)[0]
+	}
+	return out, nil
+}
+
 func percentiles(v []float64, ps ...float64) []*float64 {
 	out := make([]*float64, len(ps))
 	if len(v) == 0 {

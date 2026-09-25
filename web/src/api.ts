@@ -70,6 +70,23 @@ export interface RouteRow {
   strategy?: string; // "priority" (default) | "weighted-rr"
   weights?: number[]; // weighted-rr only, index-aligned with chain
 }
+export interface ComboMemberRow {
+  provider: string;
+  model?: string; // upstream id at that provider; absent = combo's model
+  keys?: string[]; // key labels / account names; absent = all connections
+  weight?: number; // weighted-rr only
+}
+export interface ComboRow {
+  name: string; model: string;
+  strategy?: string; // "priority" (default) | "weighted-rr"
+  members: ComboMemberRow[];
+}
+export interface ComboUsageRow {
+  combo: string; provider: string;
+  requests: number; errors: number;
+  tok_in: number; tok_out: number; cache_read: number; cost: number;
+  failovers: number; avg_attempts: number; ttft_p50_ms?: number | null;
+}
 export interface CooldownRow { provider: string; key: string; until: string }
 export interface CatalogModel {
   id: string; name?: string; family: string; context?: number; max_output?: number;

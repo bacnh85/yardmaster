@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -18,6 +19,7 @@ type Config struct {
 	Routing       Routing          `yaml:"routing"`
 	Providers     []*Provider      `yaml:"providers"`
 	Routes        []*Route         `yaml:"routes"`
+	Combos        []*Combo         `yaml:"combos"`
 	Keys          []*Key           `yaml:"keys"`
 	Costs         map[string]*Cost `yaml:"costs"` // $ per 1M tokens, overrides defaults
 }
@@ -96,6 +98,74 @@ type Key struct {
 	// CreatedAt is when the key was issued (unix ms, same unit as the store's
 	// request ts so one formatter renders both). 0 on legacy hand-written keys.
 	CreatedAt int64 `yaml:"created_at,omitempty"`
+}
+
+// Combo is a named virtual model (exposed as "combo/<name>") pooling the same
+// underlying model from several providers. Member order is the failover chain;
+// "all keys, auto" = no key selection.
+type Combo struct {
+	Name     string         `yaml:"name" json:"name"`     // exposed id is combo/<name>
+	Model    string         `yaml:"model" json:"model"`    // natural model id every member serves
+	Strategy string         `yaml:"strategy" json:"strategy"` // "" inherit | priority | weighted-rr
+	Members  []*ComboMember `yaml:"members" json:"members"`
+}
+
+// ComboMember is one provider in the pool. Keys lists key labels (static) or
+// oauth account names to pin; empty = all enabled connections of the provider.
+// Model is the upstream id at that provider (defaults to the combo's model —
+// set it when the provider curates a different id for the same model, e.g.
+// "deepseek/deepseek-v4.1-flash" vs "deepseek-v4.1-flash"). Weight drives
+// weighted-rr head selection.
+type ComboMember struct {
+	Provider string   `yaml:"provider" json:"provider"`
+	Model    string   `yaml:"model,omitempty" json:"model,omitempty"`
+	Keys     []string `yaml:"keys,omitempty" json:"keys,omitempty"`
+	Weight   int      `yaml:"weight,omitempty" json:"weight,omitempty"`
+}
+
+// ComboID is the advertised model id for a combo name.
+func ComboID(name string) string { return "combo/" + name }
+
+// comboKeyExists reports whether label names one of the provider's usable
+// connections: a static key label or an oauth account name.
+func comboKeyExists(p *Provider, label string) bool {
+	if p == nil {
+		return false
+	}
+	for i := range p.Auth.Keys {
+		if p.Auth.KeyLabel(i) == label {
+			return true
+		}
+	}
+	for _, a := range p.Auth.OAuth {
+		if a.Name == label {
+			return true
+		}
+	}
+	return false
+}
+
+// mapContains reports whether the model_map curates id.
+func mapContains(m map[string]string, id string) bool {
+	if m == nil {
+		return false
+	}
+	_, ok := m[id]
+	return ok
+}
+
+// ValidComboName reports whether s is a usable combo name: a model-id-like
+// slug (lowercase alnum, dot, hyphen; no slash — it rides behind "combo/").
+func ValidComboName(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 // UsageAllowed reports whether the key may read the usage endpoint.
@@ -224,8 +294,15 @@ func (c *Config) Validate() error {
 		names[p.Name] = true
 		// prefixes may be shared across providers (one preset = several wire
 		// entries over one gateway, e.g. Zen) — only the format is validated
-		if p.Prefix != "" && !ValidPrefix(p.Prefix) {
-			return fmt.Errorf("provider %s: prefix must be 1-12 lowercase letters, digits or hyphens", p.Name)
+		if p.Prefix != "" {
+			if !ValidPrefix(p.Prefix) {
+				return fmt.Errorf("provider %s: prefix must be 1-12 lowercase letters, digits or hyphens", p.Name)
+			}
+			// "combo" is the combo virtual-model namespace (Resolve matches
+			// combo/<name> before any provider prefix path)
+			if p.Prefix == "combo" {
+				return fmt.Errorf("provider %s: prefix \"combo\" is reserved for combo models", p.Name)
+			}
 		}
 		if p.BaseURL == "" {
 			return fmt.Errorf("provider %s: missing base_url", p.Name)
@@ -278,8 +355,10 @@ func (c *Config) Validate() error {
 		}
 	}
 	pnames := names
+	byName := map[string]*Provider{}
 	wires := map[string]string{}
 	for _, p := range c.Providers {
+		byName[p.Name] = p
 		wires[p.Name] = p.Wire
 	}
 	for _, r := range c.Routes {
@@ -320,6 +399,61 @@ func (c *Config) Validate() error {
 		}
 		if r.Strategy != "" && r.Strategy != "priority" && r.Strategy != "weighted-rr" {
 			return fmt.Errorf("route %q: strategy must be priority|weighted-rr", r.Match)
+		}
+	}
+	// combos: validate against the same provider set, mirroring route rules
+	names2 := map[string]bool{}
+	for _, cb := range c.Combos {
+		if !ValidComboName(cb.Name) {
+			return fmt.Errorf("combo %q: name must be 1-64 lowercase letters, digits, dots or hyphens", cb.Name)
+		}
+		if names2[cb.Name] {
+			return fmt.Errorf("duplicate combo %q", cb.Name)
+		}
+		names2[cb.Name] = true
+		if strings.HasPrefix(cb.Model, "combo/") {
+			return fmt.Errorf("combo %q: model cannot itself be a combo", cb.Name)
+		}
+		if cb.Model == "" {
+			return fmt.Errorf("combo %q: missing model", cb.Name)
+		}
+		if len(cb.Members) == 0 {
+			return fmt.Errorf("combo %q needs at least one member", cb.Name)
+		}
+		if cb.Strategy != "" && cb.Strategy != "priority" && cb.Strategy != "weighted-rr" {
+			return fmt.Errorf("combo %q: strategy must be priority|weighted-rr", cb.Name)
+		}
+		eff := cb.Strategy
+		if eff == "" {
+			eff = c.Routing.Strategy
+		}
+		if eff != "weighted-rr" {
+			for _, m := range cb.Members {
+				if m.Weight != 0 {
+					return fmt.Errorf("combo %q: weights require strategy weighted-rr (combo or routing.strategy)", cb.Name)
+				}
+			}
+		}
+		for _, m := range cb.Members {
+			if !pnames[m.Provider] {
+				return fmt.Errorf("combo %q references unknown provider %q", cb.Name, m.Provider)
+			}
+			if wires[m.Provider] == "classifier" {
+				return fmt.Errorf("combo %q: classifier provider %q cannot serve combos", cb.Name, m.Provider)
+			}
+			for _, lbl := range m.Keys {
+				if !comboKeyExists(byName[m.Provider], lbl) {
+					return fmt.Errorf("combo %q: provider %s has no key/account labeled %q", cb.Name, m.Provider, lbl)
+				}
+			}
+			// a member without its own model must actually serve the combo's —
+			// otherwise the combo silently 404s (curation check skips the member)
+			if m.Model == "" {
+				p := byName[m.Provider]
+				if len(p.Models) > 0 && !slices.Contains(p.Models, cb.Model) && !mapContains(p.ModelMap, cb.Model) {
+					return fmt.Errorf("combo %q: provider %s does not serve %q — set the member's model (it curates %q)", cb.Name, m.Provider, cb.Model, p.Models)
+				}
+			}
 		}
 	}
 	switch c.Routing.Strategy {

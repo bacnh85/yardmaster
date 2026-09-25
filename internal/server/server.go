@@ -881,6 +881,22 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			c.Routes = routes
+			// scrub combo members on the removed provider; combos are single-model
+			// pools, so a member gone = combo gone when it was the last one
+			combos := c.Combos[:0]
+			for _, cb := range c.Combos {
+				members := cb.Members[:0]
+				for _, m := range cb.Members {
+					if m.Provider != name {
+						members = append(members, m)
+					}
+				}
+				if len(members) > 0 {
+					cb.Members = members
+					combos = append(combos, cb)
+				}
+			}
+			c.Combos = combos
 			return nil
 		}) {
 			return
@@ -923,6 +939,35 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(map[string]any{"ok": true})
+	case path == "combos" && r.Method == "GET":
+		out := make([]*config.Combo, 0, len(s.Proxy.Reg.Config().Combos))
+		out = append(out, s.Proxy.Reg.Config().Combos...)
+		writeJSON(map[string]any{"combos": out})
+	case path == "combos" && r.Method == "PUT":
+		// replaces the whole combos list: [{name, model, strategy, members}]
+		var combos []*config.Combo
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&combos); err != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			c.Combos = combos
+			return nil
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
+	case path == "combos/usage" && r.Method == "GET":
+		hours, _ := strconv.Atoi(q.Get("hours"))
+		if hours <= 0 {
+			hours = 24
+		}
+		rows, err := s.Store.ComboUsageSince(time.Duration(hours) * time.Hour)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		writeJSON(map[string]any{"usage": rows})
 	case path == "cooldowns" && r.Method == "GET":
 		var out []provider.CooldownEntry
 		if s.Proxy.Cd != nil {

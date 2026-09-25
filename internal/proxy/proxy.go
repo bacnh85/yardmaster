@@ -260,7 +260,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			}
 		}
 
-		upModel := provider.UpstreamModel(tgt.Provider, model)
+		reqModel := model // combo requests dispatch under the natural model id
+		if tgt.ModelOverride != "" {
+			reqModel = tgt.ModelOverride
+		}
+		upModel := provider.UpstreamModel(tgt.Provider, reqModel)
 		httpReq, err := p.buildUpstream(r.Context(), tgt, clientWire, upModel, req, body, strictJSON, r.Header.Get("x-opencode-session"))
 		if err != nil {
 			lastErr = err.Error()
@@ -318,7 +322,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 		rec.TTFTms = float64(ttft.Milliseconds())
 		rec.TokIn, rec.TokOut, rec.CacheRead, rec.CacheWrt = usage.In, usage.Out, usage.CacheR, usage.CacheW
 		if p.Cost != nil {
-			c := p.Cost(model)
+			c := p.Cost(reqModel) // combo dispatch: price the natural model, not combo/<name>
 			rec.CostUSD = float64(usage.In)/1e6*c.Input + float64(usage.Out)/1e6*c.Output +
 				float64(usage.CacheR)/1e6*c.CacheRead + float64(usage.CacheW)/1e6*c.CacheWrite
 		}

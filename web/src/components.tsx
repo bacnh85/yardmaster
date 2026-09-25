@@ -58,16 +58,21 @@ export function Modal({ title, onClose, children, wide }: {
   title: string; onClose: () => void; children: React.ReactNode; wide?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose);
+  close.current = onClose; // Escape/overlay always see the latest onClose
   useEffect(() => {
     // focus the dialog (unless a child grabbed focus, e.g. autoFocus inputs);
     // restore focus to the trigger on close. ponytail: no full focus trap — Esc
     // + overlay click cover it; add a trap if tabbing into the page behind matters.
+    // deps [] on purpose: onClose identity changes every parent render (per-
+    // keystroke form state), and re-running this effect would steal focus
+    // back from the input being typed into.
     const prev = document.activeElement as HTMLElement | null;
     if (ref.current && !ref.current.contains(document.activeElement)) ref.current.focus();
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const k = (e: KeyboardEvent) => e.key === "Escape" && close.current();
     window.addEventListener("keydown", k);
     return () => { window.removeEventListener("keydown", k); prev?.focus?.(); };
-  }, [onClose]);
+  }, []);
   return (
     <div className="modal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div ref={ref} tabIndex={-1} className={`modal ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
