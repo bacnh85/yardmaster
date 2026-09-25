@@ -61,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/decisions", s.wrap(s.Proxy.ServeClassifier))
 	mux.HandleFunc("POST /v1/classifier", s.wrap(s.Proxy.ServeClassifier))
 	mux.HandleFunc("GET /v1/models", s.wrap(s.handleModels))
+	mux.HandleFunc("GET /v1/systemone/models", s.wrap(s.handleSystemoneModels))
 	mux.HandleFunc("GET /v1/usage", s.wrap(s.handleUsage))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -158,6 +159,40 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			entry.Capabilities = &caps{Vision: mm.Image}
 		}
 		data = append(data, entry)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+}
+
+// handleSystemoneModels lists decision-model ids (classifier-wire providers)
+// as /v1/systemone resolves them. /v1/models deliberately excludes them —
+// chat advertisement must stay clean; this is the discovery path for System
+// One clients (pi-classifier model picker).
+func (s *Server) handleSystemoneModels(w http.ResponseWriter, r *http.Request) {
+	type model struct {
+		ID     string `json:"id"`
+		Object string `json:"object"`
+		Owned  string `json:"owned_by"`
+		Family string `json:"family"`
+	}
+	data := make([]model, 0) // never nil — empty registry must marshal as [], not null
+	seen := map[string]bool{}
+	for _, p := range s.Proxy.Reg.Config().Providers {
+		if p.Disabled || p.Wire != proxy.WireClassifier {
+			continue
+		}
+		for _, m := range p.Models {
+			// inlined prefix rule — advertised() is unexported in internal/provider
+			id := m
+			if p.Prefix != "" {
+				id = p.Prefix + "/" + m
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			data = append(data, model{ID: id, Object: "model", Owned: p.Name, Family: "classifier"})
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})

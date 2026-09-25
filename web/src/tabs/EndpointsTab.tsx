@@ -12,6 +12,7 @@ const ENDPOINTS: [string, string, string][] = [
   ["POST", "/v1/messages", "Anthropic wire (streaming supported)"],
   ["POST", "/v1/messages/count_tokens", "Anthropic token count"],
   ["POST", "/v1/systemone", "System One decisions — {model, state, questions} in, typed answers out (/v1/classifier and /v1/decisions are aliases)"],
+  ["GET", "/v1/systemone/models", "list decision models (prefixed ids) — discovery for System One clients (pi-classifier); /v1/models stays chat-only"],
   ["GET", "/v1/models", "models routable by your key"],
   ["GET", "/v1/usage", "upstream provider usage for your key (?provider=<prefix>)"],
   ["GET", "/healthz", "liveness (no auth)"],
@@ -19,6 +20,7 @@ const ENDPOINTS: [string, string, string][] = [
 
 export function EndpointsTab() {
   const { data, error, loading, reload } = useApi<{ keys: KeyRow[] }>("keys");
+  const { data: cfg } = useApi<{ listen: string }>("config");
   const keys = data?.keys ?? [];
   const [name, setName] = useState("");
   const [allow, setAllow] = useState("*");
@@ -30,7 +32,13 @@ export function EndpointsTab() {
   const [showAdd, setShowAdd] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // API base as reachable from THIS browser (origin — tunnel/proxy-safe).
+  // When yardmaster binds an explicit host (e.g. 127.0.0.1:8787), that is also
+  // shown as the machine-local URL; ":8787" binds all interfaces so origin
+  // already points at the right machine.
   const base = location.origin;
+  const listen = cfg?.listen ?? "";
+  const local = /^(?:127\.0\.0\.1|localhost)/.test(listen) ? `http://${listen}` : "";
 
   const addKey = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -102,6 +110,11 @@ export function EndpointsTab() {
         <div className="key-reveal" style={{ marginBottom: 12 }}>
           <span className="mono">{base}/v1</span>
           <CopyBtn text={base + "/v1"} what="base URL" />
+          {local && (
+            <span className="muted" style={{ marginLeft: 12 }}>
+              local: <span className="mono">{local}/v1</span>
+            </span>
+          )}
         </div>
         <div className="table-wrap">
           <table>

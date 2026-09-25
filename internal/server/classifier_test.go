@@ -136,6 +136,57 @@ func TestClassifierEndToEnd(t *testing.T) {
 	}
 }
 
+func TestSystemoneModelsListsDecisionModels(t *testing.T) {
+	ts, _ := classifierFixture(t)
+
+	// no key → 401 (same wrap auth as other /v1 routes)
+	resp, err := http.Get(ts.URL + "/v1/systemone/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("no key: status %d, want 401", resp.StatusCode)
+	}
+
+	// with key → prefixed classifier ids only
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/systemone/models", nil)
+	req.Header.Set("Authorization", "Bearer ar-agent")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", resp2.StatusCode)
+	}
+	var out struct {
+		Data []struct {
+			ID     string `json:"id"`
+			Family string `json:"family"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, m := range out.Data {
+		got[m.ID] = m.Family
+		if m.Family != "classifier" {
+			t.Fatalf("model %q family = %q, want classifier", m.ID, m.Family)
+		}
+	}
+	want := []string{"jev/jev-latest", "or/typesafe/jev-1.13"}
+	for _, id := range want {
+		if _, ok := got[id]; !ok {
+			t.Fatalf("missing decision model %q; got %v", id, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want exactly %v", got, want)
+	}
+}
+
 func TestClassifierExcludedFromChatAdvertisement(t *testing.T) {
 	ts, _ := classifierFixture(t)
 	resp, err := http.Get(ts.URL + "/v1/models")
