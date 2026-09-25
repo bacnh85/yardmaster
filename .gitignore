@@ -7,12 +7,16 @@ config.yaml
 *.db-shm
 web/node_modules/
 web/dist/*
+web/tsconfig.tsbuildinfo
 !web/dist/index.html
 /yardmaster
 /bin/
 .agents/plans/
 docs/*
 !docs/routing.md
+!docs/banner.png
+!docs/dashboard-usage.png
+!docs/dashboard-providers.png
 .zcode/
 .pi/
 .private/

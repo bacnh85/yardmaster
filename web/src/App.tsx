@@ -102,7 +102,7 @@ export default function App() {
   return (
     <div className="shell">
       <nav className="side" aria-label="main navigation">
-        <div className="brand">Yardmaster</div>
+        <div className="brand"><img src="/logo.png" alt="" width={20} height={20} />Yardmaster</div>
         {NAV.map((g) => (
           <div key={g.group} className="nav-group-wrap">
             <div className="nav-group">{g.group}</div>

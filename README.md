@@ -1,13 +1,32 @@
 # yardmaster
 
-Self-hosted LLM proxy for CLI coding agents. One API URL + key for all your
-agents; one config entry per upstream provider. Go, single static binary,
-embedded dashboard. Wires: `openai | anthropic | responses | classifier`
-(System One decision models — see `docs/classifier.md`).
+![yardmaster](docs/banner.png)
+[![CI](https://github.com/bacnh85/yardmaster/actions/workflows/docker.yml/badge.svg)](https://github.com/bacnh85/yardmaster/actions/workflows/docker.yml)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fbacnh85%2Fyardmaster-115E59)](https://ghcr.io/bacnh85/yardmaster)
 
-Built to replace OmniRoute / CLIProxyAPI / 9router with something minimal:
-no MITM, no token compression, no OAuth monolith — just fast streaming
-routing, honest stats, and isolated auth adapters.
+![Usage dashboard](docs/dashboard-usage.png)
+
+**yardmaster** is a self-hosted LLM proxy for CLI coding agents: one API URL
+and one key for all your agents, one config entry per upstream provider. Go,
+single static binary, embedded dashboard.
+
+It replaces OmniRoute / CLIProxyAPI / 9router with something minimal: no MITM,
+no token compression, no OAuth monolith — just fast streaming routing, honest
+stats, and isolated auth adapters.
+
+**Why build another proxy?** Existing routers either sit as MITM appliances,
+retry blindly across providers, or lock you into their own account model.
+yardmaster's design goals are different:
+
+- **Your keys, your config, one YAML file.** Nothing phones home; the dashboard
+  and DB live on your machine.
+- **Streaming is the product.** Coding agents are long SSE sessions — the
+  proxy must be byte-faithful and add ~0 ms TTFT, or it is broken by design.
+- **Subscriptions are first-class.** Z.ai GLM Coding, Claude Code, Codex,
+  OpenCode Go — pool them behind one OpenAI/Anthropic-compatible endpoint with
+  quota visibility, instead of juggling per-CLI logins.
+- **Honest stats.** Every request logged to SQLite with TTFT, cache reuse, and
+  real cost accounting — not vanity counters.
 
 ## Features
 
@@ -42,6 +61,8 @@ routing, honest stats, and isolated auth adapters.
   a checklist, manages multiple API keys ("connections") per provider, and has
   a playground that fires a one-shot test request through the real dispatch
   path on any wire.
+
+  ![Providers dashboard](docs/dashboard-providers.png)
 - **Stats**: SQLite request log (async batched), per-model/provider/key
   breakdowns, TTFT p50/p95, cache hit rate, cost accounting (config-editable
   per-model prices; built-in estimates), live SSE feed, embedded dashboard
@@ -126,7 +147,7 @@ provider; per-route `strategy:`/`weights:` and per-provider `rotation:`
 override it. Cooldowns after 429/5xx are automatic. See
 [docs/routing.md](docs/routing.md) for the research behind these choices.
 
-## OAuth subscription upstreams (Phase 4)
+## OAuth subscription upstreams
 
 Providers backed by a **CLI subscription login** instead of an API key. Import
 the CLI's local credentials, then paste the printed YAML into a provider's
@@ -213,6 +234,40 @@ Real-provider spot checks through the router (2026-09-16): glm-5.3 via Z.ai
 Anthropic passthrough ≈143 tok/s; deepseek-v4-flash via OpenCode Go ≈56–80
 tok/s × 3 concurrent streams; glm-5.3-flash ≈36–41 tok/s (thinking included).
 
+## Development
+
+```bash
+go test ./...                # Go test suite
+cd web && npm ci && npx vitest run   # dashboard tests (React + Vite)
+go build -o yardmaster ./cmd/yardmaster
+```
+
+The dashboard is embedded via `go:embed` — run `cd web && npx vite build`,
+then rebuild the binary to see dashboard changes. UI follows the token system
+in [DESIGN.md](DESIGN.md).
+
+`AR_ALLOW_ANON_ADMIN=1` starts the dashboard open without login (screenshot /
+demo mode) — bind to `127.0.0.1` only if you use it.
+
+## Contributing
+
+PRs are welcome. Small, focused diffs first; big design changes as an issue
+first.
+
+- **Go**: run `go test ./...` and `go vet ./...` before submitting; keep new
+  provider quirks in config (`extra_headers`, `body_overrides`, presets), not
+  hardcoded branches.
+- **Dashboard**: `cd web && npx tsc -b && npx vitest run`; follow
+  [DESIGN.md](DESIGN.md) tokens — no ad-hoc colors or shadows.
+- **New provider preset**: add it to the Providers-tab registry with docs
+  (base URL, wire, quota window behavior) and a config example in this README
+  or `docs/`.
+- **Wire translation changes** (`internal/translate/`): include a
+  streaming tool-call round-trip case in the tests — that's where
+  translations break.
+- **Commits**: conventional style (`feat:`, `fix:`, `docs:`, …) keeps the
+  changelog greppable.
+
 ## Status
 
 - Phases 0–4 done (core, translation, stats, dashboard, OAuth subscription
@@ -220,6 +275,10 @@ tok/s × 3 concurrent streams; glm-5.3-flash ≈36–41 tok/s (thinking included
   cooldown/rotation).
 - Deferred: `/v1/responses` serving (client side), Gemini-native wire,
   opencode OAuth endpoints (set `token_endpoint`+`client_id` when documented).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Layout
 
