@@ -11,6 +11,7 @@ const ENDPOINTS: [string, string, string][] = [
   ["POST", "/v1/chat/completions", "OpenAI wire (streaming supported)"],
   ["POST", "/v1/messages", "Anthropic wire (streaming supported)"],
   ["POST", "/v1/messages/count_tokens", "Anthropic token count"],
+  ["POST", "/v1/systemone", "System One decisions — {model, state, questions} in, typed answers out (/v1/classifier and /v1/decisions are aliases)"],
   ["GET", "/v1/models", "models routable by your key"],
   ["GET", "/v1/usage", "upstream provider usage for your key (?provider=<prefix>)"],
   ["GET", "/healthz", "liveness (no auth)"],

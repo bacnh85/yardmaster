@@ -999,8 +999,8 @@ func derefInt(p *int) int {
 }
 
 func (f providerForm) provider() (*config.Provider, error) {
-	if f.Wire != "openai" && f.Wire != "anthropic" && f.Wire != "responses" {
-		return nil, fmt.Errorf("wire must be openai, anthropic, or responses")
+	if f.Wire != "openai" && f.Wire != "anthropic" && f.Wire != "responses" && f.Wire != "classifier" {
+		return nil, fmt.Errorf("wire must be openai, anthropic, responses, or classifier")
 	}
 	u, err := url.Parse(f.BaseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
