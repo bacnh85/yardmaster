@@ -645,14 +645,14 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
    *  stored (usage, labels intact) but dispatch skips it. Same fan-out as
    *  remove/edit. */
   const toggleConnection = async (row: ConnRow) => {
-    const on = !row.disabled;
+    const off = !row.disabled; // new disabled state after the toggle
     let lastErr = "";
     for (const { p, idx } of row.targets) {
-      try { await put(`providers/${encodeURIComponent(p.name)}/keys/${idx}`, { disabled: !on }); }
+      try { await put(`providers/${encodeURIComponent(p.name)}/keys/${idx}`, { disabled: off }); }
       catch (e2) { lastErr = String(e2 instanceof Error ? e2.message : e2); }
     }
     if (lastErr) toast(lastErr, "err");
-    else toast(`connection ${row.label || row.suffix} ${on ? "enabled" : "disabled — dispatch skips its key"}`);
+    else toast(`connection ${row.label || row.suffix} ${off ? "disabled — dispatch skips its key" : "enabled"}`);
     reload();
   };
 
