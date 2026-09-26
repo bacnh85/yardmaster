@@ -32,6 +32,9 @@ export function Playground({ targets, model, onModel }: {
   const effProvider = targets.some((t) => t.provider === provider) ? provider : target?.provider ?? "";
   const keys = targets.find((t) => t.provider === effProvider)?.connections ?? [];
   const modelOptions = targets.find((t) => t.provider === effProvider)?.models ?? [];
+  // catalog-only/wildcard test (pgTargetsFor fallback): the tested id isn't in
+  // the provider's exposed list — keep it selectable so the picker shows it
+  const opts = model === "" || modelOptions.includes(model) ? modelOptions : [model, ...modelOptions];
 
   const send = async () => {
     const text = input.trim();
@@ -58,7 +61,9 @@ export function Playground({ targets, model, onModel }: {
     }
   };
 
-  if (targets.length === 0 || modelOptions.length === 0) {
+  // wildcard providers (models: []) serve everything — only a missing target
+  // blocks the playground
+  if (targets.length === 0) {
     return <Empty>this provider has no exposed models yet — expose one above, then test it here</Empty>;
   }
   return (
@@ -66,9 +71,9 @@ export function Playground({ targets, model, onModel }: {
       <div className="pg-pickers">
         <div className="field">
           <label htmlFor="pg-model">model</label>
-          <select id="pg-model" value={modelOptions.includes(model) ? model : modelOptions[0]}
+          <select id="pg-model" value={opts.includes(model) ? model : opts[0]}
             onChange={(e) => onModel(e.target.value)}>
-            {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+            {opts.map((m) => <option key={m} value={m}>{m}</option>)}
           </select>
         </div>
         <div className="field">
