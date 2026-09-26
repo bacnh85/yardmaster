@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -250,10 +251,11 @@ func (s *Store) SummarySince(d time.Duration, bucket string) (*Summary, error) {
 	if err != nil {
 		return nil, err
 	}
-	// percentiles are insertion-sorted (O(n²)); skip collection entirely for
-	// long windows (the 12-month Usage heatmap fetch) — don't even load the
-	// ttft values. LatencyTab only ever asks for 24h. Same user-visible
-	// contract as an empty window: cards render "–".
+	// percentiles scan and sort the whole window; skip collection entirely for
+	// long windows (the 12-month Usage heatmap fetch): the cost is loading and
+	// sorting every ttft row in the window, so don't even collect them.
+	// LatencyTab only ever asks for 24h. Same user-visible contract as an
+	// empty window: cards render "–".
 	if d <= 30*24*time.Hour {
 		rows, err := s.db.Query(`SELECT ttft_ms FROM requests WHERE ts >= ? AND ttft_ms > 0`, since)
 		if err != nil {
@@ -474,7 +476,14 @@ func (s *Store) ComboUsageSince(d time.Duration) ([]ComboUsageRow, error) {
 			out = append(out, r)
 		}
 	}
-	// ttft p50 per (model, provider) — same small-scale second pass as BreakdownBy
+	// ttft p50 per (model, provider) — same small-scale second pass as BreakdownBy,
+	// and the same long-window rule as SummarySince: the percentile pass is
+	// a full scan + sort of every ttft row in the window, and this endpoint is
+	// polled, so skip collection entirely past 30d. Same user-visible contract
+	// as an empty window ("–").
+	if d > 30*24*time.Hour {
+		return out, nil
+	}
 	ttrows, err := s.db.Query(`SELECT model, provider, ttft_ms FROM requests WHERE ts >= ? AND model LIKE 'combo/%' AND ttft_ms > 0`, since)
 	if err != nil {
 		return out, nil
@@ -499,12 +508,9 @@ func percentiles(v []float64, ps ...float64) []*float64 {
 	if len(v) == 0 {
 		return out
 	}
-	// insertion sort (n small per personal use)
-	for i := 1; i < len(v); i++ {
-		for j := i; j > 0 && v[j] < v[j-1]; j-- {
-			v[j], v[j-1] = v[j-1], v[j]
-		}
-	}
+	// ponytail: was an insertion sort (O(n²)); sort.Float64s is stdlib and the
+	// same in-place semantics. Matters because this runs on polled endpoints.
+	sort.Float64s(v)
 	for i, p := range ps {
 		idx := int(p * float64(len(v)-1))
 		x := v[idx]
@@ -515,8 +521,8 @@ func percentiles(v []float64, ps ...float64) []*float64 {
 
 // CacheTokenRow is one model's cached-token totals — the light query the
 // server prices into cache_saved_usd. Deliberately NOT BreakdownBy("model"):
-// that carries the per-group TTFT percentile pass (O(n²) sort), which must not
-// run on every polled summary.
+// that carries the per-group TTFT percentile pass (full window scan + sort),
+// which must not run on every polled summary.
 type CacheTokenRow struct {
 	Model      string
 	CacheRead  int64

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { get, put, fmtN, fmtUSD, fmtMs, fmtPrice, fmtTok, type ComboRow, type ComboMemberRow, type ComboUsageRow, type ProviderRow, type CatalogModel } from "../api";
-import { useApi } from "../hooks";
+import { useApi, usePoll } from "../hooks";
 import { Empty, ErrorBanner, PageHead, Skeleton, StatCard, Modal, Confirm, toast, fmtPct } from "../components";
 import { copyText } from "../clipboard";
 
@@ -99,6 +99,7 @@ export function CombosTab() {
   const catReq = useApi<{ models: CatalogModel[] }>("catalog");
   const [hours, setHours] = useState(24);
   const usageReq = useApi<{ usage: ComboUsageRow[] }>(`combos/usage?hours=${hours}`);
+  usePoll(usageReq.reload, 10000); // routing analytics stay live without a manual reload
   const [draft, setDraft] = useState<ComboDraft | null>(null); // open editor when non-null
   const [delName, setDelName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -158,6 +159,8 @@ export function CombosTab() {
         </button>
       </PageHead>
       {combosReq.error && <ErrorBanner msg={combosReq.error} onRetry={combosReq.reload} />}
+      {/* usage polls every 10s — never let a failed tick pass as "no traffic" */}
+      {usageReq.error && <ErrorBanner msg={usageReq.error} onRetry={usageReq.reload} />}
 
       {!combosReq.data && !combosReq.error ? (
         <div className="card"><Skeleton h={160} w="100%" /></div>

@@ -49,7 +49,8 @@ yardmaster's design goals are different:
   pool too: a combo with `type: decision` (e.g. Jev across TypeSafe,
   OpenRouter, Command Code) advertises on `/v1/systemone/models` — see
   [docs/classifier.md](docs/classifier.md). Routing analytics (which member
-  served what, failover rate, cost split) in the dashboard Combos tab.
+  served what, failover rate, cost split) in the dashboard Combos tab, kept
+  current on a 10s poll.
 - **Z.ai GLM Coding Plan support** (`session`-style providers, see config):
   Anthropic wire, `cache_control` injection (cache reads ≈ 0.1x input — the
   subscription multiplier), fast mode, adaptive thinking, and a per-key

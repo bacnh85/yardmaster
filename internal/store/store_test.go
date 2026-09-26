@@ -166,9 +166,9 @@ func TestTimeSeriesByModel(t *testing.T) {
 	}
 }
 
-// percentiles() is insertion-sorted (O(n²)); SummarySince must skip ttft
-// collection entirely for long windows (the 12-month Usage heatmap fetch
-// hits hours=8760 on every mount).
+// The percentile pass scans and sorts every ttft row in the window;
+// SummarySince must skip collection entirely for long windows (the 12-month
+// Usage heatmap fetch hits hours=8760 on every mount).
 func TestSummarySinceLongRangeSkipsPercentiles(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "t.db")
 	s, err := Open(db)
@@ -177,8 +177,8 @@ func TestSummarySinceLongRangeSkipsPercentiles(t *testing.T) {
 	}
 	now := time.Now().UnixMilli()
 	hourMs := int64(time.Hour / time.Millisecond)
-	// 90k rows beyond the 30d cutoff + 3k inside it: insertion-sorting the
-	// long window (~4e9 ops) would take minutes; the short window (3k rows)
+	// 90k rows beyond the 30d cutoff + 3k inside it: loading and sorting the
+	// long window would take minutes; the short window (3k rows)
 	// must still produce real percentiles. Rows go in via one direct tx —
 	// Submit's 4096-slot channel drops under a bulk producer, and pacing it
 	// would cost minutes of sleep.
@@ -231,9 +231,9 @@ func TestSummarySinceLongRangeSkipsPercentiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// ponytail: wall-clock bound only catches an O(n²) regression (minutes);
-	// 5s flaked in CI (-race + 2-core runner + 93k rows) — 30s still fails
-	// loud if percentile collection ever comes back
+	// ponytail: wall-clock bound only catches the regression it guards, a
+	// restored full-window percentile pass on 93k rows; 5s flaked in CI
+	// (-race + 2-core runner) — 30s still fails loud if collection comes back
 	if time.Since(start) > 30*time.Second {
 		t.Fatalf("year-range summary too slow: %v (ttft skip regressed?)", time.Since(start))
 	}
