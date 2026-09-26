@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { toRow, sortPrice, filterRows, DEFAULT_FILTERS, type CatalogRowUI } from "./tabs/ModelsTab";
+import { fmtPrice } from "./api";
 import { Playground, type PgTarget } from "./Playground";
 import { renderToString } from "react-dom/server";
 
@@ -17,6 +18,20 @@ describe("sortPrice", () => {
     expect(sortPrice(-1)).toBeNull();
     expect(sortPrice(0)).toBe(0);
     expect(sortPrice(3.5)).toBe(3.5);
+  });
+});
+
+describe("fmtPrice", () => {
+  it("rounds float noise to 3 decimals and trims trailing zeros", () => {
+    expect(fmtPrice(0.09999999999999999)).toBe("$0.1");
+    expect(fmtPrice(10.534600000000001)).toBe("$10.535");
+    expect(fmtPrice(0.24900000000000003)).toBe("$0.249");
+    expect(fmtPrice(0.035)).toBe("$0.035");
+    expect(fmtPrice(10)).toBe("$10");
+  });
+  it("keeps the unknown/free conventions", () => {
+    expect(fmtPrice(-1)).toBe("—");
+    expect(fmtPrice(0)).toBe("free");
   });
 });
 

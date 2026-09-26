@@ -115,7 +115,9 @@ export const fmtUSD = (n: number, currency?: string) => {
 };
 export const fmtMs = (n: number | null | undefined) =>
   n == null ? "–" : n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${Math.round(n)}ms`; // seconds ≥1s: mixed units on adjacent cards read worse
-export const fmtPrice = (n: number) => (n < 0 ? "—" : n === 0 ? "free" : `$${n}`);
+/** Catalog price per 1M tokens: -1 = unknown, 0 = free. Rounded to 3 decimals —
+ *  upstream catalog floats carry noise (0.09999999999999999, 10.534600000000001). */
+export const fmtPrice = (n: number) => (n < 0 ? "—" : n === 0 ? "free" : `$${Number(n.toFixed(3))}`);
 export const fmtTok = (n: number) =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`
   : n >= 1_000 ? `${(n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1)}K`

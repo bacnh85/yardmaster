@@ -40,6 +40,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .num { font-variant-numeric: tabular-nums; }
+td.num { text-align: right; } /* numeric cells sit under their right-aligned th.n headers */
 .mono { font-family: var(--mono); font-size: 13px; }
 a { color: var(--accent); }
 button { font: inherit; cursor: pointer; }
