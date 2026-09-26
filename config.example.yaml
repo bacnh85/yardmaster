@@ -201,14 +201,17 @@ routes:
   # - match: "claude-*"
   #   chain: [claude-sub, opencode-go-claude, cmdcode-claude]   # subscription first, then API-key fallback
 
-# -*- combos: one virtual model id pooling the same model across providers.
+# -*- combos: one virtual model id pooling models across providers.
 # Requesting "combo/<name>" dispatches over the members in order (priority) or
 # by weights (weighted-rr); the rest of each member's keys stay as fallbacks,
 # and the usual failover/cooldown/rotation rules apply per member.
-# Member `model` is that provider's upstream id for the model (omit when it
-# matches the combo's). Member `keys` pins specific connections by label or
-# oauth account name — omit for "all enabled keys, auto". Routing analytics
-# (who served what, failover rate) live in the dashboard Combos tab.
+# Top-level `model` is optional: set it when every member serves the same
+# natural id, or omit it and give each member its own `model` (required then).
+# `type` is "chat" (default) or "decision" — a decision combo may only list
+# classifier-wire providers and advertises on /v1/systemone/models instead of
+# /v1/models. Member `keys` pins specific connections by label or oauth
+# account name — omit for "all enabled keys, auto". Routing analytics (who
+# served what, failover rate) live in the dashboard Combos tab.
 # combos:
 #   - name: deepseek-v4.1-flash          # exposed as combo/deepseek-v4.1-flash
 #     model: deepseek-v4.1-flash
@@ -221,6 +224,14 @@ routes:
 #         model: deepseek/deepseek-v4.1-flash
 #       - provider: deepseek
 #         keys: [main]                   # pin one connection by label
+# Decision-model combo (Jev across classifier providers) — no combo model:
+#   - name: jev
+#     type: decision
+#     members:
+#       - provider: typesafe
+#         model: jev-latest
+#       - provider: openrouter-classifier
+#         model: typesafe/jev-1.13
 
 # keys CLI agents authenticate with (yardmaster key add NAME generates one)
 # usage: false revokes the key's access to GET /v1/usage (upstream provider

@@ -40,14 +40,36 @@ func TestComboValidation(t *testing.T) {
 		{"duplicate combo", func(c *Config) {
 			c.Combos = append(c.Combos, &Combo{Name: "x", Model: "m", Members: []*ComboMember{{Provider: "a"}}})
 		}, "duplicate combo"},
-		{"missing model", func(c *Config) { c.Combos[0].Model = "" }, "missing model"},
-		{"nested combo model", func(c *Config) { c.Combos[0].Model = "combo/y" }, "cannot itself be a combo"},
 		{"no members", func(c *Config) { c.Combos[0].Members = nil }, "at least one member"},
 		{"unknown provider", func(c *Config) { c.Combos[0].Members[0].Provider = "zzz" }, "unknown provider"},
 		{"classifier member", func(c *Config) {
 			c.Providers = append(c.Providers, &Provider{Name: "j", Wire: "classifier", BaseURL: "https://j", Models: []string{"m"}, Auth: AuthConf{Keys: []string{"k"}}})
 			c.Combos[0].Members[0].Provider = "j"
-		}, "cannot serve combos"},
+		}, "cannot mix"},
+		{"combo model optional — per-member ids", func(c *Config) {
+			c.Combos[0].Model = ""
+			c.Combos[0].Members[0].Model = "m-a"
+			c.Combos[0].Members[1].Model = "m-b"
+		}, ""},
+		{"no model anywhere", func(c *Config) {
+			c.Combos[0].Model = ""
+		}, "needs a model"},
+		{"all-classifier combo ok", func(c *Config) {
+			c.Combos[0].Type = "decision"
+			c.Combos[0].Model = ""
+			c.Providers = append(c.Providers,
+				&Provider{Name: "t1", Wire: "classifier", BaseURL: "https://t1", Models: []string{"jev-latest"}, Auth: AuthConf{Keys: []string{"k"}}},
+				&Provider{Name: "t2", Wire: "classifier", BaseURL: "https://t2", Models: []string{"typesafe/jev"}, Auth: AuthConf{Keys: []string{"k"}}})
+			c.Combos[0].Members = []*ComboMember{{Provider: "t1", Model: "jev-latest"}, {Provider: "t2", Model: "typesafe/jev"}}
+		}, ""},
+		{"decision type on chat members", func(c *Config) {
+			c.Combos[0].Type = "decision"
+		}, "decision type requires"},
+		{"decision members without type ok (inferred chat reject)", func(c *Config) { c.Combos[0].Type = "bad" }, "type must be"},
+		{"mixed classifier+chat", func(c *Config) {
+			c.Providers = append(c.Providers, &Provider{Name: "j", Wire: "classifier", BaseURL: "https://j", Models: []string{"jev"}, Auth: AuthConf{Keys: []string{"k"}}})
+			c.Combos[0].Members = []*ComboMember{{Provider: "a"}, {Provider: "j", Model: "jev"}}
+		}, "cannot mix"},
 		{"unknown strategy", func(c *Config) { c.Combos[0].Strategy = "latency" }, "strategy must be priority|weighted-rr"},
 		{"weight on priority", func(c *Config) { c.Combos[0].Members[0].Weight = 3 }, "weights require strategy weighted-rr"},
 		{"weight with global weighted-rr ok", func(c *Config) {

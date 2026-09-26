@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { get, fmtN, type CatalogModel, type ProviderRow } from "../api";
+import { get, fmtN, fmtPrice, fmtTok, type CatalogModel, type ProviderRow } from "../api";
 import { useApi } from "../hooks";
 import { useSorted, cmpVals } from "../hooks";
 import { Empty, ErrorBanner, PageHead, Skeleton } from "../components";
@@ -65,12 +65,6 @@ export const DEFAULT_FILTERS: Filters = {
 /** Lazy render window: initial rows ≈ one viewport, then +60 per sentinel hit. */
 export const initialLimit = () => Math.ceil(window.innerHeight / 36) + 10;
 export const PAGE = 60;
-
-const fmtPrice = (n: number) => (n < 0 ? "—" : n === 0 ? "free" : `$${n}`);
-const fmtTok = (n: number) =>
-  n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`
-  : n >= 1_000 ? `${(n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1)}K`
-  : String(n);
 
 export function ModelsTab() {
   const cat = useApi<{ models: (CatalogModel & { providers?: { name: string; prefix?: string; exposed: boolean }[] })[] }>("catalog");

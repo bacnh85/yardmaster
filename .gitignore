@@ -14,6 +14,7 @@ web/tsconfig.tsbuildinfo
 .agents/plans/
 docs/*
 !docs/routing.md
+!docs/classifier.md
 !docs/banner.png
 !docs/dashboard-usage.png
 !docs/dashboard-providers.png

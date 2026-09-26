@@ -130,7 +130,7 @@ func comboClone(p *config.Provider, member *config.ComboMember) *config.Provider
 // comboMember is one resolved member: its provider scoped to the selected
 // connections, plus the upstream model id to dispatch under.
 type comboMember struct {
-	p   *config.Provider
+	p     *config.Provider
 	model string
 }
 
@@ -298,7 +298,7 @@ func (r *Registry) buildTargets(provs []*config.Provider, name, full string, pre
 	for _, p := range provs {
 		if p.Disabled {
 			continue
-			}
+		}
 		// full-id-curated natural id (prefix == vendor namespace): this
 		// provider matched on the full model id, not the stripped bare —
 		// decided per provider so a disabled full-id sibling can't flip the
@@ -451,6 +451,32 @@ func (r *Registry) Limiter(p *config.Provider, apiKey string) *auth.Limiter {
 	return actual.(*auth.Limiter)
 }
 
+// ClassifierCombo reports whether the combo is a decision combo: the declared
+// Type wins ("decision" = yes, "chat"/"" = no, validation keeps members in
+// line); without a Type, fall back to detecting all-classifier membership
+// (legacy/hand-written configs).
+func (r *Registry) ClassifierCombo(cb *config.Combo) bool {
+	switch cb.Type {
+	case "decision":
+		return true
+	case "chat":
+		return false
+	}
+	if len(cb.Members) == 0 {
+		return false
+	}
+	isClf := map[string]bool{}
+	for _, p := range r.cfg.Providers {
+		isClf[p.Name] = p.Wire == "classifier"
+	}
+	for _, m := range cb.Members {
+		if !isClf[m.Provider] {
+			return false
+		}
+	}
+	return true
+}
+
 // Models returns the union of all advertised models (for /v1/models).
 func (r *Registry) Models() []string {
 	r.mu.RLock()
@@ -458,6 +484,9 @@ func (r *Registry) Models() []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, cb := range r.cfg.Combos {
+		if r.ClassifierCombo(cb) {
+			continue // decision combos advertise on /v1/systemone/models only
+		}
 		if id := config.ComboID(cb.Name); !seen[id] {
 			seen[id] = true
 			out = append(out, id)

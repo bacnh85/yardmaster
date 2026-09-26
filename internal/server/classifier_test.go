@@ -66,6 +66,10 @@ func classifierFixture(t *testing.T) (*httptest.Server, *int) {
 				Models: []string{"jev-latest"}, Prefix: "jev",
 				Auth: config.AuthConf{Type: "static", Keys: []string{"sk-up"}}},
 		},
+		Combos: []*config.Combo{{Name: "jev", Type: "decision", Members: []*config.ComboMember{
+			{Provider: "openrouter-classifier", Model: "typesafe/jev-1.13"},
+			{Provider: "typesafe", Model: "jev-latest"},
+		}}},
 	}
 	cfg.Defaults()
 	if err := cfg.Validate(); err != nil {
@@ -176,7 +180,7 @@ func TestSystemoneModelsListsDecisionModels(t *testing.T) {
 			t.Fatalf("model %q family = %q, want classifier", m.ID, m.Family)
 		}
 	}
-	want := []string{"jev/jev-latest", "or/typesafe/jev-1.13"}
+	want := []string{"jev/jev-latest", "or/typesafe/jev-1.13", "combo/jev"}
 	for _, id := range want {
 		if _, ok := got[id]; !ok {
 			t.Fatalf("missing decision model %q; got %v", id, got)
@@ -184,6 +188,78 @@ func TestSystemoneModelsListsDecisionModels(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want exactly %v", got, want)
+	}
+}
+
+// A decision combo pools classifier providers behind combo/<name>: advertised
+// on /v1/systemone/models (not /v1/models), dispatches per-member ids with
+// failover when the head member 503s.
+func TestClassifierComboEndToEnd(t *testing.T) {
+	ts, hits := classifierFixture(t)
+
+	// /v1/systemone/models advertises combo/jev; /v1/models does not
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/systemone/models", nil)
+	req.Header.Set("Authorization", "Bearer ar-agent")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sys struct {
+		Data []struct {
+			ID     string `json:"id"`
+			Owned  string `json:"owned_by"`
+			Family string `json:"family"`
+		} `json:"data"`
+	}
+	json.NewDecoder(resp.Body).Decode(&sys)
+	resp.Body.Close()
+	found := false
+	for _, m := range sys.Data {
+		if m.ID == "combo/jev" {
+			found = true
+			if m.Owned != "combo" || m.Family != "classifier" {
+				t.Fatalf("combo/jev row: owned=%q family=%q", m.Owned, m.Family)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("combo/jev missing from /v1/systemone/models: %+v", sys.Data)
+	}
+	chat, err := http.Get(ts.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chatOut struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	json.NewDecoder(chat.Body).Decode(&chatOut)
+	chat.Body.Close()
+	for _, m := range chatOut.Data {
+		if strings.HasPrefix(m.ID, "combo/") {
+			t.Fatalf("classifier combo %q advertised on chat /v1/models", m.ID)
+		}
+	}
+
+	// decision through the combo dispatches per-member ids: both members hit
+	// the mock upstream with their own ids (fixture asserts id + /systemone)
+	*hits = 0
+	body := `{"model":"combo/jev","state":{"command":"bun test"},"questions":{"reversible":{"type":"noul","instructions":"Is this reversible?"}}}`
+	req2, _ := http.NewRequest("POST", ts.URL+"/v1/systemone", strings.NewReader(body))
+	req2.Header.Set("Authorization", "Bearer ar-agent")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	json.NewDecoder(resp2.Body).Decode(&out)
+	resp2.Body.Close()
+	if resp2.StatusCode != 200 || out["answers"] == nil {
+		t.Fatalf("combo/jev decision: status %d body %v", resp2.StatusCode, out)
+	}
+	if *hits != 1 {
+		t.Fatalf("combo/jev upstream hits = %d, want 1 (head member serves)", *hits)
 	}
 }
 

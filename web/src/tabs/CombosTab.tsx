@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { get, put, fmtN, fmtUSD, fmtMs, type ComboRow, type ComboMemberRow, type ComboUsageRow, type ProviderRow, type CatalogModel } from "../api";
+import { get, put, fmtN, fmtUSD, fmtMs, fmtPrice, fmtTok, type ComboRow, type ComboMemberRow, type ComboUsageRow, type ProviderRow, type CatalogModel } from "../api";
 import { useApi } from "../hooks";
 import { Empty, ErrorBanner, PageHead, Skeleton, StatCard, Modal, Confirm, toast, fmtPct } from "../components";
 import { copyText } from "../clipboard";
@@ -9,17 +9,19 @@ const RANGES: [number, string][] = [[1, "1h"], [24, "24h"], [168, "7d"], [720, "
 // ---------- pure helpers (unit-tested) ----------
 
 export interface ComboDraft {
-  name: string; model: string; strategy: string;
+  name: string; type: string; strategy: string;
   members: { provider: string; model: string; keys: string[]; weight: string }[];
 }
 
 export const draftOf = (c: ComboRow): ComboDraft => ({
   name: c.name,
-  model: c.model,
+  type: c.type === "decision" ? "decision" : "chat",
   strategy: c.strategy === "weighted-rr" ? "weighted-rr" : c.strategy === "priority" ? "priority" : "",
   members: c.members.map((m) => ({
     provider: m.provider,
-    model: m.model ?? "",
+    // legacy combos carry a top-level model that members defaulted to —
+    // resolve it in so saving rewrites the combo into the per-member form
+    model: m.model ?? c.model ?? "",
     keys: m.keys ?? [],
     weight: m.weight ? String(m.weight) : "",
   })),
@@ -27,7 +29,7 @@ export const draftOf = (c: ComboRow): ComboDraft => ({
 
 export const parseDraft = (d: ComboDraft): ComboRow => ({
   name: d.name.trim(),
-  model: d.model.trim(),
+  ...(d.type === "decision" ? { type: "decision" } : {}),
   ...(d.strategy === "weighted-rr" ? { strategy: "weighted-rr" } : d.strategy === "priority" ? { strategy: "priority" } : {}),
   members: d.members.map((m) => ({
     provider: m.provider.trim(),
@@ -36,14 +38,6 @@ export const parseDraft = (d: ComboDraft): ComboRow => ({
     ...(m.weight.trim() && parseInt(m.weight, 10) > 0 ? { weight: parseInt(m.weight, 10) } : {}),
   })),
 });
-
-/** Model ids across all enabled providers' curated lists + catalog entries. */
-export const modelIds = (providers: ProviderRow[], catalog: CatalogModel[]): string[] => {
-  const seen = new Set<string>();
-  for (const p of providers) for (const m of p.models ?? []) seen.add(m);
-  for (const c of catalog) seen.add(c.id);
-  return [...seen].sort();
-};
 
 /** Connections (labels) a member can pin, static keys first then oauth accounts. */
 export const memberAccounts = (providers: ProviderRow[] | null, provider: string): string[] => {
@@ -55,6 +49,36 @@ export const memberAccounts = (providers: ProviderRow[] | null, provider: string
 /** Model ids one provider serves (curated list; catalog fallback). */
 export const providerModels = (providers: ProviderRow[], provider: string): string[] =>
   providers.find((x) => x.name === provider)?.models ?? [];
+
+/** Providers legal for the combo type: decision → classifier-wire only, chat → the rest. */
+export const providersForType = (providers: ProviderRow[], type: string): ProviderRow[] =>
+  providers.filter((p) => !p.disabled && (type === "decision" ? p.wire === "classifier" : p.wire !== "classifier"));
+
+/** Model ids one provider serves, filtered to decision models when the combo is a decision combo. */
+export const memberModelsFor = (providers: ProviderRow[], provider: string, type: string, catalog: CatalogModel[]): string[] =>
+  providerModels(providers, provider).filter((id) => {
+    if (type !== "decision") return true;
+    return catalog.find((c) => c.id === id)?.family === "classifier";
+  });
+
+/** Model select option label: "id · 128K · $0.3/$1.2" from the catalog, "—" when unknown. */
+export const modelOptionLabel = (id: string, catalog: CatalogModel[]): string => {
+  const m = catalog.find((c) => c.id === id);
+  if (!m) return id;
+  const ctx = m.context ? fmtTok(m.context) : "—";
+  const price = m.input < 0 ? "—" : `${fmtPrice(m.input)}/${fmtPrice(m.output)}`;
+  return `${id} · ${ctx} · ${price}`;
+};
+
+/** Metadata line for the chosen member model (catalog; unknown parts dropped). */
+export const modelMetaLine = (id: string, catalog: CatalogModel[]): string => {
+  const m = catalog.find((c) => c.id === id);
+  if (!m) return "";
+  const parts: string[] = [];
+  if (m.context) parts.push(`${fmtTok(m.context)} ctx`);
+  if (m.input >= 0) parts.push(`${fmtPrice(m.input)} in / ${fmtPrice(m.output)} out`);
+  return parts.join(" · ");
+};
 
 export interface ComboTotals { requests: number; errors: number; failovers: number; cost: number }
 
@@ -92,7 +116,8 @@ export function CombosTab() {
     setBusy(true);
     try {
       const next = parseDraft(draft);
-      if (!next.name || !next.model || next.members.length === 0) throw new Error("name, model and at least one member are required");
+      if (!next.name || next.members.length === 0) throw new Error("name and at least one member are required");
+      if (next.members.some((m) => !m.model)) throw new Error("every member needs a provider and a model");
       // PUT swaps the whole list: replace the edited entry (or append)
       const list = combos.some((c) => c.name === next.name)
         ? combos.map((c) => (c.name === next.name ? next : c))
@@ -128,7 +153,7 @@ export function CombosTab() {
   return (
     <>
       <PageHead title="Combos" desc="Virtual pooled models: one id fanning out over several providers, with routing analytics">
-        <button className="btn primary" onClick={() => setDraft({ name: "", model: "", strategy: "", members: [{ provider: "", model: "", keys: [], weight: "" }] })}>
+        <button className="btn primary" onClick={() => setDraft({ name: "", type: "chat", strategy: "", members: [{ provider: "", model: "", keys: [], weight: "" }] })}>
           + New combo
         </button>
       </PageHead>
@@ -139,7 +164,7 @@ export function CombosTab() {
       ) : combos.length === 0 ? (
         <div className="card">
           <Empty>
-            no combos yet — a combo pools one model across providers behind a single <span className="mono">combo/&lt;name&gt;</span> id your agents request like any model.
+            no combos yet — a combo pools models across providers behind a single <span className="mono">combo/&lt;name&gt;</span> id your agents request like any model.
           </Empty>
         </div>
       ) : (
@@ -147,7 +172,7 @@ export function CombosTab() {
           <div className="card" style={{ marginBottom: 16 }}>
             <table className="table">
               <thead>
-                <tr><th>combo id</th><th>model</th><th>members</th><th>strategy</th><th className="n">requests</th><th className="n col-lg">failover</th><th></th></tr>
+                <tr><th>combo id</th><th className="col-lg">members</th><th>strategy</th><th className="n">requests</th><th className="n col-lg">failover</th><th></th></tr>
               </thead>
               <tbody>
                 {combos.map((c) => {
@@ -155,9 +180,10 @@ export function CombosTab() {
                   const t = comboTotals(rows);
                   return (
                     <tr key={c.name}>
-                      <td className="mono">{`combo/${c.name}`}</td>
-                      <td className="mono">{c.model}</td>
-                      <td>{c.members.map((m) => m.provider).join(", ")}</td>
+                      <td className="mono">{`combo/${c.name}`}{c.type === "decision" && <span className="badge" style={{ marginLeft: 6 }} title="decision models — advertised on /v1/systemone/models">clf</span>}</td>
+                      <td className="col-lg">{c.members.map((m) => (
+                        <span key={m.provider} className="mono faint" style={{ marginRight: 8, fontSize: 13 }}>{m.provider}/{m.model || "?"}</span>
+                      ))}</td>
                       <td>{c.strategy === "weighted-rr" ? "weighted-rr" : "priority"}</td>
                       <td className="n">{fmtN(t.requests)}</td>
                       <td className="n col-md">{t.requests > 0 ? fmtPct(t.failovers, t.requests) : "–"}</td>
@@ -184,9 +210,10 @@ export function CombosTab() {
           {combos.map((c) => {
             const rows = byCombo.get(`combo/${c.name}`) ?? [];
             const t = comboTotals(rows);
+            const memberModels = new Map(c.members.map((m) => [m.provider, m.model || c.model || ""]));
             return (
               <div className="card" key={c.name} style={{ marginBottom: 16 }}>
-                <h3>{`combo/${c.name}`} <span className="faint mono" style={{ fontSize: 13 }}>{c.model}</span></h3>
+                <h3>{`combo/${c.name}`}</h3>
                 <div className="grid stats">
                   <StatCard label="Requests" value={fmtN(t.requests)} />
                   <StatCard label="Failover rate" value={t.requests > 0 ? fmtPct(t.failovers, t.requests) : "–"} sub={`${fmtN(t.failovers)} skipped member tries`} />
@@ -196,12 +223,19 @@ export function CombosTab() {
                 {rows.length > 0 ? (
                   <table className="table">
                     <thead>
-                      <tr><th>provider</th><th className="n">share</th><th className="n">requests</th><th className="n">tokens</th><th className="n">ttft p50</th><th className="n">failovers</th><th className="n">cost</th></tr>
+                      <tr><th>provider</th><th className="col-lg">model</th><th className="n">share</th><th className="n">requests</th><th className="n">tokens</th><th className="n">ttft p50</th><th className="n">failovers</th><th className="n">cost</th></tr>
                     </thead>
                     <tbody>
-                      {rows.map((r) => (
+                      {rows.map((r) => {
+                        const mid = memberModels.get(r.provider) || "";
+                        const meta = mid ? modelMetaLine(mid, catReq.data?.models ?? []) : "";
+                        return (
                         <tr key={r.provider}>
                           <td>{r.provider}</td>
+                          <td className="col-lg">
+                            <span className="mono" style={{ fontSize: 13 }}>{mid || "—"}</span>
+                            {meta && <div className="faint" style={{ fontSize: 12 }}>{meta}</div>}
+                          </td>
                           <td className="n">
                             {(() => {
                               const pct = Math.round((r.requests / Math.max(t.requests, 1)) * 100);
@@ -221,7 +255,8 @@ export function CombosTab() {
                           <td className="n">{fmtN(r.failovers)}</td>
                           <td className="n">{fmtUSD(r.cost)}</td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 ) : (
@@ -243,12 +278,19 @@ export function CombosTab() {
               <div className="field-hint">exposed as <span className="mono">combo/{draft.name || "<name>"}</span></div>
             </div>
             <div className="field">
-              <label htmlFor="cb-model">model</label>
-              <input id="cb-model" className="mono" list="cb-models" value={draft.model} placeholder="deepseek-v4.1-flash"
-                onChange={(e) => setDraft({ ...draft, model: e.target.value })} />
-              <datalist id="cb-models">
-                {modelIds(provReq.data?.providers ?? [], catReq.data?.models ?? []).map((m) => <option key={m} value={m} />)}
-              </datalist>
+              <label htmlFor="cb-type">combo type</label>
+              <select id="cb-type" value={draft.type}
+                onChange={(e) => setDraft((d) => d && ({
+                  ...d,
+                  type: e.target.value,
+                  // switching type prunes members whose provider can't serve it
+                  // (unset members stay — they're placeholders, not illegal)
+                  members: d.members.filter((m) => !m.provider || providersForType(provReq.data?.providers ?? [], e.target.value).some((p) => p.name === m.provider)),
+                }))}>
+                <option value="chat">chat models</option>
+                <option value="decision">decision models</option>
+              </select>
+              <div className="field-hint">decision = System One models (Jev) over classifier providers · advertised on /v1/systemone/models</div>
             </div>
             <div className="field">
               <label htmlFor="cb-strategy">strategy</label>
@@ -272,23 +314,35 @@ export function CombosTab() {
                     <select aria-label={`provider ${i + 1}`} value={m.provider}
                       onChange={(e) => setMember(i, { provider: e.target.value, keys: [] })}>
                       <option value="">—</option>
-                      {(provReq.data?.providers ?? []).filter((p) => !p.disabled).map((p) => (
+                      {providersForType(provReq.data?.providers ?? [], draft.type).map((p) => (
                         <option key={p.name} value={p.name}>{p.name}</option>
                       ))}
                     </select>
                   </td>
                   <td>
                     {(() => {
-                      const models = providerModels(provReq.data?.providers ?? [], m.provider);
+                      const cat = catReq.data?.models ?? [];
+                      const models = memberModelsFor(provReq.data?.providers ?? [], m.provider, draft.type, cat);
                       return models.length > 0 ? (
+                        <>
                         <select className="mono" aria-label={`model at provider ${i + 1}`} value={m.model}
                           onChange={(e) => setMember(i, { model: e.target.value })}>
-                          <option value="">= combo model</option>
-                          {models.map((id) => <option key={id} value={id}>{id}</option>)}
+                          <option value="">—</option>
+                          {models.map((id) => <option key={id} value={id}>{modelOptionLabel(id, cat)}</option>)}
                         </select>
+                        {m.model && (() => {
+                          const meta = modelMetaLine(m.model, cat);
+                          const isClf = cat.find((c) => c.id === m.model)?.family === "classifier";
+                          return meta ? (
+                            <div className="faint" style={{ fontSize: 12 }}>{isClf ? "clf · " : ""}{meta}</div>
+                          ) : isClf ? (
+                            <div className="faint" style={{ fontSize: 12 }}>clf · decision model</div>
+                          ) : null;
+                        })()}
+                        </>
                       ) : (
                         <input className="mono" aria-label={`model at provider ${i + 1}`} value={m.model} style={{ width: 170 }}
-                          placeholder={draft.model ? `= ${draft.model}` : "same as combo"}
+                          placeholder="upstream model id"
                           onChange={(e) => setMember(i, { model: e.target.value })} />
                       );
                     })()}

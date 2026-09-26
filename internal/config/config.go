@@ -55,10 +55,10 @@ type Provider struct {
 }
 
 type AuthConf struct {
-	Type        string   `yaml:"type"` // static | oauth
-	Keys        []string `yaml:"keys"`
-	KeyLabels   []string `yaml:"key_labels"`   // optional, index-aligned with Keys
-	KeyDisabled []bool   `yaml:"key_disabled"` // optional, index-aligned with Keys; true = key excluded from dispatch
+	Type        string       `yaml:"type"` // static | oauth
+	Keys        []string     `yaml:"keys"`
+	KeyLabels   []string     `yaml:"key_labels"`   // optional, index-aligned with Keys
+	KeyDisabled []bool       `yaml:"key_disabled"` // optional, index-aligned with Keys; true = key excluded from dispatch
 	OAuth       []*OAuthAcct `yaml:"oauth_accounts"`
 }
 
@@ -100,22 +100,27 @@ type Key struct {
 	CreatedAt int64 `yaml:"created_at,omitempty"`
 }
 
-// Combo is a named virtual model (exposed as "combo/<name>") pooling the same
-// underlying model from several providers. Member order is the failover chain;
-// "all keys, auto" = no key selection.
+// Combo is a named virtual model (exposed as "combo/<name>") pooling model
+// ids across several providers. Model is the natural id every member serves;
+// omit it and each member dispatches its own (per-member Model required).
+// Member order is the failover chain; "all keys, auto" = no key selection.
+// A combo is homogeneous: all-chat or all-decision (classifier) members —
+// Type pins which ("chat" default, "decision" all-classifier); decision
+// combos advertise on /v1/systemone/models, chat combos on /v1/models.
 type Combo struct {
-	Name     string         `yaml:"name" json:"name"`     // exposed id is combo/<name>
-	Model    string         `yaml:"model" json:"model"`    // natural model id every member serves
-	Strategy string         `yaml:"strategy" json:"strategy"` // "" inherit | priority | weighted-rr
+	Name     string         `yaml:"name" json:"name"`                     // exposed id is combo/<name>
+	Model    string         `yaml:"model" json:"model"`                   // optional natural id; empty = per-member ids
+	Type     string         `yaml:"type,omitempty" json:"type,omitempty"` // "" | chat | decision
+	Strategy string         `yaml:"strategy" json:"strategy"`             // "" inherit | priority | weighted-rr
 	Members  []*ComboMember `yaml:"members" json:"members"`
 }
 
 // ComboMember is one provider in the pool. Keys lists key labels (static) or
 // oauth account names to pin; empty = all enabled connections of the provider.
-// Model is the upstream id at that provider (defaults to the combo's model —
-// set it when the provider curates a different id for the same model, e.g.
-// "deepseek/deepseek-v4.1-flash" vs "deepseek-v4.1-flash"). Weight drives
-// weighted-rr head selection.
+// Model is the upstream id at that provider — required when the combo has no
+// model, else defaults to the combo's (set it when the provider curates a
+// different id for the same model, e.g. "deepseek/deepseek-v4.1-flash" vs
+// "deepseek-v4.1-flash"). Weight drives weighted-rr head selection.
 type ComboMember struct {
 	Provider string   `yaml:"provider" json:"provider"`
 	Model    string   `yaml:"model,omitempty" json:"model,omitempty"`
@@ -249,9 +254,9 @@ var DefaultCosts = map[string]*Cost{
 	"typesafe/jev-1.13": {Input: 0.042},
 	"typesafe/jev":      {Input: 0.04},
 	"jev":               {Input: 0.042},
-	"minimax-m3":       {Input: 0.30, Output: 1.20, CacheRead: 0.03},
-	"qwen3.7-max":      {Input: 0.60, Output: 2.40, CacheRead: 0.06},
-	"grok-4.5":         {Input: 3.00, Output: 15.00, CacheRead: 0.30},
+	"minimax-m3":        {Input: 0.30, Output: 1.20, CacheRead: 0.03},
+	"qwen3.7-max":       {Input: 0.60, Output: 2.40, CacheRead: 0.06},
+	"grok-4.5":          {Input: 3.00, Output: 15.00, CacheRead: 0.30},
 }
 
 func Load(path string) (*Config, error) {
@@ -404,6 +409,7 @@ func (c *Config) Validate() error {
 	// combos: validate against the same provider set, mirroring route rules
 	names2 := map[string]bool{}
 	for _, cb := range c.Combos {
+		clf := 0 // classifier members; any>0 && <len is a mixed combo → invalid
 		if !ValidComboName(cb.Name) {
 			return fmt.Errorf("combo %q: name must be 1-64 lowercase letters, digits, dots or hyphens", cb.Name)
 		}
@@ -413,9 +419,6 @@ func (c *Config) Validate() error {
 		names2[cb.Name] = true
 		if strings.HasPrefix(cb.Model, "combo/") {
 			return fmt.Errorf("combo %q: model cannot itself be a combo", cb.Name)
-		}
-		if cb.Model == "" {
-			return fmt.Errorf("combo %q: missing model", cb.Name)
 		}
 		if len(cb.Members) == 0 {
 			return fmt.Errorf("combo %q needs at least one member", cb.Name)
@@ -439,7 +442,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("combo %q references unknown provider %q", cb.Name, m.Provider)
 			}
 			if wires[m.Provider] == "classifier" {
-				return fmt.Errorf("combo %q: classifier provider %q cannot serve combos", cb.Name, m.Provider)
+				clf++
 			}
 			for _, lbl := range m.Keys {
 				if !comboKeyExists(byName[m.Provider], lbl) {
@@ -448,12 +451,31 @@ func (c *Config) Validate() error {
 			}
 			// a member without its own model must actually serve the combo's —
 			// otherwise the combo silently 404s (curation check skips the member)
-			if m.Model == "" {
+			if m.Model == "" && cb.Model != "" {
 				p := byName[m.Provider]
 				if len(p.Models) > 0 && !slices.Contains(p.Models, cb.Model) && !mapContains(p.ModelMap, cb.Model) {
 					return fmt.Errorf("combo %q: provider %s does not serve %q — set the member's model (it curates %q)", cb.Name, m.Provider, cb.Model, p.Models)
 				}
 			}
+			if m.Model == "" && cb.Model == "" {
+				return fmt.Errorf("combo %q: member %s needs a model (combo model not set)", cb.Name, m.Provider)
+			}
+		}
+		// Type is the declared intent; membership must match it exactly. A chat
+		// combo must have no classifier members (a decision member would resolve
+		// requests onto a wire that can't answer), and a decision combo must be
+		// all-classifier (otherwise the decision endpoint could hit chat wires).
+		switch cb.Type {
+		case "", "chat":
+			if clf > 0 {
+				return fmt.Errorf("combo %q: cannot mix decision (classifier) providers with chat providers", cb.Name)
+			}
+		case "decision":
+			if clf != len(cb.Members) {
+				return fmt.Errorf("combo %q: decision type requires every member to be a decision (classifier) provider", cb.Name)
+			}
+		default:
+			return fmt.Errorf("combo %q: type must be chat|decision", cb.Name)
 		}
 	}
 	switch c.Routing.Strategy {

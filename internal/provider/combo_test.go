@@ -112,6 +112,37 @@ func TestComboModelsAdvertised(t *testing.T) {
 	}
 }
 
+// A decision combo must resolve to its classifier providers (member ids as
+// overrides) and stay OUT of the chat /v1/models advertisement.
+func TestClassifierComboResolveAndAdvertisement(t *testing.T) {
+	cfg := comboConfig()
+	cfg.Providers = append(cfg.Providers,
+		&config.Provider{Name: "typesafe", Wire: "classifier", BaseURL: "https://ts", Models: []string{"jev-latest"},
+			Auth: config.AuthConf{Type: "static", Keys: []string{"ts1"}}},
+		&config.Provider{Name: "or-clf", Wire: "classifier", BaseURL: "https://or", Models: []string{"typesafe/jev-1.13"},
+			Auth: config.AuthConf{Type: "static", Keys: []string{"or1", "or2"}}})
+	cfg.Combos = append(cfg.Combos, &config.Combo{Name: "jev", Type: "decision", Members: []*config.ComboMember{
+		{Provider: "typesafe", Model: "jev-latest"},
+		{Provider: "or-clf", Model: "typesafe/jev-1.13"},
+	}})
+	reg := New(cfg)
+
+	tgts := reg.Resolve("combo/jev", []string{"*"})
+	gotNames, gotModels := []string{}, []string{}
+	for _, tgt := range tgts {
+		gotNames = append(gotNames, tgt.Provider.Name)
+		gotModels = append(gotModels, tgt.ModelOverride)
+	}
+	if !eq(gotNames, []string{"typesafe", "or-clf", "or-clf"}) || !eq(gotModels, []string{"jev-latest", "typesafe/jev-1.13", "typesafe/jev-1.13"}) {
+		t.Fatalf("classifier combo targets: %v %v", gotNames, gotModels)
+	}
+	for _, m := range reg.Models() {
+		if m == "combo/jev" {
+			t.Fatal("classifier combo leaked into chat /v1/models")
+		}
+	}
+}
+
 func TestComboDisabledMemberSkipped(t *testing.T) {
 	cfg := comboConfig()
 	cfg.Providers[1].Disabled = true

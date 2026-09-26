@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { post, put, del, get, ProviderRow, CatalogModel, ProbeResult, QuotaGroup, CooldownRow } from "../api";
+import { post, put, del, get, fmtPrice, fmtTok, ProviderRow, CatalogModel, ProbeResult, QuotaGroup, CooldownRow } from "../api";
 import { useApi, usePoll, useSorted } from "../hooks";
 import { Confirm, Empty, ErrorBanner, Modal, PageHead, Skeleton, toast } from "../components";
 import { IconEdit, IconPlay, IconX } from "../icons";
@@ -96,13 +96,6 @@ export const rowToForm = (p: ProviderRow): ProviderForm => ({
   extra_headers: p.extra_headers ? JSON.stringify(p.extra_headers, null, 2) : "",
   body_overrides: p.body_overrides ? JSON.stringify(p.body_overrides, null, 2) : "",
 });
-
-// -1 = unknown pricing (models.dev has no per-token cost) — never shown as "free"
-const fmtPrice = (n: number) => (n < 0 ? "—" : n === 0 ? "free" : `$${n}`);
-const fmtTok = (n: number) =>
-  n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`
-  : n >= 1_000 ? `${(n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1)}K`
-  : String(n);
 
 /** Registry card state for one registry provider: which config providers implement it. */
 export const groupFor = (r: RegistryProvider, provs: ProviderRow[]): ProviderRow[] =>

@@ -177,6 +177,17 @@ func (s *Server) handleSystemoneModels(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]model, 0) // never nil — empty registry must marshal as [], not null
 	seen := map[string]bool{}
+	for _, cb := range s.Proxy.Reg.Config().Combos {
+		if !s.Proxy.Reg.ClassifierCombo(cb) {
+			continue // chat combos live on /v1/models
+		}
+		id := config.ComboID(cb.Name)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		data = append(data, model{ID: id, Object: "model", Owned: "combo", Family: "classifier"})
+	}
 	for _, p := range s.Proxy.Reg.Config().Providers {
 		if p.Disabled || p.Wire != proxy.WireClassifier {
 			continue

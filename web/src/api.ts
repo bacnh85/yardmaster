@@ -77,7 +77,9 @@ export interface ComboMemberRow {
   weight?: number; // weighted-rr only
 }
 export interface ComboRow {
-  name: string; model: string;
+  name: string;
+  model?: string; // optional natural id; absent = per-member models (required per member)
+  type?: string; // "chat" (default) | "decision" — decision = classifier members only
   strategy?: string; // "priority" (default) | "weighted-rr"
   members: ComboMemberRow[];
 }
@@ -113,6 +115,11 @@ export const fmtUSD = (n: number, currency?: string) => {
 };
 export const fmtMs = (n: number | null | undefined) =>
   n == null ? "–" : n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${Math.round(n)}ms`; // seconds ≥1s: mixed units on adjacent cards read worse
+export const fmtPrice = (n: number) => (n < 0 ? "—" : n === 0 ? "free" : `$${n}`);
+export const fmtTok = (n: number) =>
+  n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`
+  : n >= 1_000 ? `${(n / 1_000).toFixed(n % 1_000 === 0 ? 0 : 1)}K`
+  : String(n);
 export const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
 export const fmtDur = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
