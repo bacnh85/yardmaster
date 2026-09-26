@@ -881,3 +881,92 @@ func TestQuotaDeleteInvalidatesCache(t *testing.T) {
 		t.Errorf("remaining account %v, want Beta", out.Quotas[0].Accounts[0]["label"])
 	}
 }
+
+// TestQuotaDisabledConnectionHidden mirrors registry.Targets(): a per-key
+// disabled connection must not be fetched upstream nor rendered on #/quota.
+func TestQuotaDisabledConnectionHidden(t *testing.T) {
+	hits := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(ccCreditsJSON))
+	}))
+	defer up.Close()
+	resetQuotaCache(t, &hits, up.URL)
+
+	cfg := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "cmdcode", BaseURL: "https://api.commandcode.ai/provider/v1", Wire: "openai", Preset: "cmdcode",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"k1-secret", "k2-secret"}, KeyLabels: []string{"Alpha", "Beta"}}},
+		},
+	}
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	reg := provider.New(cfg)
+	p := proxy.NewProxy(reg, st, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, cfgPath, "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	count := func() int {
+		code, b := adminDo(t, ts, "GET", "quota", "")
+		if code != 200 {
+			t.Fatalf("quota GET: %d %s", code, b)
+		}
+		var out struct {
+			Quotas []struct {
+				Source   string           `json:"source"`
+				Accounts []map[string]any `json:"accounts"`
+			} `json:"quotas"`
+		}
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatalf("decode: %v\n%s", err, b)
+		}
+		if len(out.Quotas) == 0 {
+			return 0
+		}
+		return len(out.Quotas[0].Accounts)
+	}
+
+	disable := func(idx int, dis bool) {
+		body := fmt.Sprintf(`{"disabled":%t}`, dis)
+		if code, b := adminDo(t, ts, "PUT", fmt.Sprintf("providers/cmdcode/keys/%d", idx), body); code != 200 {
+			t.Fatalf("key disable: %d %s", code, b)
+		}
+	}
+
+	// warm: two accounts, one upstream hit each
+	if n := count(); n != 2 {
+		t.Fatalf("warm: %d accounts, want 2", n)
+	}
+	// disable Alpha → only Beta, no refetch of Alpha
+	before := hits
+	disable(0, true)
+	if n := count(); n != 1 {
+		t.Fatalf("after disable 0: %d accounts, want 1", n)
+	}
+	if hits != before+1 { // only k2 refetched
+		t.Fatalf("hits %d, want %d (disabled key must not be fetched)", hits, before+1)
+	}
+	// disable Beta too → group disappears entirely
+	disable(1, true)
+	if n := count(); n != 0 {
+		t.Fatalf("after disable 1: %d accounts, want 0 (empty group)", n)
+	}
+	// re-enable Alpha → account returns
+	disable(0, false)
+	if n := count(); n != 1 {
+		t.Fatalf("after re-enable: %d accounts, want 1", n)
+	}
+}

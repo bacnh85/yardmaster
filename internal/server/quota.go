@@ -605,6 +605,9 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 			origin = "https://api.z.ai" + billingPaths["zai"] // monitor endpoint lives on api.z.ai, even for ultra-route providers
 		}
 		for i, key := range p.Auth.Keys {
+			if i < len(p.Auth.KeyDisabled) && p.Auth.KeyDisabled[i] {
+				continue // disabled connection: dispatches no traffic → no usage row
+			}
 			if g.fetched[key] {
 				continue
 			}
@@ -641,6 +644,9 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 	report := make([]ProviderQuota, 0, len(order))
 	for _, src := range order {
 		g := groups[src]
+		if len(g.pq.Accounts) == 0 {
+			continue // every connection disabled — nothing to show
+		}
 		g.pq.FetchedAt = now.UnixMilli()
 		report = append(report, *g.pq)
 	}
