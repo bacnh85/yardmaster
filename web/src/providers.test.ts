@@ -124,10 +124,10 @@ const baseRow: ProviderRow = {
 describe("prefix registry", () => {
   it("every registry provider carries a short routing prefix", () => {
     expect(REGISTRY.map((r) => [r.id, r.prefix])).toEqual([
-      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"], ["typesafe", "jev"], ["ollama", "ol"],
+      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"], ["typesafe", "jev"], ["ollama", "ol"], ["nvidia", "nv"],
     ]);
     expect(REGISTRY.map((r) => [r.id, r.code])).toEqual([
-      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"], ["typesafe", "TS"], ["ollama", "OL"],
+      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"], ["typesafe", "TS"], ["ollama", "OL"], ["nvidia", "NV"],
     ]);
   });
 });
@@ -153,7 +153,7 @@ describe("registry", () => {
   });
 
   it("has the providers the product must support", () => {
-    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "ollama", "opencode-go", "openrouter", "typesafe", "zai"]);
+    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "nvidia", "ollama", "opencode-go", "openrouter", "typesafe", "zai"]);
     const zen = REGISTRY.find((r) => r.id === "opencode-go")!;
     expect(zen.entries).toHaveLength(3); // one config provider per wire family
     for (const e of zen.entries) {
@@ -183,6 +183,13 @@ describe("registry", () => {
     expect(ol.planOf?.("glm-5.3")).toBe("pro");
     expect(ol.entries).toHaveLength(1);
     expect(ol.entries[0]).toMatchObject({ name: "ollama", wire: "openai", base_url: "https://ollama.com/v1", family: "chat" });
+    // Nvidia NIM: single openai-wire entry, no plan tiers ("free" is pricing,
+    // surfaced by the catalog Free flag + price filter); /v1/models is public,
+    // catalog metadata from models.dev "nvidia"
+    const nv = REGISTRY.find((r) => r.id === "nvidia")!;
+    expect(nv.plans).toBeFalsy();
+    expect(nv.entries).toHaveLength(1);
+    expect(nv.entries[0]).toMatchObject({ name: "nvidia", wire: "openai", base_url: "https://integrate.api.nvidia.com/v1", family: "chat" });
   });
 
   it("classifies CommandCode models per plan (live catalog ids)", () => {

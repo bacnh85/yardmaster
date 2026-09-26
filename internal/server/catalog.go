@@ -102,6 +102,8 @@ func modelsDevProviderID(baseURL string) string {
 		return "openrouter"
 	case strings.Contains(b, "ollama.com"):
 		return "ollama-cloud"
+	case strings.Contains(b, "integrate.api.nvidia.com"):
+		return "nvidia"
 	}
 	return ""
 }

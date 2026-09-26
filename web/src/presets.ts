@@ -92,6 +92,13 @@ export const REGISTRY: RegistryProvider[] = [
       { name: "ollama", wire: "openai", base_url: "https://ollama.com/v1", family: "chat", familyLabel: "GLM · DeepSeek · Kimi · MiniMax · gpt-oss" },
     ],
   },
+  {
+    id: "nvidia", title: "Nvidia NIM (NV)", code: "NV", prefix: "nv",
+    desc: "Nvidia NIM open-model gateway — Nemotron, Llama, GLM, Kimi, DeepSeek + free tier; most catalog models cost $0",
+    entries: [
+      { name: "nvidia", wire: "openai", base_url: "https://integrate.api.nvidia.com/v1", family: "chat", familyLabel: "Nemotron · Llama · GLM · Kimi · DeepSeek · free tier" },
+    ],
+  },
 ];
 
 // Command Code plan tiers, by live catalog id (api.commandcode.ai/provider/v1/models,

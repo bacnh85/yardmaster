@@ -112,6 +112,18 @@ providers:
     auth: { type: static, keys: ["..."] }
     models: [glm-5.3, glm-5.3-flash, deepseek-v4.1-flash, kimi-k3, "gpt-oss:120b"]
 
+  # --- Nvidia NIM (https://build.nvidia.com) ---
+  # OpenAI-compatible gateway for Nemotron / Llama / GLM / Kimi / DeepSeek open
+  # models. Free signup credits; most catalog models cost $0 — the dashboard's
+  # "free" price filter lists them. /v1/models is public (catalog enriched
+  # from models.dev "nvidia"). No usage API → no Quota tab entry.
+  # - name: nvidia
+  #   base_url: https://integrate.api.nvidia.com/v1
+  #   wire: openai
+  #   prefix: nv
+  #   auth: { type: static, keys: ["nvapi-..."] }
+  #   models: [z-ai/glm-5.3, z-ai/glm-5.3-flash, moonshotai/kimi-k3, deepseek-ai/deepseek-v4.1-flash]
+
   # --- OpenCode Go / OpenCode Zen (https://opencode.ai/zen) ---
   # One gateway, three wire families — add the entries you need (dashboard
   # presets do this in one click; `session: opencode` sends the required

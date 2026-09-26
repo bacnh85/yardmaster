@@ -36,12 +36,14 @@ func TestTokToMtok(t *testing.T) {
 // ollama.com hosts the "ollama-cloud" entry with full catalog metadata.
 func TestModelsDevProviderID(t *testing.T) {
 	cases := map[string]string{
-		"https://ollama.com":            "ollama-cloud",
-		"https://ollama.com/v1":         "ollama-cloud",
-		"https://api.commandcode.ai":    "", // CommandCode carries its own metadata
-		"https://api.deepseek.com":      "deepseek",
-		"https://opencode.ai/zen/go/v1": "opencode-go",
-		"https://api.example.com/v1":    "",
+		"https://ollama.com":                  "ollama-cloud",
+		"https://ollama.com/v1":               "ollama-cloud",
+		"https://integrate.api.nvidia.com":    "nvidia",
+		"https://integrate.api.nvidia.com/v1": "nvidia",
+		"https://api.commandcode.ai":          "", // CommandCode carries its own metadata
+		"https://api.deepseek.com":            "deepseek",
+		"https://opencode.ai/zen/go/v1":       "opencode-go",
+		"https://api.example.com/v1":          "",
 	}
 	for in, want := range cases {
 		if got := modelsDevProviderID(in); got != want {
