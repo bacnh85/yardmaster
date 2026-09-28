@@ -16,9 +16,11 @@ import (
 //	yardmaster oauth import claude-code [file]
 //	yardmaster oauth import codex [file]
 //	yardmaster oauth import opencode [file]
+//	yardmaster oauth import qwen --refresh-token <token>
+//	yardmaster oauth import copilot --token <github-access-token>
 func cmdOAuth(args []string) {
 	if len(args) < 2 || args[0] != "import" {
-		fatal(fmt.Errorf("usage: yardmaster oauth import claude-code|codex|opencode [file]"))
+		fatal(fmt.Errorf("usage: yardmaster oauth import claude-code|codex|opencode [file] | qwen --refresh-token <token> | copilot --token <github-access-token>"))
 	}
 	kind, path := args[1], ""
 	if len(args) > 2 {
@@ -48,8 +50,32 @@ func cmdOAuth(args []string) {
 			path = filepath.Join(home(), ".local", "share", "opencode", "auth.json")
 		}
 		acct, err = importOpencode(path)
+	case "qwen", "copilot":
+		// No local CLI credential store for these kinds: qwen's device flow
+		// (PKCE + polling) lives in the qwen-code CLI, and Copilot's device
+		// flow needs a GitHub app round-trip — accept the token the user
+		// obtained by other means instead.
+		tok := ""
+		for i := 2; i < len(args)-1; i++ {
+			if args[i] == "--refresh-token" {
+				tok = args[i+1]
+			}
+			if args[i] == "--token" {
+				tok = args[i+1]
+			}
+		}
+		if tok == "" {
+			if kind == "qwen" {
+				fatal(fmt.Errorf("usage: yardmaster oauth import qwen --refresh-token <token> (login with `qwen` once, then read it from ~/.qwen/oauth_creds.json)"))
+			}
+			fatal(fmt.Errorf("usage: yardmaster oauth import copilot --token <github-access-token> (github.com/settings/tokens, scope read:user)"))
+		}
+		prov, acct = kind+"-sub", &config.OAuthAcct{Name: kind + "-main", Kind: kind, RefreshTok: tok}
+		if kind == "copilot" {
+			acct.ExpiresAt = 0 // never refreshed: the GitHub token is long-lived
+		}
 	default:
-		fatal(fmt.Errorf("unknown kind %q (claude-code | codex | opencode)", kind))
+		fatal(fmt.Errorf("unknown kind %q (claude-code | codex | opencode | qwen | copilot)", kind))
 	}
 	if err != nil {
 		fatal(err)

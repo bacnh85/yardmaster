@@ -21,7 +21,7 @@ import (
 type ModelMeta struct {
 	ID         string  `json:"id"`
 	Name       string  `json:"name,omitempty"`
-	Family     string  `json:"family"` // chat | anthropic | responses | gemini
+	Family     string  `json:"family"` // chat | anthropic | responses | gemini | classifier
 	Context    int     `json:"context,omitempty"`
 	MaxOutput  int     `json:"max_output,omitempty"`
 	Input      float64 `json:"input"`      // $/Mtok
@@ -316,6 +316,8 @@ func curatedMetas(pv *config.Provider, cached []ModelMeta, dev map[string]models
 			// family follows the serving wire, never models.dev (which has no
 			// typesafe entry anyway) — drives the classifier badge + exclusions
 			mm.Family = "classifier"
+		} else if pv.Wire == proxy.WireGemini {
+			mm.Family = "gemini"
 		} else if dm, ok := byID[canonModelID(id)]; ok {
 			applyDev(&mm, dm, false)
 		} else if dm, ok := devFlat[canonModelID(id)]; ok {
@@ -375,6 +377,9 @@ func (s *Server) upstreamModels(ctx context.Context, p *config.Provider) []Model
 	if json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&body) != nil {
 		return nil
 	}
+	// a gemini-wire provider serves the gemini generateContent surface — the
+	// endpoint-reported family below never produces this label for it
+	isGeminiWire := p.Wire == proxy.WireGemini
 	out := make([]ModelMeta, 0, len(body.Data))
 	for _, m := range body.Data {
 		if m.ID == "" {
@@ -390,6 +395,9 @@ func (s *Server) upstreamModels(ctx context.Context, p *config.Provider) []Model
 			default:
 				mm.Family = "chat"
 			}
+		}
+		if isGeminiWire {
+			mm.Family = "gemini"
 		}
 		// OpenRouter-style live pricing: per-token strings → $/Mtok. Gated on
 		// the pricing object being present — providers whose /models carries no

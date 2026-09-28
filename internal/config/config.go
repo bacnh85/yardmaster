@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -28,17 +29,58 @@ type Config struct {
 // defaults (priority / first). Route.Strategy and Provider.Rotation override
 // these per route/provider.
 type Routing struct {
-	Strategy string `yaml:"strategy" json:"strategy"` // priority | weighted-rr
-	Rotation string `yaml:"rotation" json:"rotation"` // first | round_robin
+	Strategy string    `yaml:"strategy" json:"strategy"`                     // priority | weighted-rr
+	Rotation string    `yaml:"rotation" json:"rotation"`                     // first | round_robin
+	Affinity *Affinity `yaml:"affinity,omitempty" json:"affinity,omitempty"` // nil = disabled (session affinity off)
+}
+
+// Affinity pins a coding-agent session to the provider+connection that served
+// its first request (TTL-bound) so upstream prompt caches — paid cache_write
+// on every inject_cache_control request — actually hit. Header names the
+// inbound session header (default x-session-id; the anthropic
+// metadata.user_id and openai user body fields are always consulted too).
+type Affinity struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	TTLS    int    `yaml:"ttl_s" json:"ttl_s"`   // binding lifetime; 0 = default (3600), negative = invalid
+	Header  string `yaml:"header" json:"header"` // inbound session header; "" = x-session-id
+}
+
+// DefaultAffinityTTLS is the binding lifetime when ttl_s is 0/unset: an
+// hour comfortably covers a coding-agent turn incl. its subagent fan-out.
+const DefaultAffinityTTLS = 3600
+
+// DefaultAffinityHeader is the session header consulted when config.Header
+// is empty.
+const DefaultAffinityHeader = "x-session-id"
+
+// EffectiveTTL returns the binding lifetime in seconds: the configured ttl_s,
+// or the default when unset (0). Negative never reaches here (Validate
+// rejects it); treated as the default defensively so a bypassing caller
+// can't produce a past-expiry binding on every write.
+func (a *Affinity) EffectiveTTL() int {
+	if a == nil || a.TTLS <= 0 {
+		return DefaultAffinityTTLS
+	}
+	return a.TTLS
+}
+
+// EffectiveHeader returns the inbound session header name: the configured
+// header, or the built-in default when unset.
+func (a *Affinity) EffectiveHeader() string {
+	if a == nil || a.Header == "" {
+		return DefaultAffinityHeader
+	}
+	return a.Header
 }
 
 type Provider struct {
 	Name               string            `yaml:"name"`
 	Prefix             string            `yaml:"prefix"` // short routing prefix; models exposed as "prefix/model"
 	BaseURL            string            `yaml:"base_url"`
-	Wire               string            `yaml:"wire"`    // "openai" | "anthropic"
-	Session            string            `yaml:"session"` // "opencode" adds x-opencode-session/client headers
-	Preset             string            `yaml:"preset"`  // registry id this provider was created from (e.g. "opencode-go"); "" = custom
+	ProxyURL           string            `yaml:"proxy_url"` // outbound proxy for upstream dispatch (http|https|socks5); "" = direct
+	Wire               string            `yaml:"wire"`      // "openai" | "anthropic"
+	Session            string            `yaml:"session"`   // "opencode" adds x-opencode-session/client headers
+	Preset             string            `yaml:"preset"`    // registry id this provider was created from (e.g. "opencode-go"); "" = custom
 	Disabled           bool              `yaml:"disabled"`
 	Auth               AuthConf          `yaml:"auth"`
 	Models             []string          `yaml:"models"`               // upstream models this provider serves; empty = any
@@ -46,12 +88,14 @@ type Provider struct {
 	DispatchIntervalMS int               `yaml:"dispatch_interval_ms"` // per-key min interval between request starts; 0 = unthrottled
 	ExtraHeaders       map[string]string `yaml:"extra_headers"`
 	BodyOverrides      map[string]any    `yaml:"body_overrides"`
+	BodyOverridesMode  string            `yaml:"body_overrides_mode"`  // "" = fill (default); override = replace client-sent keys
 	AdaptiveThinking   bool              `yaml:"adaptive_thinking"`    // zai-style thinking:{type:adaptive}+output_config.effort
 	InjectCacheControl bool              `yaml:"inject_cache_control"` // add ephemeral markers when translating to anthropic wire
 	ZcodeSigning       bool              `yaml:"zcode_signing"`        // zai: ZCode desktop parity (identity headers + Client-Signing V4)
 	Subscription       string            `yaml:"subscription"`         // curation guardrail: ""|goat|pro|max — dashboard filters/expose-alls cap to this plan tier
 	HeadersTimeoutS    int               `yaml:"headers_timeout_s"`    // max wait for upstream response headers (default 300)
 	Rotation           string            `yaml:"rotation"`             // first (default) | round_robin — starting key/account per request
+	SkipWhenExhausted  bool              `yaml:"skip_when_exhausted"`  // route around this provider while its billing windows report exhausted
 }
 
 type AuthConf struct {
@@ -72,7 +116,7 @@ func (a *AuthConf) KeyLabel(i int) string {
 
 type OAuthAcct struct {
 	Name          string `yaml:"name"`
-	Kind          string `yaml:"kind"` // claude-code | codex | opencode | custom
+	Kind          string `yaml:"kind"` // claude-code | codex | qwen | copilot | opencode | gemini-cli | custom
 	RefreshTok    string `yaml:"refresh_token"`
 	AccessTok     string `yaml:"access_token"`
 	ExpiresAt     int64  `yaml:"expires_at"`     // unix seconds
@@ -95,6 +139,11 @@ type Key struct {
 	Allow []string `yaml:"allow"`           // route/model patterns; ["*"] = all
 	RPM   int      `yaml:"rpm"`             // inbound requests-per-minute limit; 0 = unlimited
 	Usage *bool    `yaml:"usage,omitempty"` // nil = may read GET /v1/usage (default ON); false = revoked
+	// MonthlyUSD caps the key's calendar-month-to-date spend, enforced in the
+	// server's auth wrap before dispatch. Spend is queried from the store at
+	// gate time — never persisted as key state. 0 = unlimited (default: no
+	// behavior change for keys without a budget).
+	MonthlyUSD float64 `yaml:"monthly_usd,omitempty"`
 	// CreatedAt is when the key was issued (unix ms, same unit as the store's
 	// request ts so one formatter renders both). 0 on legacy hand-written keys.
 	CreatedAt int64 `yaml:"created_at,omitempty"`
@@ -189,6 +238,22 @@ func AuthKindDefaults(kind string) (endpoint, clientID string, ok bool) {
 	case "codex":
 		return "https://auth.openai.com/oauth/token",
 			"app_EMoamEEZ73f0CkXaXp7hrann", true
+	case "qwen":
+		// Qwen Code CLI's OAuth app (qwen-code packages/core/src/qwen/qwenOAuth2.ts)
+		return "https://chat.qwen.ai/api/v1/oauth2/token",
+			"f0304373b74a44d2b584a3fb70ca9e56", true
+	case "gemini-cli":
+		// Gemini CLI's Google OAuth app — refresh default ONLY. Serving gemini
+		// upstreams needs a static API key today (x-goog-api-key): the Code
+		// Assist endpoint these credentials target is a different API shape
+		// (v1internal) and out of scope.
+		return "https://oauth2.googleapis.com/token",
+			"681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j", true
+	case "copilot":
+		// Copilot has no refresh grant: refresh_token carries the long-lived
+		// GitHub access token, exchanged for a short-lived Copilot token at
+		// dispatch time (proxy). Endpoint/client_id left unset on purpose.
+		return "", "", false
 	}
 	return "", "", false
 }
@@ -288,6 +353,17 @@ func (c *Config) Defaults() {
 }
 
 func (c *Config) Validate() error {
+	// affinity: 0 ttl_s means "use the default" (applied lazily by the proxy
+	// via EffectiveTTL — left 0 here so Validate stays side-effect-light and
+	// Reload-while-running doesn't surprise readers); negative is a config bug
+	if a := c.Routing.Affinity; a != nil {
+		if a.TTLS < 0 {
+			return fmt.Errorf("routing.affinity.ttl_s must be >= 0")
+		}
+		if a.Enabled && a.Header != "" && strings.TrimSpace(a.Header) != a.Header {
+			return fmt.Errorf("routing.affinity.header must not have leading/trailing whitespace")
+		}
+	}
 	names := map[string]bool{}
 	for _, p := range c.Providers {
 		if p.Name == "" {
@@ -312,8 +388,15 @@ func (c *Config) Validate() error {
 		if p.BaseURL == "" {
 			return fmt.Errorf("provider %s: missing base_url", p.Name)
 		}
-		if p.Wire != "openai" && p.Wire != "anthropic" && p.Wire != "responses" && p.Wire != "classifier" {
-			return fmt.Errorf("provider %s: wire must be openai|anthropic|responses|classifier", p.Name)
+		// http.Transport dials http/https/socks5 proxy URLs natively; anything
+		// else would only fail at dispatch — reject it at load instead
+		if p.ProxyURL != "" {
+			if u, err := url.Parse(p.ProxyURL); err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") {
+				return fmt.Errorf("provider %s: proxy_url must parse with scheme http|https|socks5", p.Name)
+			}
+		}
+		if p.Wire != "openai" && p.Wire != "anthropic" && p.Wire != "responses" && p.Wire != "classifier" && p.Wire != "gemini" {
+			return fmt.Errorf("provider %s: wire must be openai|anthropic|responses|classifier|gemini", p.Name)
 		}
 		// classifier providers speak /systemone (typed decisions), never chat —
 		// a wildcard would resolve any model id onto a wire that can't serve it
@@ -332,6 +415,9 @@ func (c *Config) Validate() error {
 		if p.Rotation != "" && p.Rotation != "first" && p.Rotation != "round_robin" {
 			return fmt.Errorf("provider %s: rotation must be first|round_robin", p.Name)
 		}
+		if p.BodyOverridesMode != "" && p.BodyOverridesMode != "fill" && p.BodyOverridesMode != "override" {
+			return fmt.Errorf("provider %s: body_overrides_mode must be fill|override", p.Name)
+		}
 		if !ValidSubscription(p.Subscription) {
 			return fmt.Errorf("provider %s: subscription must be empty|goat|pro|max|free", p.Name)
 		}
@@ -348,6 +434,12 @@ func (c *Config) Validate() error {
 			if a.TokenEndpoint == "" || a.ClientID == "" {
 				ep, cid, ok := AuthKindDefaults(a.Kind)
 				if !ok {
+					// copilot needs neither (kind: exchange endpoint is baked
+					// into the proxy); anything else without defaults must be
+					// fully specified — unknown kinds stay legal this way
+					if a.Kind == "copilot" {
+						continue
+					}
 					return fmt.Errorf("provider %s: account %s: unknown kind %q — set token_endpoint + client_id, or use kind claude-code|codex", p.Name, a.Name, a.Kind)
 				}
 				if a.TokenEndpoint == "" {

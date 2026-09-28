@@ -35,12 +35,23 @@ yardmaster's design goals are different:
   p95 ≤ 1 ms** at 200–500 concurrent streams × 300 tok/s, zero stalls
   (`yardmaster bench`).
 - **Wire surface**: `POST /v1/chat/completions` (OpenAI), `POST /v1/messages`
-  (Anthropic), and `POST /v1/responses` (OpenAI Responses — pi/codex clients)
-  in; OpenAI, Anthropic, or Responses wire per upstream (same-wire requests are
-  byte-exact passthrough). Full translation (tool calls, thinking/reasoning,
-  usage) between the wires. `GET /v1/models` lists the enriched catalog.
+  (Anthropic), `POST /v1/responses` (OpenAI Responses — pi/codex clients), and
+  `POST /v1beta/models/{model}:generateContent` (Gemini-native — streaming via
+  the `:streamGenerateContent?alt=sse` variant; auth accepts `x-goog-api-key`)
+  in; OpenAI, Anthropic, Responses, or Gemini wire per upstream (same-wire
+  requests are byte-exact passthrough; a Gemini upstream needs a static API
+  key today — `x-goog-api-key`; the `gemini-cli` OAuth kind is a refresh-only
+  default, its Code Assist endpoint is a different API shape). Full
+  translation (tool calls, thinking/reasoning, usage) between all four wires.
+  `POST
+  /v1/messages/count_tokens` counts against the first same-wire anthropic
+  upstream for an exact number (chars/4 estimate as the fallback when no
+  anthropic upstream serves the model). `GET /v1/models` lists the enriched
+  catalog.
 - **Ordered failover**: model → provider chain; any upstream >=400 falls
   through to the next provider/key; the last real upstream error is surfaced.
+  Every response carries `X-Yardmaster-Provider/Model/Key/Attempts` (cost +
+  cache-read on non-streaming), so failover is observable from the client.
 - **Combos**: one virtual model id pooling models across providers —
   `combo/deepseek-v4.1-flash` fans out over OpenCode Go, Command Code, the
   DeepSeek API (per-member upstream ids with the combo model optional, pin
@@ -51,6 +62,10 @@ yardmaster's design goals are different:
   [docs/classifier.md](docs/classifier.md). Routing analytics (which member
   served what, failover rate, cost split) in the dashboard Combos tab, kept
   current on a 10s poll.
+- **Per-provider outbound proxy**: `proxy_url: socks5://…` (also http/https)
+  on any provider routes that provider's upstream dispatch through the proxy —
+  oauth refresh, quota windows, and catalog fetches stay direct. Built lazily
+  per provider, so config reload swaps proxies without a restart.
 - **Z.ai GLM Coding Plan support** (`session`-style providers, see config):
   Anthropic wire, `cache_control` injection (cache reads ≈ 0.1x input — the
   subscription multiplier), fast mode, adaptive thinking, and a per-key
@@ -73,6 +88,14 @@ yardmaster's design goals are different:
   path on any wire.
 
   ![Providers dashboard](docs/dashboard-providers.png)
+- **Inbound keys & hardening**: per-key RPM limits answer **429 + Retry-After**
+  (agents retry instead of treating the limit as a bad-key 401); per-key
+  `monthly_usd` spend caps answer 429 `budget_exceeded` when month-to-date
+  spend hits the cap (spend read through a 60s cache; `count_tokens` stays
+  usable for context trimming); the admin keys API carries
+  `monthly_usd`/`month_spent`/`month_limit_pct`; the
+  admin login bans an IP for 30 min after 5 consecutive failures; provider
+  cooldowns persist across restarts via SQLite.
 - **Stats**: SQLite request log (async batched), per-model/provider/key
   breakdowns, TTFT p50/p95, cache hit rate, cost accounting (config-editable
   per-model prices; built-in estimates), live SSE feed, embedded dashboard
@@ -145,7 +168,7 @@ routes:
 # 30s); 3×5xx in 60s cools 30s. See docs/routing.md for the full model.
 
 keys:
-  - { key: "ar-...", name: pi-laptop, allow: ["*"], rpm: 0 }
+  - { key: "ar-...", name: pi-laptop, allow: ["*"], rpm: 0, monthly_usd: 20 }
 ```
 
 ## Routing
@@ -154,7 +177,39 @@ Routes match models (exact or `prefix*`) to an ordered provider chain — first
 match wins, failover walks the chain on retryable errors. A global default
 (`routing.strategy` / `routing.rotation`) is inherited by every route and
 provider; per-route `strategy:`/`weights:` and per-provider `rotation:`
-override it. Cooldowns after 429/5xx are automatic. See
+override it. Cooldowns after 429/5xx are automatic and survive restarts
+(persisted to SQLite). Providers with `skip_when_exhausted: true` are routed
+around while their billing windows report exhausted — skipped like cooling
+targets without burning an upstream attempt, except when *every* target in the
+chain is exhausted: stale quota data never hard-blocks availability, so the
+first skipped target is attempted anyway (fail-open).
+
+**Session affinity** (opt-in) pins a coding-agent session to the
+provider+connection that served its first request so upstream prompt caches
+hit:
+
+```yaml
+routing:
+  affinity:
+    enabled: true
+    ttl_s: 3600          # binding lifetime; 0 = default (3600)
+    header: x-session-id # session header; "" = default
+```
+
+The session id comes from the first non-empty of: the configured header, the
+opencode session header, anthropic `metadata.user_id` (Claude Code), or the
+openai `user` body field. Pinned sessions ride the same key (rotation keeps
+working for everyone else); a failed pinned connection re-binds to whoever
+serves instead. Pins are held in memory per process and keyed by connection
+**label** — run one instance (or an LB that sticks sessions to one instance)
+or the feature has no effect, and reordering a provider's keys reinterprets
+positional "Key N" pins (one cold cache, then stable; set explicit
+`key_labels` to keep identity stable across reorders). The pin tracks the
+session, not each model the session uses: an agent alternating models
+(e.g. a main model + a background one) flip-flops between chains and gains
+little from affinity. Disabled (default) changes nothing — and it compounds with
+`inject_cache_control`, which pays `cache_write` to make those reads cheap
+only when the session actually lands on the same connection. See
 [docs/routing.md](docs/routing.md) for the research behind these choices.
 
 ## OAuth subscription upstreams
@@ -167,6 +222,8 @@ the CLI's local credentials, then paste the printed YAML into a provider's
 yardmaster oauth import claude-code   # ~/.claude/.credentials.json → kind: claude-code
 yardmaster oauth import codex         # ~/.codex/auth.json             → kind: codex
 yardmaster oauth import opencode      # opencode auth store            → kind: opencode
+yardmaster oauth import qwen --refresh-token ...   # token from the qwen CLI login
+yardmaster oauth import copilot --token ...        # GitHub access token (read:user)
 ```
 
 ```yaml
@@ -208,8 +265,17 @@ How it works:
   (exponential, max 10 min); the failover loop skips cooled accounts and tries
   the next account/provider. 401 forces a re-refresh.
 - **Adapters are config, not code**: `kind` picks baked-in endpoints/client-ids
-  for `claude-code` and `codex`; any other account sets `token_endpoint` +
-  `client_id` directly (opencode's endpoints aren't publicly documented yet).
+  for `claude-code`, `codex` and `qwen`; any other account sets `token_endpoint`
+  + `client_id` directly (opencode's endpoints aren't publicly documented yet).
+- **qwen**: standard OAuth refresh (form-encoded grant) against Qwen Code's
+  token endpoint; rotated refresh tokens persist like the other kinds. The
+  token response's `resource_url` is ignored — point the provider `base_url`
+  where you actually call (e.g. DashScope's compatible mode).
+- **copilot**: `refresh_token` holds the long-lived GitHub access token — the
+  pool never refreshes this kind. Each dispatch exchanges it (single-flight
+  per account, 5-min expiry margin) for a short-lived Copilot token at
+  api.github.com and speaks with the Copilot Chat plugin's identity headers;
+  a failed exchange fails just that target (failover proceeds).
 - Dashboard → Providers shows each account's state (seed / ok / cooldown /
   error).
 
@@ -224,6 +290,7 @@ How it works:
 | **Claude Code** | `ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ANTHROPIC_AUTH_TOKEN=ar-...` |
 | **Codex** | `~/.codex/config.toml` → `model_providers.ar` with `base_url = "http://127.0.0.1:8787/v1"`, `wire_api = "chat"` |
 | **opencode** | provider with OpenAI-compatible base URL `http://127.0.0.1:8787/v1` |
+| **Gemini CLI** | `GEMINI_API_KEY=ar-...` + `GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/v1beta` (the CLI appends `/models/{model}:…` itself) |
 | **Cline / Cursor** | OpenAI-compatible base URL + key |
 
 ## Benchmarks
@@ -281,10 +348,15 @@ first.
 ## Status
 
 - Phases 0–4 done (core, translation, stats, dashboard, OAuth subscription
-  pools: claude-code + codex adapters, responses-wire translation, account
-  cooldown/rotation).
-- Deferred: `/v1/responses` serving (client side), Gemini-native wire,
-  opencode OAuth endpoints (set `token_endpoint`+`client_id` when documented).
+  pools: claude-code + codex + qwen + copilot adapters, responses-wire
+  translation, account cooldown/rotation); Gemini-native wire done (inbound
+  `/v1beta` serving + `gemini` provider wire; serving Gemini upstreams needs a
+  static API key — the `gemini-cli` kind exists as a refresh default only,
+  its Code Assist endpoint is a different API shape).
+- Deferred: opencode OAuth
+  endpoints (set `token_endpoint`+`client_id` when documented). Cursor OAuth
+  is blocked: no public refresh endpoint and a ConnectRPC wire. The
+  antigravity OAuth kind waits on the v1internal Code Assist surface.
 
 ## License
 
@@ -293,14 +365,15 @@ MIT — see [LICENSE](LICENSE).
 ## Layout
 
 ```
-cmd/yardmaster/    run | key add | bench
+cmd/yardmaster/    run | key add | bench | oauth
 internal/config/     YAML config + validation + cost table
 internal/translate/  openai<->anthropic requests/SSE
 internal/provider/   registry + model routing
 internal/auth/       inbound keys (RPM) + per-key dispatch limiter
 internal/proxy/      streaming pipeline, failover, usage tee
 internal/store/      SQLite request log + aggregates
-internal/server/     endpoints, admin API, dashboard
+internal/server/     endpoints, admin API, dashboard, quota windows,
+                     count_tokens, login throttle
 web/                 React + uPlot dashboard (embedded via go:embed)
 bench/               perf harness (also `yardmaster bench`)
 ```

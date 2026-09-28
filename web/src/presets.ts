@@ -2,7 +2,7 @@
  *  A registry provider maps to one or more config providers (Zen needs one per wire). */
 export interface RegistryEntry {
   name: string;      // config provider name to create, e.g. "opencode-go"
-  wire: "openai" | "anthropic" | "responses" | "classifier";
+  wire: "openai" | "anthropic" | "responses" | "classifier" | "gemini";
   base_url: string;
   session?: string;
   family: string;    // chat | anthropic | responses | classifier — which catalog models this entry serves
@@ -97,6 +97,22 @@ export const REGISTRY: RegistryProvider[] = [
     desc: "Nvidia NIM open-model gateway — Nemotron, Llama, GLM, Kimi, DeepSeek + free tier; most catalog models cost $0",
     entries: [
       { name: "nvidia", wire: "openai", base_url: "https://integrate.api.nvidia.com/v1", family: "chat", familyLabel: "Nemotron · Llama · GLM · Kimi · DeepSeek · free tier" },
+    ],
+  },
+  {
+    id: "qwen", title: "Qwen Code (QW)", code: "QW", prefix: "qw",
+    desc: "Qwen subscription via the Qwen Code CLI OAuth login — bearer on the openai wire, qwen3-coder/max",
+    entries: [
+      { name: "qwen", wire: "openai", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", family: "chat", familyLabel: "Qwen3 coder · max · plus", defaults: { models: ["qwen3-coder-plus", "qwen3-max"] } },
+    ],
+  },
+  {
+    id: "copilot", title: "GitHub Copilot (CP)", code: "CP", prefix: "cp",
+    desc: "Copilot subscription via a GitHub token — one entry per wire over api.githubcopilot.com (Claude rides the anthropic shim); import the token with `yardmaster oauth import copilot`",
+    entries: [
+      { name: "copilot", wire: "openai", base_url: "https://api.githubcopilot.com", family: "chat", familyLabel: "GPT · open models · chat completions" },
+      { name: "copilot-claude", wire: "anthropic", base_url: "https://api.githubcopilot.com", family: "anthropic", familyLabel: "Claude (anthropic shim)" },
+      { name: "copilot-gpt", wire: "responses", base_url: "https://api.githubcopilot.com", family: "responses", familyLabel: "GPT (Responses wire)" },
     ],
   },
 ];
@@ -202,7 +218,7 @@ export function entryFor(r: RegistryProvider, p: { preset: string; name: string;
 
 /** Which catalog family a provider wire serves (preselects filters). */
 export const wireFamily = (wire: string): string =>
-  wire === "anthropic" ? "anthropic" : wire === "responses" ? "responses" : wire === "classifier" ? "classifier" : "chat";
+  wire === "anthropic" ? "anthropic" : wire === "responses" ? "responses" : wire === "classifier" ? "classifier" : wire === "gemini" ? "gemini" : "chat";
 
 /** Form fields a registry entry fills (legacy single-entry helper, still used by custom form). */
 export const presetToForm = (e: RegistryEntry) => ({

@@ -49,6 +49,9 @@ export interface KeyRow {
   id?: string; // 32-hex derived reference handle (absent from older servers)
   created_at?: number; // unix ms; 0/undefined = legacy key, unknown
   last_used?: number; // unix ms; 0/undefined = never used
+  monthly_usd?: number; // monthly spend cap; 0/undefined = unlimited (absent from older servers)
+  month_spent?: number; // month-to-date spend (absent from older servers)
+  month_limit_pct?: number; // spent/cap*100, only present when capped (absent from older servers)
 }
 export interface ProviderRow {
   name: string; wire: string; base_url: string; models: string[];

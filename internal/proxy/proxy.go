@@ -15,6 +15,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -33,8 +34,9 @@ import (
 const (
 	WireOpenAI     = "openai"
 	WireAnthropic  = "anthropic"
-	WireResponses  = "responses" // OpenAI Responses API (Codex backend)
+	WireResponses  = "responses"  // OpenAI Responses API (Codex backend)
 	WireClassifier = "classifier" // System One decision models (TypeSafe Jev)
+	WireGemini     = "gemini"     // Gemini generateContent (generativelanguage v1beta)
 )
 
 type Proxy struct {
@@ -47,13 +49,65 @@ type Proxy struct {
 	Cd      *provider.Cooldowns
 	DumpDir string // debug: write upstream request bodies here (YARDMASTER_DUMP_DIR)
 
+	// QuotaExhausted reports whether a provider's billing windows are fully
+	// exhausted (server-computed from live quota reports). Nil = disabled —
+	// routing never consults quota state.
+	QuotaExhausted func(provider string) bool
+
 	Active   Active
 	inflight atomic.Int64
 	total    atomic.Int64
 	dumpSeq  atomic.Int64
 
+	// affinity holds session→connection pins (prompt-cache routing); only
+	// consulted when config.Routing.Affinity.Enabled
+	affinity AffinityStore
+
 	zc     *zcode.Manager // zai zcode_signing parity (lazy — see zcodeManager)
 	zcOnce sync.Once
+
+	// copilot dispatch-time token exchange cache (provider/account → token);
+	// refreshed via p.Client when within copilotTokenMargin of expiry
+	copilotMu   sync.Mutex
+	copilotToks map[string]copilotTok
+
+	// per-provider proxied dispatch clients (proxy_url), keyed by provider
+	// name; built lazily so config reload swaps proxies without a restart
+	proxyClients sync.Map // provider name → *http.Client
+}
+
+// clientFor returns the http.Client for dispatching to pv's upstream: the
+// shared p.Client when the provider has no proxy_url, else a per-provider
+// client whose transport is p.Client's CLONED with Proxy set (lazy, cached by
+// name+proxy_url so a config reload that changes the proxy takes effect — a
+// transport must not be shared between a proxied and a direct dial pool).
+// Scope: upstream dispatch only (buildUpstream senders:
+// chat/messages/responses forwarding and CountTokens); oauth pool refresh,
+// quota windows, and catalog fetches deliberately stay on p.Client — they are
+// control-plane traffic, not provider request egress.
+func (p *Proxy) clientFor(pv *config.Provider) *http.Client {
+	if pv == nil || pv.ProxyURL == "" {
+		return p.Client
+	}
+	key := pv.Name + "\x00" + pv.ProxyURL
+	if c, ok := p.proxyClients.Load(key); ok {
+		return c.(*http.Client)
+	}
+	base := p.Client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	t := base.(*http.Transport).Clone()
+	u, err := url.Parse(pv.ProxyURL)
+	if err != nil {
+		// Validate rejects unparseable proxy_url; keep dispatch alive anyway
+		// by degrading to the shared client rather than panicking
+		return p.Client
+	}
+	t.Proxy = http.ProxyURL(u)
+	c := &http.Client{Transport: t}
+	actual, _ := p.proxyClients.LoadOrStore(key, c)
+	return actual.(*http.Client)
 }
 
 // NewProxy builds the proxy with a tuned shared transport.
@@ -62,25 +116,32 @@ func NewProxy(reg *provider.Registry, st *store.Store, costFn func(string) confi
 	t.MaxIdleConnsPerHost = 64
 	t.IdleConnTimeout = 90 * time.Second
 	t.ForceAttemptHTTP2 = true
-	return &Proxy{
+	p := &Proxy{
 		Reg:    reg,
 		Client: &http.Client{Transport: t},
 		Store:  st,
 		Cost:   costFn,
 		Cd:     provider.NewCooldowns(),
 	}
+	// Static-key cooldowns survive restarts when a store is attached
+	// (429 Retry-After windows, breaker trips). Best-effort: a missing or
+	// wedged DB degrades to in-memory cooldowns, never fails dispatch.
+	if st != nil {
+		provider.AttachCooldownStore(p.Cd, st)
+	}
+	return p
 }
 
 // ---- active request registry (live dashboard) ----
 
 type ActiveEntry struct {
-	ID       string    `json:"id"`
-	Model    string    `json:"model"`
-	Provider string    `json:"provider"`
-	Key      string    `json:"key"`
-	Stream   bool      `json:"stream"`
-	Start    int64     `json:"start"` // unix millis
-	TTFTms   float64   `json:"ttft_ms"`
+	ID       string  `json:"id"`
+	Model    string  `json:"model"`
+	Provider string  `json:"provider"`
+	Key      string  `json:"key"`
+	Stream   bool    `json:"stream"`
+	Start    int64   `json:"start"` // unix millis
+	TTFTms   float64 `json:"ttft_ms"`
 }
 
 type Active struct {
@@ -153,6 +214,37 @@ func (p *Proxy) ServeResponses(w http.ResponseWriter, r *http.Request) {
 	p.serve(w, r, WireResponses)
 }
 
+// ServeGemini handles POST /v1beta/models/{model}:generateContent and
+// :streamGenerateContent (Gemini wire in). Streaming is the alt=sse query
+// param; the model id rides the URL path, not the body.
+func (p *Proxy) ServeGemini(w http.ResponseWriter, r *http.Request) {
+	if geminiPathModel(r.URL.Path) == "" {
+		p.writeError(w, WireGemini, 404, "gemini path must be /v1beta/models/{model}:generateContent[:streamGenerateContent?alt=sse]")
+		return
+	}
+	p.serve(w, r, WireGemini)
+}
+
+// geminiPathModel extracts the model id from /v1beta/models/{model}[:method].
+// URL-unescaped already by ServeMux; an empty segment or a method other than
+// the two generateContent variants → "" (a :countTokens body must not be
+// dispatched as a chat request).
+func geminiPathModel(path string) string {
+	rest, ok := strings.CutPrefix(path, "/v1beta/models/")
+	if !ok || rest == "" {
+		return ""
+	}
+	i := strings.IndexByte(rest, ':')
+	if i <= 0 {
+		return ""
+	}
+	switch rest[i+1:] {
+	case "generateContent", "streamGenerateContent":
+		return rest[:i]
+	}
+	return ""
+}
+
 // ServeClassifier handles POST /v1/systemone (System One decisions in —
 // {model, state, questions}; non-streaming JSON in/out). /v1/decisions and
 // /v1/classifier are aliases routed to the same handler.
@@ -183,7 +275,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 	}
 	model := ""
 	stream := false
-	if req != nil {
+	if clientWire == WireGemini {
+		// gemini-native client: the model rides the URL path and streaming is
+		// the alt=sse query variant — neither is a body field
+		model = geminiPathModel(r.URL.Path)
+		stream = r.URL.Query().Get("alt") == "sse"
+	} else if req != nil {
 		model, _ = req["model"].(string)
 		stream, _ = req["stream"].(bool)
 	}
@@ -201,12 +298,51 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 		p.Store.Submit(rec)
 	}()
 
+	if clientWire == WireGemini {
+		// normalize to the chat hub with model+stream injected; the raw body
+		// stays original so a same-wire gemini upstream still gets the
+		// client's byte-exact request
+		if !strictJSON {
+			p.writeError(w, WireGemini, 400, "unparseable gemini request body")
+			rec.Status = 400
+			rec.Err = "bad gemini request"
+			return
+		}
+		chat, err := translate.GeminiReqToChat(req)
+		if err != nil {
+			p.writeError(w, WireGemini, 400, err.Error())
+			rec.Status = 400
+			rec.Err = "bad gemini request"
+			return
+		}
+		chat["model"] = model // rides the URL path on the gemini wire
+		if stream {
+			chat["stream"] = true
+		}
+		req = chat
+	}
+
+	// session affinity: extraction happens at the entry (before resolve) so a
+	// live pin can reorder the resolved target list before any attempt is
+	// made. Off, or no session id on the request, changes nothing — plain
+	// routing.
+	session := sessionID(p.Reg.Config().Routing.Affinity, clientWire, r, req)
+
 	targets := p.Reg.Resolve(model, allowedModelsFor(r))
 	if len(targets) == 0 {
 		p.writeError(w, clientWire, 404, "unknown model: "+model)
 		rec.Status = 404
 		rec.Err = "unknown model"
 		return
+	}
+
+	pinnedConn := ""
+	if providerName, conn, ok := p.affinityLookup(session); ok {
+		var pos int
+		targets, pos = reorderForAffinity(targets, providerName, conn)
+		if pos >= 0 {
+			pinnedConn = conn // bound connection is live in this chain
+		}
 	}
 
 	activeID := fmt.Sprintf("%d-%d", start.UnixNano(), rand.Int63n(1e9))
@@ -216,7 +352,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 	lastErr := ""
 	var lastStatus int
 	var lastErrBody []byte
+	lastTgt := (*provider.Target)(nil) // target whose error the relay surfaces
+	lastUpModel := ""
+	lastAttempt := 0
 	var cooledUntil time.Time // latest cooldown expiry among skipped targets
+	var quotaSkipped *provider.Target
 
 	for attempt, tgt := range targets {
 		if attempt > 0 {
@@ -231,6 +371,18 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 				rec.Status = 499
 				return
 			}
+		}
+
+		// quota-exhausted provider: skip without burning an upstream attempt
+		// (same shape as a cooling target), but remember the first such target —
+		// stale quota data must never hard-block availability, so if every
+		// target is quota-skipped the first one is attempted anyway (fail open).
+		if tgt.Provider.SkipWhenExhausted && p.QuotaExhausted != nil && p.QuotaExhausted(tgt.Provider.Name) {
+			if quotaSkipped == nil {
+				quotaSkipped = tgt
+			}
+			lastErr = fmt.Sprintf("%s: quota exhausted", tgt.Provider.Name)
+			continue
 		}
 
 		// dispatch throttle (e.g. Z.ai 1302 protection)
@@ -273,6 +425,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 
 		resp, err := p.do(tgt, httpReq)
 		if err != nil {
+			// transport-level death of the PINNED connection proves it dead
+			// just like an HTTP failure does — clear the pin so the session
+			// re-binds on the next served request (only the pinned target's
+			// own failure clears; a later-chain failure says nothing)
+			if attempt == 0 && pinnedConn != "" && connectionLabel(tgt) == pinnedConn {
+				p.affinityClear(session)
+			}
 			lastErr = err.Error()
 			if r.Context().Err() != nil {
 				rec.Status = 499
@@ -286,9 +445,17 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 		// specific 400/401/403s (unknown model id, bad key) should fall through the
 		// chain. The last upstream error is forwarded if nothing serves the request.
 		if resp.StatusCode >= 400 {
+			// the PINNED connection just proved dead — clear the pin so the
+			// session re-binds to whatever serves next (a dead connection
+			// must not be re-pinned). Only the pinned target's own failure
+			// clears: a later-chain failure says nothing about the pin.
+			if attempt == 0 && pinnedConn != "" && connectionLabel(tgt) == pinnedConn {
+				p.affinityClear(session)
+			}
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			lastStatus, lastErrBody, lastErr = resp.StatusCode, b, fmt.Sprintf("%s: http %d", tgt.Provider.Name, resp.StatusCode)
+			lastTgt, lastUpModel, lastAttempt = tgt, upModel, attempt+1
 			if tgt.AuthType == "oauth" && p.Pool != nil {
 				p.Pool.MarkResult(tgt.Provider.Name, tgt.AcctName, resp.StatusCode, string(b))
 			}
@@ -315,8 +482,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			ID: activeID, Model: model, Provider: tgt.Provider.Name,
 			Key: rec.Key, Stream: stream, Start: start.UnixMilli(),
 		})
-		usage, ttft = p.forward(w, r, clientWire, tgt, resp, req, upModel, stream, activeID)
+		usage, ttft = p.forward(w, r, clientWire, tgt, resp, req, upModel, reqModel, stream, activeID, attempt+1)
 		p.Active.Done(activeID)
+
+		// response completed (forward returned) — pin the session to the
+		// serving connection so the next request of the session reorders here
+		// and its upstream prompt cache hits. Concurrent same-session requests
+		// during a long stream intentionally miss the pin and ride rotation.
+		p.affinityPin(session, tgt.Provider.Name, connectionLabel(tgt))
 
 		rec.Status = 200
 		rec.TTFTms = float64(ttft.Milliseconds())
@@ -330,6 +503,84 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 		break
 	}
 
+	if !forwarded && rec.Status == 0 && quotaSkipped != nil {
+		// Every target was quota-skipped: stale billing data must never
+		// hard-block availability — fall open by attempting the first
+		// quota-skipped target like a plain failover hop. The hop mirrors the
+		// main loop: dispatch throttle, combo model override, natural-model
+		// pricing.
+		fmt.Printf("all targets quota-exhausted, attempting %s anyway (fail-open)\n", quotaSkipped.Provider.Name)
+		qLimKey := quotaSkipped.APIKey
+		if quotaSkipped.AuthType == "oauth" {
+			qLimKey = "oauth:" + quotaSkipped.AcctName
+		}
+		if lim := p.Reg.Limiter(quotaSkipped.Provider, qLimKey); lim != nil {
+			if err := lim.Wait(r.Context()); err != nil {
+				rec.Status = 499
+				return
+			}
+		}
+		qReqModel := model
+		if quotaSkipped.ModelOverride != "" {
+			qReqModel = quotaSkipped.ModelOverride
+		}
+		qUpModel := provider.UpstreamModel(quotaSkipped.Provider, qReqModel)
+		httpReq, err := p.buildUpstream(r.Context(), quotaSkipped, clientWire, qUpModel, req, body, strictJSON, r.Header.Get("x-opencode-session"))
+		if err == nil {
+			resp, err := p.do(quotaSkipped, httpReq)
+			if err == nil && resp.StatusCode < 400 {
+				if quotaSkipped.AuthType == "oauth" && p.Pool != nil {
+					p.Pool.MarkResult(quotaSkipped.Provider.Name, quotaSkipped.AcctName, 200, "") // reset cooldown ladder
+				}
+				if p.Cd != nil {
+					p.Cd.Reset(quotaSkipped.Provider.Name, quotaSkipped.APIKey)
+				}
+				rec.Provider = quotaSkipped.Provider.Name
+				rec.Attempts = 1
+				p.Active.Set(&ActiveEntry{
+					ID: activeID, Model: model, Provider: quotaSkipped.Provider.Name,
+					Key: rec.Key, Stream: stream, Start: start.UnixMilli(),
+				})
+				usage, ttft = p.forward(w, r, clientWire, quotaSkipped, resp, req, qUpModel, qReqModel, stream, activeID, 1)
+				p.Active.Done(activeID)
+				p.affinityPin(session, quotaSkipped.Provider.Name, connectionLabel(quotaSkipped))
+				rec.Status = 200
+				rec.TTFTms = float64(ttft.Milliseconds())
+				rec.TokIn, rec.TokOut, rec.CacheRead, rec.CacheWrt = usage.In, usage.Out, usage.CacheR, usage.CacheW
+				if p.Cost != nil {
+					c := p.Cost(qReqModel)
+					rec.CostUSD = float64(usage.In)/1e6*c.Input + float64(usage.Out)/1e6*c.Output +
+						float64(usage.CacheR)/1e6*c.CacheRead + float64(usage.CacheW)/1e6*c.CacheWrite
+				}
+				forwarded = true
+			} else if err == nil {
+				// failed open and the upstream said no — same accounting as
+				// an in-loop hop so the cooldown ladder learns about it
+				if pinnedConn != "" && connectionLabel(quotaSkipped) == pinnedConn {
+					p.affinityClear(session) // dead pin must not survive
+				}
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				resp.Body.Close()
+				lastStatus, lastErrBody, lastErr = resp.StatusCode, b, fmt.Sprintf("%s: http %d", quotaSkipped.Provider.Name, resp.StatusCode)
+				lastTgt, lastUpModel, lastAttempt = quotaSkipped, qUpModel, 1
+				if quotaSkipped.AuthType == "oauth" && p.Pool != nil {
+					p.Pool.MarkResult(quotaSkipped.Provider.Name, quotaSkipped.AcctName, resp.StatusCode, string(b))
+				}
+				if p.Cd != nil {
+					if resp.StatusCode == 429 {
+						p.Cd.Mark429(quotaSkipped.Provider.Name, quotaSkipped.APIKey, resp.Header.Get("Retry-After"))
+					} else if resp.StatusCode == 500 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504 || resp.StatusCode == 529 {
+						p.Cd.MarkFail(quotaSkipped.Provider.Name, quotaSkipped.APIKey)
+					}
+				}
+			} else {
+				lastErr = err.Error()
+			}
+		} else {
+			lastErr = err.Error()
+		}
+	}
+
 	if !forwarded {
 		if rec.Status == 0 {
 			if lastStatus > 0 {
@@ -337,9 +588,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 				rec.Status = lastStatus
 				rec.Err = lastErr
 				rec.Provider = strings.SplitN(lastErr, ":", 2)[0]
+				if lastTgt != nil {
+					p.setDecisionHeaders(w, lastTgt, lastUpModel, lastAttempt)
+				}
 				var out []byte
 				if clientWire == WireAnthropic {
 					out = translate.ErrToAnthropic(lastErrBody, lastStatus)
+				} else if clientWire == WireGemini {
+					out = translate.ErrToGemini(lastErrBody, lastStatus)
 				} else {
 					out = translate.ErrToOpenAI(lastErrBody, lastStatus)
 				}
@@ -369,9 +625,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 }
 
 func allowedModelsFor(r *http.Request) []string {
-	type keyChecker interface{ Allow() []string }
+	return allowedModelsForContext(r.Context())
+}
+
+// allowedModelsForContext reads the inbound key's allowed model patterns
+// (injected by the server middleware) off any context.
+func allowedModelsForContext(ctx context.Context) []string {
 	// inbound key allow patterns are injected by the server middleware
-	if v := r.Context().Value(inboundAllowCtx); v != nil {
+	if v := ctx.Value(inboundAllowCtx); v != nil {
 		if a, ok := v.([]string); ok {
 			return a
 		}
@@ -384,6 +645,20 @@ const inboundAllowCtx ctxKey = 2
 // WithInboundAllow stores the inbound key's allowed model patterns.
 func WithInboundAllow(ctx context.Context, allow []string) context.Context {
 	return context.WithValue(ctx, inboundAllowCtx, allow)
+}
+
+// applyBodyOverrides merges provider body_overrides into the upstream body.
+// Shallow top-level merge: mode "" or "fill" only sets keys absent from the
+// client body (back-compat); "override" replaces client-sent values outright
+// (e.g. forcing reasoning_effort regardless of client preference).
+func applyBodyOverrides(pv *config.Provider, body map[string]any) {
+	override := pv.BodyOverridesMode == "override"
+	for k, v := range pv.BodyOverrides {
+		if _, exists := body[k]; exists && !override {
+			continue
+		}
+		body[k] = v
+	}
 }
 
 // buildUpstream constructs the upstream request. For openai upstreams the
@@ -404,10 +679,12 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	injectPassback := pv.Wire == WireOpenAI && isDeepseekFamily(upModel)
 
 	switch {
-	case pv.Wire == clientWire || (clientWire == WireResponses && pv.Wire == WireOpenAI):
-		// same wire (incl. responses↔responses), or a responses client (req
-		// pre-normalized to the chat hub) hitting an openai upstream: patch model
-		// id (+ body overrides) via JSON re-encode when needed
+	case pv.Wire == clientWire || (clientWire == WireResponses && pv.Wire == WireOpenAI) ||
+		(clientWire == WireGemini && pv.Wire == WireOpenAI):
+		// same wire (incl. responses↔responses, gemini↔gemini), or a client
+		// whose req was normalized to the chat hub (responses / gemini) hitting
+		// an openai upstream: patch model id (+ body overrides) via JSON
+		// re-encode when needed
 		if strictJSON {
 			if pv.Wire == WireResponses {
 				// responses client: req was normalized to the chat hub — re-patch
@@ -415,19 +692,18 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 				var orig map[string]any
 				json.Unmarshal(rawBody, &orig)
 				orig["model"] = upModel
-				for k, v := range pv.BodyOverrides {
-					if _, exists := orig[k]; !exists {
-						orig[k] = v
-					}
-				}
+				applyBodyOverrides(pv, orig)
+				bodyOut, _ = json.Marshal(orig)
+			} else if pv.Wire == WireGemini {
+				// gemini client: same re-patch, but the gemini body carries no
+				// model (it rides the URL path) — only overrides apply
+				var orig map[string]any
+				json.Unmarshal(rawBody, &orig)
+				applyBodyOverrides(pv, orig)
 				bodyOut, _ = json.Marshal(orig)
 			} else {
 				req["model"] = upModel
-				for k, v := range pv.BodyOverrides {
-					if _, exists := req[k]; !exists {
-						req[k] = v
-					}
-				}
+				applyBodyOverrides(pv, req)
 				if injectPassback {
 					translate.InjectDeepseekReasoningPassback(req)
 				}
@@ -449,6 +725,11 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 			// TypeSafe System One surface: api.typesafe.ai/v1 and
 			// openrouter.ai/api/v1 both append /systemone (verified live)
 			url += "/systemone"
+		} else if pv.Wire == WireGemini {
+			// stream flag lives on the hub body (serve() sets it from the
+			// alt=sse query param for gemini clients); the gemini body itself
+			// carries none
+			url = geminiEndpoint(url, upModel, req["stream"] == true)
 		} else {
 			url = anthropicEndpoint(url)
 		}
@@ -464,14 +745,42 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 		}
 		if strictJSON {
 			chat["model"] = upModel
-			for k, v := range pv.BodyOverrides {
-				if _, exists := chat[k]; !exists {
-					chat[k] = v
-				}
-			}
+			applyBodyOverrides(pv, chat)
 		}
 		bodyOut, _ = json.Marshal(translate.ChatReqToResponses(chat))
 		url += "/responses"
+	case pv.Wire == WireGemini:
+		// any client wire -> Gemini upstream. Chat wire is the hub: every
+		// other client is normalized first, then chat→gemini. The model rides
+		// the URL path (the gemini body carries none), streaming is the
+		// alt=sse variant of the same endpoint.
+		chat := req
+		if clientWire == WireAnthropic {
+			if !strictJSON {
+				return nil, errors.New("unparseable anthropic body for translation")
+			}
+			chat = translate.AnthropicReqToOpenAI(req, opts)
+		} else if clientWire == WireGemini {
+			// gemini native client: req was normalized to the chat hub in
+			// serve() — reuse it
+			if !strictJSON {
+				return nil, errors.New("unparseable gemini body for translation")
+			}
+		} else if clientWire != WireOpenAI && clientWire != WireResponses {
+			// responses clients arrive pre-normalized to the chat hub (same
+			// shape as the responses-upstream case) — anything else is a bug
+			return nil, fmt.Errorf("gemini upstream cannot serve %s clients", clientWire)
+		}
+		if strictJSON {
+			chat["model"] = upModel
+			applyBodyOverrides(pv, chat)
+		}
+		gem, _ := translate.ChatReqToGemini(chat)
+		bodyOut, _ = json.Marshal(gem)
+		// every client normalization carries "stream" on the hub body — the
+		// gemini wire expresses it as the URL variant instead
+		upStream, _ := chat["stream"].(bool)
+		url = geminiEndpoint(url, upModel, upStream)
 	case pv.Wire == WireAnthropic:
 		// openai client -> anthropic upstream
 		if !strictJSON {
@@ -479,24 +788,21 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 		}
 		req["model"] = upModel
 		a := translate.OpenAIReqToAnthropic(req, opts)
-		for k, v := range pv.BodyOverrides {
-			if _, exists := a[k]; !exists {
-				a[k] = v
-			}
-		}
+		applyBodyOverrides(pv, a)
 		bodyOut, _ = json.Marshal(a)
 		url = anthropicEndpoint(url)
 	default: // anthropic client -> openai upstream
 		if !strictJSON {
 			return nil, errors.New("unparseable anthropic body for translation")
 		}
+		if clientWire != WireAnthropic && clientWire != WireClassifier {
+			// classifier clients are typed systemone bodies, not chat-hub —
+			// guard the default against silently mis-shaping new client wires
+			return nil, fmt.Errorf("no translation path for %s client -> %s upstream", clientWire, pv.Wire)
+		}
 		req["model"] = upModel
 		o := translate.AnthropicReqToOpenAI(req, opts)
-		for k, v := range pv.BodyOverrides {
-			if _, exists := o[k]; !exists {
-				o[k] = v
-			}
-		}
+		applyBodyOverrides(pv, o)
 		if injectPassback {
 			translate.InjectDeepseekReasoningPassback(o)
 		}
@@ -516,7 +822,9 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream, application/json")
 	if tgt.AuthType == "oauth" {
-		p.setOAuthAuth(httpReq, tgt, findAcct(pv, tgt.AcctName))
+		if err := p.setOAuthAuth(httpReq, tgt, findAcct(pv, tgt.AcctName)); err != nil {
+			return nil, err
+		}
 	} else {
 		SetAuth(httpReq, pv.Wire, tgt.APIKey)
 	}
@@ -533,6 +841,13 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	}
 	// helpful attribution headers (zcode signing, below, replaces the UA)
 	httpReq.Header.Set("User-Agent", "github.com/bacnh85/yardmaster/"+p.Version)
+	if tgt.AuthType == "oauth" {
+		// the Copilot gateway requires the plugin identity (incl. its own
+		// User-Agent) — reasserted over the attribution UA above
+		if acct := findAcct(pv, tgt.AcctName); acct != nil && acct.Kind == "copilot" {
+			copilotIdentity(httpReq)
+		}
+	}
 	if pv.ZcodeSigning {
 		zc := p.zcodeManager()
 		for k, v := range zc.Identity.Headers() {
@@ -550,6 +865,17 @@ func anthropicEndpoint(base string) string {
 	return strings.TrimSuffix(base, "/v1") + "/v1/messages"
 }
 
+// geminiEndpoint composes {base}/v1beta/models/{model}:generateContent —
+// :streamGenerateContent?alt=sse when streaming. The model rides the path
+// (the gemini body carries none); URL path escaping is up to net/url.
+func geminiEndpoint(base, model string, stream bool) string {
+	method := ":generateContent"
+	if stream {
+		method = ":streamGenerateContent?alt=sse"
+	}
+	return strings.TrimSuffix(base, "/") + "/v1beta/models/" + model + method
+}
+
 // opencodeSession returns a stable uuid per provider+key so upstream routing
 // sticks (opencode requires the header; clients that send their own win).
 
@@ -565,15 +891,18 @@ func findAcct(pv *config.Provider, name string) *config.OAuthAcct {
 
 // setOAuthAuth applies the account kind's auth headers (mimicking the CLI
 // clients these subscriptions belong to). Applied before provider
-// extra_headers so a user override wins.
-func (p *Proxy) setOAuthAuth(h *http.Request, tgt *provider.Target, acct *config.OAuthAcct) {
+// extra_headers so a user override wins. A returned error fails this target's
+// build: the dispatch loop records it and fails over to the next target.
+func (p *Proxy) setOAuthAuth(h *http.Request, tgt *provider.Target, acct *config.OAuthAcct) error {
 	pv := tgt.Provider
+	if acct != nil && acct.Kind == "copilot" {
+		return p.setCopilotAuth(h, tgt, acct)
+	}
 	var token string
 	if p.Pool != nil && tgt.AcctName != "" {
 		t, err := p.Pool.Token(h.Context(), pv.Name, tgt.AcctName)
 		if err != nil {
-			token = "" // buildUpstream callers treat empty as a build failure? no —
-			// fall through with whatever we have; upstream 401s feed MarkResult
+			token = "" // fall through with whatever we have; upstream 401s feed MarkResult
 			if acct != nil && acct.AccessTok != "" {
 				token = acct.AccessTok
 			}
@@ -582,7 +911,7 @@ func (p *Proxy) setOAuthAuth(h *http.Request, tgt *provider.Target, acct *config
 		}
 	}
 	if token == "" {
-		return
+		return nil
 	}
 	kind := ""
 	if acct != nil {
@@ -604,9 +933,113 @@ func (p *Proxy) setOAuthAuth(h *http.Request, tgt *provider.Target, acct *config
 		h.Header.Set("OpenAI-Beta", "responses=experimental")
 		h.Header.Set("originator", "codex_cli_rs")
 		h.Header.Set("User-Agent", "codex_cli_rs/0.1.0")
+	case "gemini-cli":
+		// Gemini CLI subscription: Bearer access token (Google OAuth), not the
+		// x-goog-api-key static-key convention. NOTE: only useful against
+		// gateways that accept Google OAuth bearers on the v1beta surface —
+		// generativelanguage serving needs an API key today (the Code Assist
+		// endpoint this kind refreshes against is a different API shape).
+		h.Header.Set("Authorization", "Bearer "+token)
 	default:
+		// qwen and every other kind: plain bearer on the provider's wire
+		// (qwen needs no extra identity headers)
 		SetAuth(h, pv.Wire, token)
 	}
+	return nil
+}
+
+// Copilot subscription auth: the config's refresh_token holds the long-lived
+// GitHub access token (the pool deliberately never refreshes this kind);
+// each dispatch exchanges it for a short-lived Copilot token and speaks with
+// the IDE plugin's identity headers.
+const (
+	copilotTokenURL    = "https://api.github.com/copilot_internal/v2/token"
+	copilotTokenUserAg = "GitHubCopilotChat/0.38.0"
+	copilotTokenMargin = 5 * time.Minute // re-exchange within 5 min of expiry
+	copilotUnknownTTL  = time.Hour       // response without expires_at
+)
+
+// copilotIdentity sets the headers the Copilot gateway checks on every
+// request (verified against the Copilot Chat plugin's traffic). The token
+// exchange above intentionally sends its own older UA (0.26.7, verified
+// working against api.github.com) — plugin and gateway tolerate the skew.
+func copilotIdentity(h *http.Request) {
+	h.Header.Set("copilot-integration-id", "vscode-chat")
+	h.Header.Set("editor-version", "vscode/1.110.0")
+	h.Header.Set("editor-plugin-version", "copilot-chat/0.38.0")
+	h.Header.Set("User-Agent", copilotTokenUserAg)
+	h.Header.Set("openai-intent", "conversation-panel")
+	h.Header.Set("X-GitHub-Api-Version", "2025-04-01")
+	h.Header.Set("x-vscode-user-agent-library-version", "electron-fetch")
+	h.Header.Set("X-Initiator", "user")
+}
+
+func (p *Proxy) setCopilotAuth(h *http.Request, tgt *provider.Target, acct *config.OAuthAcct) error {
+	if acct == nil || acct.RefreshTok == "" {
+		return fmt.Errorf("copilot account %s: refresh_token must hold the GitHub access token", tgt.AcctName)
+	}
+	tok, err := p.copilotToken(h.Context(), tgt.Provider.Name, acct.Name, acct.RefreshTok)
+	if err != nil {
+		return err // this target fails; failover proceeds without a panic
+	}
+	h.Header.Set("Authorization", "Bearer "+tok)
+	copilotIdentity(h)
+	return nil
+}
+
+type copilotTok struct {
+	token string
+	exp   time.Time
+}
+
+// copilotToken returns the cached short-lived Copilot token for the account,
+// exchanging the long-lived GitHub token when missing or within
+// copilotTokenMargin of expiry. Cache is per provider+account; a failed
+// exchange is an error, never a crash. Uses p.Client (not clientFor) so tests
+// can redirect and control-plane traffic bypasses provider proxy_url.
+func (p *Proxy) copilotToken(ctx context.Context, providerName, acctName, ghToken string) (string, error) {
+	key := providerName + "/" + acctName
+	p.copilotMu.Lock()
+	if t, ok := p.copilotToks[key]; ok && t.token != "" && time.Now().Before(t.exp.Add(-copilotTokenMargin)) {
+		p.copilotMu.Unlock()
+		return t.token, nil
+	}
+	p.copilotMu.Unlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, copilotTokenURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+ghToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "GitHubCopilotChat/0.26.7")
+	resp, err := p.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("copilot token exchange: %w", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Token     string `json:"token"`
+		ExpiresAt int64  `json:"expires_at"` // unix seconds
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("copilot token exchange: http %d: bad response body", resp.StatusCode)
+	}
+	if resp.StatusCode != 200 || out.Token == "" {
+		return "", fmt.Errorf("copilot token exchange: http %d", resp.StatusCode)
+	}
+	exp := time.Unix(out.ExpiresAt, 0)
+	if out.ExpiresAt <= 0 {
+		exp = time.Now().Add(copilotUnknownTTL)
+	}
+	p.copilotMu.Lock()
+	if p.copilotToks == nil {
+		p.copilotToks = map[string]copilotTok{}
+	}
+	p.copilotToks[key] = copilotTok{token: out.Token, exp: exp}
+	p.copilotMu.Unlock()
+	return out.Token, nil
 }
 
 var opencodeSessions sync.Map
@@ -638,7 +1071,8 @@ func (p *Proxy) opencodeSession(k string) string {
 }
 
 // SetAuth applies the wire-appropriate static-key auth headers (x-api-key +
-// anthropic-version for the anthropic wire, Bearer otherwise).
+// anthropic-version for the anthropic wire, x-goog-api-key for the gemini
+// wire, Bearer otherwise).
 func SetAuth(h *http.Request, wire, key string) {
 	if key == "" {
 		return
@@ -646,9 +1080,75 @@ func SetAuth(h *http.Request, wire, key string) {
 	if wire == WireAnthropic {
 		h.Header.Set("x-api-key", key)
 		h.Header.Set("anthropic-version", "2023-06-01")
+	} else if wire == WireGemini {
+		h.Header.Set("x-goog-api-key", key) // Gemini API convention
 	} else {
 		h.Header.Set("Authorization", "Bearer "+key)
 	}
+}
+
+// CountTokens resolves the exact token count for an anthropic-shaped body by
+// asking the first same-wire (anthropic) target's /v1/messages/count_tokens —
+// the chars/4 estimate undercounts badly and Claude Code trims context off
+// this number. ok=false (no anthropic target, non-2xx, bad JSON, transport
+// error) means the caller falls back to the estimate. count_tokens is
+// advisory: cooled targets are skipped but failures never trip cooldown
+// breakers, and nothing here touches stats.
+func (p *Proxy) CountTokens(ctx context.Context, body []byte) (int, bool) {
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil || req["model"] == nil || req["messages"] == nil {
+		return 0, false
+	}
+	model, _ := req["model"].(string)
+	if model == "" {
+		return 0, false
+	}
+	targets := p.Reg.Resolve(model, allowedModelsForContext(ctx))
+	// 10s budget when the caller has no deadline: count_tokens must never be
+	// the slow path that holds a client's context-trim loop hostage.
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > 10*time.Second {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+	}
+	for _, tgt := range targets {
+		if tgt.Provider.Wire != WireAnthropic {
+			continue // only a same-wire anthropic upstream can count natively
+		}
+		if p.Cd != nil && p.Cd.Cooling(tgt.Provider.Name, tgt.APIKey) {
+			continue // skip cooled keys — but never MARK, this path is advisory
+		}
+		reqModel := model
+		if tgt.ModelOverride != "" {
+			reqModel = tgt.ModelOverride
+		}
+		upModel := provider.UpstreamModel(tgt.Provider, reqModel)
+		// buildUpstream would POST /v1/messages; reuse its model-mapping +
+		// auth/headers work, then retarget the URL at count_tokens.
+		httpReq, err := p.buildUpstream(ctx, tgt, WireAnthropic, upModel, req, body, true, "")
+		if err != nil {
+			continue
+		}
+		httpReq.URL.Path = strings.TrimSuffix(httpReq.URL.Path, "/v1/messages") + "/v1/messages/count_tokens"
+		resp, err := p.clientFor(tgt.Provider).Do(httpReq)
+		if err != nil {
+			continue // silent fallback — count_tokens is best-effort
+		}
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			continue
+		}
+		var out struct {
+			InputTokens int `json:"input_tokens"`
+		}
+		if json.Unmarshal(b, &out) != nil {
+			continue
+		}
+		return out.InputTokens, true
+	}
+	return 0, false
 }
 
 var hopHeaders = []string{
@@ -676,7 +1176,7 @@ func (p *Proxy) do(tgt *provider.Target, req *http.Request) (*http.Response, err
 		ht = 300
 	}
 	t := time.AfterFunc(time.Duration(ht)*time.Second, cancel)
-	resp, err := p.Client.Do(req)
+	resp, err := p.clientFor(tgt.Provider).Do(req)
 	t.Stop()
 	if err != nil {
 		cancel()
@@ -704,7 +1204,9 @@ func (b *cancelBody) Close() error {
 }
 
 // forward writes the upstream response to the client. Returns usage + ttft.
-func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, stream bool, activeID string) (Usage, time.Duration) {
+// reqModel is the natural model id cost accounting prices (combo dispatch
+// differs from upModel); attempt is the 1-based dispatch hop that served.
+func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel, reqModel string, stream bool, activeID string, attempt int) (Usage, time.Duration) {
 	defer resp.Body.Close()
 	var firstTouch time.Time
 	touch := func() {
@@ -717,53 +1219,123 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, clientWire strin
 	// upstream wire == client wire → byte-exact passthrough (fast path)
 	if tgt.Provider.Wire == clientWire {
 		copyHeaders(w, resp)
+		// after copyHeaders so an upstream cannot smuggle duplicates; still
+		// before WriteHeader/flush — routing transparency precedes any byte
+		p.setDecisionHeaders(w, tgt, upModel, attempt)
+		if !stream {
+			// non-stream: buffer the (bounded) body so cost headers ride the
+			// same response — usage is known before any byte is written
+			b, err := io.ReadAll(resp.Body)
+			if err != nil {
+				p.writeError(w, clientWire, 502, "upstream read: "+err.Error())
+				return Usage{Estimate: true}, sinceT(r, firstTouch)
+			}
+			touch()
+			u := ParseUsageJSON(clientWire, b)
+			p.setNonStreamUsageHeaders(w, reqModel, u)
+			w.WriteHeader(resp.StatusCode)
+			w.Write(b)
+			return u, sinceT(r, firstTouch)
+		}
 		w.WriteHeader(resp.StatusCode)
 		tee := NewUsageTee(clientWire)
-		if stream {
-			flusher, _ := w.(http.Flusher)
-			buf := make([]byte, 32*1024)
-			for {
-				n, err := resp.Body.Read(buf)
-				if n > 0 {
-					touch()
-					tee.Write(buf[:n])
-					if _, werr := w.Write(buf[:n]); werr != nil {
-						return tee.Usage().Estimated(), sinceT(r, firstTouch) // client gone → ctx cancels upstream
-					}
-					if flusher != nil {
-						flusher.Flush()
-					}
+		flusher, _ := w.(http.Flusher)
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				touch()
+				tee.Write(buf[:n])
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return tee.Usage().Estimated(), sinceT(r, firstTouch) // client gone → ctx cancels upstream
 				}
-				if err != nil {
-					break
+				if flusher != nil {
+					flusher.Flush()
 				}
 			}
-			return tee.Usage().Estimated(), sinceT(r, firstTouch)
+			if err != nil {
+				break
+			}
 		}
-		b, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return Usage{Estimate: true}, sinceT(r, firstTouch)
-		}
-		touch()
-		tee.Write(b)
-		w.Write(b)
-		// full-body usage: the line-based tee can't parse a JSON body without
-		// "data:" lines — use the exact-body parser (falls back to estimate)
-		return ParseUsageJSON(clientWire, b), sinceT(r, firstTouch)
+		return tee.Usage().Estimated(), sinceT(r, firstTouch)
 	}
 
-	// wire translation path
-	if tgt.Provider.Wire == WireResponses {
-		// normalize the Responses wire to openai chat up front: SSE streams are
-		// translated byte-stream-level; non-stream JSON in forwardTranslateFull.
-		if stream {
-			resp.Body = newRespToChatBody(resp.Body, upModel)
-		}
+	// wire translation path: normalize Responses/Gemini upstreams to openai
+	// chat up front — SSE streams are translated byte-stream-level
+	// (respToChatBody / geminiToChatBody); non-stream JSON in
+	// forwardTranslateFull.
+	if stream && tgt.Provider.Wire == WireResponses {
+		resp.Body = newRespToChatBody(resp.Body, upModel)
+	}
+	if stream && tgt.Provider.Wire == WireGemini {
+		resp.Body = newGeminiToChatBody(resp.Body, upModel)
 	}
 	if stream {
-		return p.forwardTranslateStream(w, r, clientWire, tgt, resp, req, upModel, touch, &firstTouch)
+		return p.forwardTranslateStream(w, r, clientWire, tgt, resp, req, upModel, reqModel, touch, &firstTouch, attempt)
 	}
-	return p.forwardTranslateFull(w, r, clientWire, tgt, resp, req, upModel, touch, &firstTouch)
+	return p.forwardTranslateFull(w, r, clientWire, tgt, resp, req, upModel, reqModel, touch, &firstTouch, attempt)
+}
+
+// X-Yardmaster-* decision headers: make failover observable to agents/CLIs
+// (the dashboard already shows provider/attempts — the client wire did not).
+// Set on every path that produces a response, before any WriteHeader/flush.
+const (
+	hdrProvider = "X-Yardmaster-Provider"
+	hdrModel    = "X-Yardmaster-Model"
+	hdrKey      = "X-Yardmaster-Key"
+	hdrAttempts = "X-Yardmaster-Attempts"
+	hdrCost     = "X-Yardmaster-Cost-Usd"
+	hdrCache    = "X-Yardmaster-Cache-Read"
+)
+
+// setDecisionHeaders writes the always-available decision headers. Connection
+// label only — the secret (static key or oauth token) never leaves the box.
+func (p *Proxy) setDecisionHeaders(w http.ResponseWriter, tgt *provider.Target, upModel string, attempt int) {
+	h := w.Header()
+	h.Set(hdrProvider, tgt.Provider.Name)
+	h.Set(hdrModel, upModel)
+	h.Set(hdrKey, connectionLabel(tgt))
+	h.Set(hdrAttempts, strconv.Itoa(attempt))
+}
+
+// setCostHeaders adds the usage-derived pair. Non-streaming only: usage is
+// fully known before the body is written. Streaming responses are already
+// committed by the time usage streams in, so they get the decision headers
+// only (the usage API / dashboard remain the streaming source of truth).
+func setCostHeaders(h http.Header, costUSD float64, cacheRead int) {
+	h.Set(hdrCost, strconv.FormatFloat(costUSD, 'f', 4, 64))
+	h.Set(hdrCache, strconv.Itoa(cacheRead))
+}
+
+// setNonStreamUsageHeaders writes cost/cache headers for a completed
+// non-streaming response, pricing the natural model like store accounting.
+func (p *Proxy) setNonStreamUsageHeaders(w http.ResponseWriter, reqModel string, u Usage) {
+	var cost float64
+	if p.Cost != nil {
+		c := p.Cost(reqModel)
+		cost = float64(u.In)/1e6*c.Input + float64(u.Out)/1e6*c.Output +
+			float64(u.CacheR)/1e6*c.CacheRead + float64(u.CacheW)/1e6*c.CacheWrite
+	}
+	setCostHeaders(w.Header(), cost, u.CacheR)
+}
+
+// connectionLabel returns the display label for the connection that served:
+// a static key's label (AuthConf.KeyLabel) or the oauth account name — never
+// the secret itself.
+func connectionLabel(tgt *provider.Target) string {
+	if tgt.AuthType == "oauth" {
+		return tgt.AcctName
+	}
+	pv := tgt.Provider
+	for i, k := range pv.Auth.Keys {
+		if k == tgt.APIKey {
+			return pv.Auth.KeyLabel(i)
+		}
+	}
+	// combo-scoped clone (keys filtered to member pins): labels travel with
+	// the clone, so a miss here means a mutated/foreign target — "unknown"
+	// beats guessing a wrong label or leaking the secret
+	return "unknown"
 }
 
 // respToChatBody converts a Responses-API SSE stream into openai
@@ -831,6 +1403,67 @@ func (b *respToChatBody) writeChunk(ch map[string]any) {
 
 func (b *respToChatBody) Close() error { return b.src.Close() }
 
+// geminiToChatBody converts a Gemini alt=sse stream into openai
+// chat-completions SSE bytes on the fly (same shape as respToChatBody). No
+// [DONE] sentinel exists on the gemini wire — the translator's Done() emits
+// the terminal usage chunk at EOF instead.
+type geminiToChatBody struct {
+	src     io.ReadCloser
+	sc      *bufio.Scanner
+	gc      *translate.Gemini2ChatStream
+	buf     bytes.Buffer
+	eof     bool
+	scanErr error
+}
+
+func newGeminiToChatBody(src io.ReadCloser, model string) *geminiToChatBody {
+	b := &geminiToChatBody{src: src, gc: translate.NewGemini2ChatStream(model), sc: bufio.NewScanner(src)}
+	b.sc.Buffer(make([]byte, 64*1024), 4<<20)
+	return b
+}
+
+func (b *geminiToChatBody) Read(p []byte) (int, error) {
+	for b.buf.Len() == 0 {
+		if b.eof {
+			if b.scanErr != nil {
+				return 0, b.scanErr
+			}
+			return 0, io.EOF
+		}
+		if !b.sc.Scan() {
+			b.eof = true
+			if err := b.sc.Err(); err != nil {
+				// transport-level break: surface the error after draining
+				// buffered bytes — no synthetic usage chunk on a broken stream
+				b.scanErr = err
+				continue
+			}
+			for _, ch := range b.gc.Done() {
+				b.writeChunk(ch)
+			}
+			continue
+		}
+		line := strings.TrimSpace(b.sc.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		var ev map[string]any
+		if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &ev) == nil {
+			for _, ch := range b.gc.Chunk(ev) {
+				b.writeChunk(ch)
+			}
+		}
+	}
+	return b.buf.Read(p)
+}
+
+func (b *geminiToChatBody) writeChunk(ch map[string]any) {
+	d, _ := json.Marshal(ch)
+	b.buf.WriteString("data: " + string(d) + "\n\n")
+}
+
+func (b *geminiToChatBody) Close() error { return b.src.Close() }
+
 func startTime(r *http.Request) time.Time {
 	if v := r.Context().Value(startCtxKey); v != nil {
 		if t, ok := v.(time.Time); ok {
@@ -855,7 +1488,7 @@ func WithStartTime(ctx context.Context, t time.Time) context.Context {
 }
 
 // forwardTranslateStream: upstream streams in provider wire, client expects the other wire.
-func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, touch func(), firstTouch *time.Time) (Usage, time.Duration) {
+func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel, reqModel string, touch func(), firstTouch *time.Time, attempt int) (Usage, time.Duration) {
 	// model may be absent (e.g. matched via a "*" catch-all route) — never
 	// type-assert directly or a missing key panics mid-stream
 	clientModel, _ := req["model"].(string)
@@ -863,6 +1496,8 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
+	// before WriteHeader/flush — routing transparency precedes any byte
+	p.setDecisionHeaders(w, tgt, upModel, attempt)
 	w.WriteHeader(200)
 	flusher, _ := w.(http.Flusher)
 
@@ -1039,8 +1674,107 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 				}
 			}
 		}
-	} else if tgt.Provider.Wire == WireResponses {
-		// upstream responses (normalized to openai chat chunks by respToChatBody)
+	} else if clientWire == WireGemini {
+		// any non-gemini upstream (chat-hub format) → gemini alt=sse data.
+		// Tool deltas accumulate and flush as whole functionCall parts on
+		// Finish — chat's incremental args have no mid-stream gemini carrier.
+		tr := translate.NewChat2GemStream(clientModel)
+		feedChat := func(chunk map[string]any) bool {
+			if u := asUsageMap(chunk["usage"]); u != nil {
+				applyOpenAIUsage(&usage, u)
+			}
+			for _, d := range tr.Chunk(chunk) {
+				if writeEvent("", d) != nil {
+					return false
+				}
+			}
+			return true
+		}
+		if tgt.Provider.Wire == WireAnthropic {
+			// anthropic upstream → chat chunks (Anth2OAI) → gemini data
+			a2o := translate.NewAnth2OAIStream(clientModel)
+			eventName := ""
+			done := false
+			for sc.Scan() {
+				line := strings.TrimSpace(sc.Text()) // trim \r
+				if line == "" {
+					eventName = ""
+					continue
+				}
+				if strings.HasPrefix(line, "event:") {
+					eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+					continue
+				}
+				if !strings.HasPrefix(line, "data:") {
+					continue
+				}
+				data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				var ev map[string]any
+				if json.Unmarshal([]byte(data), &ev) != nil {
+					continue
+				}
+				p.captureAnthropicUsage(&usage, eventName, ev)
+				stop := eventName == "message_stop"
+				for _, chunk := range a2o.Event(eventName, ev) {
+					if !feedChat(chunk) {
+						return usage, sinceT(r, *firstTouch)
+					}
+				}
+				if stop {
+					done = true
+					break
+				}
+			}
+			// upstream ended without message_stop: synthesize the tail
+			if a2o.SawStart() && !done {
+				for _, chunk := range a2o.Event("message_delta", map[string]any{
+					"delta": map[string]any{"stop_reason": "end_turn"},
+					"usage": map[string]any{"output_tokens": usage.Out},
+				}) {
+					if !feedChat(chunk) {
+						break
+					}
+				}
+				feedChat(a2o.UsageChunk())
+			}
+			if err := sc.Err(); err != nil {
+				log.Printf("stream translate: upstream read error: %v", err)
+			}
+		} else {
+			// upstream openai chat SSE (or gemini/responses-normalized) →
+			// gemini data
+			for sc.Scan() {
+				line := sc.Bytes()
+				if !bytes.HasPrefix(line, []byte("data:")) {
+					continue
+				}
+				data := strings.TrimSpace(string(line[5:]))
+				if data == "[DONE]" {
+					break
+				}
+				var chunk map[string]any
+				if json.Unmarshal([]byte(data), &chunk) != nil {
+					continue
+				}
+				if !feedChat(chunk) {
+					return usage, sinceT(r, *firstTouch)
+				}
+			}
+			if err := sc.Err(); err != nil {
+				log.Printf("stream translate: upstream read error: %v", err)
+			}
+		}
+		for _, d := range tr.Finish() {
+			writeEvent("", d)
+		}
+		usage.Estimate = usage.In == 0 && usage.Out == 0
+		if usage.Estimate {
+			usage.In = usage.estBytes / 4
+		}
+		return usage, 0
+	} else if tgt.Provider.Wire == WireResponses || tgt.Provider.Wire == WireGemini {
+		// upstream responses/gemini (normalized to openai chat chunks by
+		// respToChatBody / geminiToChatBody)
 		for sc.Scan() {
 			line := sc.Bytes()
 			if !bytes.HasPrefix(line, []byte("data:")) {
@@ -1134,7 +1868,7 @@ func writeDone(w http.ResponseWriter) {
 }
 
 // forwardTranslateFull handles non-streaming translation.
-func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel string, touch func(), firstTouch *time.Time) (Usage, time.Duration) {
+func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, r *http.Request, clientWire string, tgt *provider.Target, resp *http.Response, req map[string]any, upModel, reqModel string, touch func(), firstTouch *time.Time, attempt int) (Usage, time.Duration) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	touch()
 	if err != nil {
@@ -1151,6 +1885,12 @@ func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, r *http.Request, cli
 		return Usage{Estimate: true}, 0
 	}
 	upWire := tgt.Provider.Wire
+	if upWire == WireGemini {
+		// normalize to openai chat completion, then reuse the openai paths
+		m = translate.GeminiRespToChat(m, upModel)
+		body, _ = json.Marshal(m)
+		upWire = WireOpenAI
+	}
 	if upWire == WireResponses {
 		// normalize to openai chat completion, then reuse the openai paths
 		m = translate.ResponsesRespToChat(m)
@@ -1170,10 +1910,16 @@ func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, r *http.Request, cli
 		out = translate.OpenAIRespToAnthropic(m)
 	} else if clientWire == WireResponses {
 		out = translate.ChatRespToResponses(m)
+	} else if clientWire == WireGemini {
+		out = translate.ChatRespToGemini(m)
 	} else {
 		out = m
 	}
 	b, _ := json.Marshal(out)
+	// decision headers before any WriteHeader; cost/cache ride the same block
+	// since usage is fully known on this buffered path
+	p.setDecisionHeaders(w, tgt, upModel, attempt)
+	p.setNonStreamUsageHeaders(w, reqModel, usage)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(b)
@@ -1186,6 +1932,8 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, clientWire,
 	var out []byte
 	if clientWire == WireAnthropic {
 		out = translate.ErrToAnthropic(body, resp.StatusCode)
+	} else if clientWire == WireGemini {
+		out = translate.ErrToGemini(body, resp.StatusCode)
 	} else {
 		out = translate.ErrToOpenAI(body, resp.StatusCode)
 	}
@@ -1199,6 +1947,9 @@ func (p *Proxy) writeError(w http.ResponseWriter, wire string, status int, msg s
 	if wire == WireAnthropic {
 		b, _ = json.Marshal(map[string]any{"type": "error",
 			"error": map[string]any{"type": "api_error", "message": msg}})
+	} else if wire == WireGemini {
+		b, _ = json.Marshal(map[string]any{"error": map[string]any{
+			"code": status, "message": msg, "status": translate.GeminiStatusForHTTP(status)}})
 	} else {
 		b, _ = json.Marshal(map[string]any{"error": map[string]any{
 			"message": msg, "type": "api_error", "code": status}})
@@ -1215,6 +1966,9 @@ func (p *Proxy) write429(w http.ResponseWriter, wire string, retryAfterS int, ms
 	if wire == WireAnthropic {
 		b, _ = json.Marshal(map[string]any{"type": "error",
 			"error": map[string]any{"type": "rate_limit_error", "message": msg}})
+	} else if wire == WireGemini {
+		b, _ = json.Marshal(map[string]any{"error": map[string]any{
+			"code": 429, "message": msg, "status": "RESOURCE_EXHAUSTED"}})
 	} else {
 		b, _ = json.Marshal(map[string]any{"error": map[string]any{
 			"message": msg, "type": "rate_limit_error", "code": 429}})

@@ -138,3 +138,32 @@ func TestComboYAMLRoundTrip(t *testing.T) {
 		t.Fatalf("member round-trip mismatch: %+v", m)
 	}
 }
+
+func TestBodyOverridesModeValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		mode    string
+		wantErr string // "" = valid
+	}{
+		{"empty ok (fill default)", "", ""},
+		{"fill ok", "fill", ""},
+		{"override ok", "override", ""},
+		{"invalid mode", "force", "body_overrides_mode must be fill|override"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := comboCfg(nil)
+			c.Providers[0].BodyOverridesMode = tc.mode
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("mode %q: unexpected error: %v", tc.mode, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("mode %q: want error %q, got %v", tc.mode, tc.wantErr, err)
+			}
+		})
+	}
+}

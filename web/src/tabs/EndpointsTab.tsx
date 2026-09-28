@@ -7,10 +7,21 @@ import { IconPlus } from "../icons";
 /** unix ms → local date-time; "—" for legacy keys (no timestamp recorded). */
 const fmtWhen = (ms?: number) => (ms ? new Date(ms).toLocaleString() : "—");
 
+/** Budget cell: "$spent / $cap"; "–" when the key has no monthly cap.
+ *  Title carries the rounded spend-vs-cap percent (e.g. "42% of cap"). */
+export const budgetCell = (k: KeyRow): { text: string; title?: string } => {
+  if (!k.monthly_usd || k.monthly_usd <= 0) return { text: "–" };
+  return {
+    text: `$${(k.month_spent ?? 0).toFixed(2)} / $${k.monthly_usd.toFixed(2)}`,
+    title: k.month_limit_pct != null ? `${Math.round(k.month_limit_pct)}% of cap` : undefined,
+  };
+};
+
 const ENDPOINTS: [string, string, string][] = [
   ["POST", "/v1/chat/completions", "OpenAI wire (streaming supported)"],
   ["POST", "/v1/messages", "Anthropic wire (streaming supported)"],
   ["POST", "/v1/messages/count_tokens", "Anthropic token count"],
+  ["POST", "/v1beta/models/{model}:generateContent", "Gemini-native wire (:streamGenerateContent?alt=sse streams; x-goog-api-key or Bearer auth)"],
   ["POST", "/v1/systemone", "System One decisions — {model, state, questions} in, typed answers out (/v1/classifier and /v1/decisions are aliases)"],
   ["GET", "/v1/systemone/models", "list decision models (prefixed ids) — discovery for System One clients (pi-classifier); /v1/models stays chat-only"],
   ["GET", "/v1/models", "models routable by your key"],
@@ -89,6 +100,7 @@ export function EndpointsTab() {
         rpm: Number(d.rpm) || 0,
         usage: d.usage,
         ...(d.key.trim() ? { key: d.key.trim() } : {}), // blank = keep the secret
+        ...(d.monthly.trim() !== "" ? { monthly_usd: Number(d.monthly) || 0 } : {}), // blank = keep stored cap; 0 = unlimited
       });
       setEditing(null);
       reload();
@@ -153,7 +165,7 @@ export function EndpointsTab() {
                 <thead><tr>
                   <th>name</th><th>API key ID</th><th>key</th>
                   <th>created</th><th>last used</th>
-                  <th>allowed models</th><th className="n">rpm</th><th>usage api</th><th />
+                  <th>allowed models</th><th className="n">rpm</th><th>budget</th><th>usage api</th><th />
                 </tr></thead>
                 <tbody>
                   {keys.map((k) => (
@@ -165,6 +177,9 @@ export function EndpointsTab() {
                       <td className="faint">{fmtWhen(k.last_used)}</td>
                       <td className="mono">{k.allow.join(", ")}</td>
                       <td className="n">{k.rpm > 0 ? k.rpm.toLocaleString() : "–"}</td>
+                      {(() => { const b = budgetCell(k); return (
+                        <td className={b.title ? "n" : "n faint"} title={b.title}>{b.text}</td>
+                      ); })()}
                       <td>
                         <select
                           value={k.usage === false ? "revoked" : "allowed"}
@@ -230,13 +245,14 @@ export function EndpointsTab() {
   );
 }
 
-interface KeyDraft { name: string; allow: string; rpm: number; usage: boolean; key: string }
+interface KeyDraft { name: string; allow: string; rpm: number; usage: boolean; key: string; monthly: string }
 
 /** Edit an existing inbound key: rename, scope, rate limit, usage permission,
  *  and optional secret rotation (blank key field = keep the stored secret). */
 function KeyEdit({ k, onSave, onClose }: { k: KeyRow; onSave: (d: KeyDraft) => void; onClose: () => void }) {
   const [d, setD] = useState<KeyDraft>(() => ({
     name: k.name, allow: k.allow.join(", "), rpm: k.rpm, usage: k.usage !== false, key: "",
+    monthly: k.monthly_usd && k.monthly_usd > 0 ? String(k.monthly_usd) : "", // "" = keep stored value
   }));
   return (
     <Modal title={`Edit key: ${k.name}`} onClose={onClose}>
@@ -263,6 +279,12 @@ function KeyEdit({ k, onSave, onClose }: { k: KeyRow; onSave: (d: KeyDraft) => v
             <input id="ek-rpm" type="number" min={0} value={d.rpm}
               onChange={(e) => setD({ ...d, rpm: Number(e.target.value) || 0 })} />
             <div className="field-hint">0 = unlimited</div>
+          </div>
+          <div className="field">
+            <label htmlFor="ek-monthly">Monthly cap (USD)</label>
+            <input id="ek-monthly" type="number" min={0} step="0.01" value={d.monthly}
+              onChange={(e) => setD({ ...d, monthly: e.target.value })} />
+            <div className="field-hint">empty = keep · 0 = unlimited</div>
           </div>
           <div className="field">
             <label>usage api</label>

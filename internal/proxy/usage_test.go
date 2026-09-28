@@ -119,3 +119,22 @@ func TestUsageClassifierSystemOne(t *testing.T) {
 		t.Fatalf("missing usage: got %+v, want estimate>0", e)
 	}
 }
+
+// Gemini wire: usageMetadata on alt=sse chunks and full generateContent
+// bodies. promptTokenCount is cache-INCLUSIVE (report cache-exclusive for the
+// store invariant); thoughtsTokenCount folds into output.
+func TestUsageGemini(t *testing.T) {
+	u := teeUsage(t, "gemini",
+		`data: {"candidates":[{"content":{"parts":[{"text":"a"}]}}]}`,
+		`data: {"candidates":[{"content":{"parts":[{"text":"b"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":3,"thoughtsTokenCount":2,"cachedContentTokenCount":40,"totalTokenCount":105}}`)
+	if u.In != 60 || u.CacheR != 40 || u.Out != 5 {
+		t.Fatalf("stream: got in=%d cacheR=%d out=%d, want 60/40/5 (cache-exclusive, thoughts folded)", u.In, u.CacheR, u.Out)
+	}
+	j := ParseUsageJSON("gemini", []byte(`{"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"totalTokenCount":14}}`))
+	if j.In != 10 || j.Out != 4 {
+		t.Fatalf("non-stream: got in=%d out=%d, want 10/4", j.In, j.Out)
+	}
+	if j.Estimate {
+		t.Fatal("exact usage must not degrade to estimate")
+	}
+}

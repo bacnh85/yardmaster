@@ -91,6 +91,15 @@ var schema = []string{
 		expires_at INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (provider, acct)
 	)`,
+	// static-key cooldown windows survive restarts (AttachCooldownStore in
+	// package provider); one live window per target, reason is provenance
+	`CREATE TABLE IF NOT EXISTS cooldowns (
+		provider TEXT NOT NULL,
+		key TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '',
+		until INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (provider, key)
+	)`,
 }
 
 func (s *Store) Submit(r *Record) {
@@ -193,6 +202,57 @@ func b2i(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ---- cooldown persistence (survives restarts; static keys only) ----
+
+// CooldownRow is one persisted cooldown window.
+type CooldownRow struct {
+	Provider string
+	Key      string
+	Reason   string
+	Until    time.Time
+}
+
+// SaveCooldown upserts a live window (unix-second granularity). Zero-or-past
+// until clears the row — a Reset must not leave a cooling key behind.
+// Direct exec, no batching: cooldown writes are rare (a Reset per success
+// is a cheap indexed DELETE).
+func (s *Store) SaveCooldown(provider, key, reason string, until time.Time) error {
+	if s == nil {
+		return nil
+	}
+	if until.IsZero() || !until.After(time.Now()) {
+		_, err := s.db.Exec(`DELETE FROM cooldowns WHERE provider=? AND key=?`, provider, key)
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO cooldowns (provider,key,reason,until) VALUES (?,?,?,?)
+		ON CONFLICT(provider,key) DO UPDATE SET reason=excluded.reason, until=excluded.until`,
+		provider, key, reason, until.Unix())
+	return err
+}
+
+// LoadCooldowns returns every persisted window; empty (nil) when none.
+func (s *Store) LoadCooldowns() ([]CooldownRow, error) {
+	if s == nil {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT provider, key, reason, until FROM cooldowns`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CooldownRow
+	for rows.Next() {
+		var r CooldownRow
+		var until int64
+		if err := rows.Scan(&r.Provider, &r.Key, &r.Reason, &until); err != nil {
+			return nil, err
+		}
+		r.Until = time.Unix(until, 0)
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // Close drains pending records and closes the DB.
@@ -567,6 +627,20 @@ func (s *Store) KeyLastUsed() (map[string]int64, error) {
 		}
 	}
 	return out, nil
+}
+
+// MonthSpend sums spend for one inbound key since sinceUnixMS — the number
+// enforcement caches per key for budget gating. cost_usd rows land via the
+// async batch writer, so this lags by the flush interval; that skew is
+// acceptable for a spend cap.
+func (s *Store) MonthSpend(keyName string, sinceUnixMS int64) (float64, error) {
+	if s == nil {
+		return 0, nil
+	}
+	var total float64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM requests WHERE key_name=? AND ts>=?`,
+		keyName, sinceUnixMS).Scan(&total)
+	return total, err
 }
 
 // RenameKey re-attributes request history after an inbound key rename, so

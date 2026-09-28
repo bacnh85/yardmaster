@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -34,14 +35,21 @@ type oauthAcct struct {
 	provider, name     string
 	endpoint, clientID string
 	accountID          string // codex chatgpt-account-id
-	access, refresh    string
-	expires            time.Time // zero = unknown; treated as stale after 1h without refresh
-	lastRefresh        time.Time
-	coolUntil          time.Time
-	coolSteps          int
-	lastErr            string
-	lastStatus         int
-	refreshMu          sync.Mutex // serializes the HTTP refresh per account
+	// formAuth: POST the refresh grant form-encoded instead of JSON. qwen's
+	// endpoint is a plain RFC 6749 server; claude/codex expect JSON bodies.
+	formAuth bool
+	// noRefresh: refresh_token is a long-lived API credential, never a refresh
+	// grant (copilot). Suppresses the background refresher entirely — a token
+	// with no expiry must not be re-verified in a refresh loop.
+	noRefresh       bool
+	access, refresh string
+	expires         time.Time // zero = unknown; treated as stale after 1h without refresh
+	lastRefresh     time.Time
+	coolUntil       time.Time
+	coolSteps       int
+	lastErr         string
+	lastStatus      int
+	refreshMu       sync.Mutex // serializes the HTTP refresh per account
 }
 
 const (
@@ -88,6 +96,8 @@ func (p *OAuthPool) Register(providerName string, a *config.OAuthAcct) {
 	if ex, ok := p.accts[key]; ok {
 		ex.endpoint, ex.clientID = a.TokenEndpoint, a.ClientID
 		ex.accountID = a.AccountID
+		ex.formAuth = a.Kind == "qwen"
+		ex.noRefresh = a.Kind == "copilot"
 		if a.RefreshTok != "" && a.RefreshTok != ex.refresh {
 			ex.refresh = a.RefreshTok
 			ex.access, ex.expires = "", time.Time{} // new seed → force refresh
@@ -97,7 +107,9 @@ func (p *OAuthPool) Register(providerName string, a *config.OAuthAcct) {
 	acc := &oauthAcct{
 		provider: providerName, name: a.Name,
 		endpoint: a.TokenEndpoint, clientID: a.ClientID, accountID: a.AccountID,
-		refresh: a.RefreshTok,
+		refresh:   a.RefreshTok,
+		formAuth:  a.Kind == "qwen",    // RFC 6749 form-encoded refresh grant
+		noRefresh: a.Kind == "copilot", // long-lived GitHub token: no refresh grant
 	}
 	// stored tokens win over the (possibly stale) config seed — they carry the
 	// rotated refresh token from the last run
@@ -132,10 +144,19 @@ func (p *OAuthPool) Token(ctx context.Context, providerName, acctName string) (s
 	}
 	p.mu.Lock()
 	access := a.access
-	fresh := access != "" && time.Now().Before(a.expires.Add(-expiryMargin))
+	noRefresh := a.noRefresh
+	fresh := access != "" && (noRefresh || time.Now().Before(a.expires.Add(-expiryMargin)))
 	p.mu.Unlock()
 	if fresh {
 		return access, nil
+	}
+	if noRefresh {
+		// copilot: refresh_token is the long-lived GitHub credential — there is
+		// no refresh grant, so a missing access token is a config problem,
+		// never something the pool can fix. The dispatch-time Copilot exchange
+		// lives in the proxy.
+		p.setErr(a, 0, "no access_token")
+		return "", fmt.Errorf("oauth account %s/%s: no access_token (kind copilot never refreshes)", providerName, acctName)
 	}
 	return p.refresh(ctx, a)
 }
@@ -144,10 +165,11 @@ func (p *OAuthPool) refresh(ctx context.Context, a *oauthAcct) (string, error) {
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
 	// snapshot mutable fields under p.mu — Register() (config reload) may
-	// mutate endpoint/clientID/refresh concurrently
+	// mutate endpoint/clientID/refresh/formAuth concurrently
 	p.mu.Lock()
 	access, refreshTok, endpoint, clientID, lastRefresh :=
 		a.access, a.refresh, a.endpoint, a.clientID, a.lastRefresh
+	formAuth, noRefresh := a.formAuth, a.noRefresh
 	fresh := access != "" && time.Now().Before(a.expires.Add(-expiryMargin))
 	p.mu.Unlock()
 	if fresh {
@@ -160,15 +182,41 @@ func (p *OAuthPool) refresh(ctx context.Context, a *oauthAcct) (string, error) {
 		p.setErr(a, 0, "no refresh_token")
 		return "", fmt.Errorf("oauth account %s/%s: no refresh_token", a.provider, a.name)
 	}
-
-	body, _ := json.Marshal(map[string]any{
-		"grant_type": "refresh_token", "refresh_token": refreshTok, "client_id": clientID,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return "", err
+	if noRefresh {
+		// defensive: copilot accounts must never hit a token endpoint (their
+		// refresh_token is the GitHub API credential itself)
+		p.setErr(a, 0, "no refresh grant for kind copilot")
+		return "", fmt.Errorf("oauth account %s/%s: no refresh grant", a.provider, a.name)
 	}
-	req.Header.Set("Content-Type", "application/json")
+
+	var req *http.Request
+	var err error
+	if formAuth {
+		// qwen: standards-compliant endpoint — grant as an HTML form; the
+		// response may rotate refresh_token (persistence already handles it)
+		// and carries resource_url, deliberately ignored: the upstream
+		// base_url is user config, not something the pool rewrites.
+		form := url.Values{
+			"grant_type":    {"refresh_token"},
+			"refresh_token": {refreshTok},
+			"client_id":     {clientID},
+		}
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, endpoint,
+			strings.NewReader(form.Encode()))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	} else {
+		body, _ := json.Marshal(map[string]any{
+			"grant_type": "refresh_token", "refresh_token": refreshTok, "client_id": clientID,
+		})
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		p.setErr(a, 0, "refresh: "+err.Error())

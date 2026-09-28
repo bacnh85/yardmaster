@@ -20,6 +20,9 @@ func TestClassifierWireValidation(t *testing.T) {
 	if err := base("classifier", nil).Validate(); err == nil {
 		t.Fatal("classifier wildcard (empty models) accepted")
 	}
+	if err := base("gemini", nil).Validate(); err != nil {
+		t.Fatalf("valid gemini provider rejected: %v", err)
+	}
 	if err := base("bogus", nil).Validate(); err == nil {
 		t.Fatal("bogus wire accepted")
 	}

@@ -377,6 +377,7 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
                 <option value="anthropic">anthropic</option>
                 <option value="responses">responses</option>
                 <option value="classifier">classifier (System One /systemone)</option>
+                <option value="gemini">gemini (generateContent)</option>
               </select>
             </div>
             <div className="field">

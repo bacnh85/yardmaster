@@ -521,10 +521,13 @@ func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
 // (add/rotate/delete) — without it a deleted connection's usage row lingers up
 // to a minute. A build already in flight may re-store pre-delete data once:
 // worst case one extra 60s window.
-func invalidateQuotaReport() {
+func (s *Server) invalidateQuotaReport() {
 	quotaMu.Lock()
 	quotaReport, quotaUntil = nil, time.Time{}
 	quotaMu.Unlock()
+	// the exhausted-provider set rides the cache: pre-mutation quota data
+	// must not gate routing either (nil report = nothing exhausted)
+	s.storeExhaustedSet(nil)
 }
 
 // cachedQuotaReport returns the shared 60s-cached upstream quota report,
@@ -571,6 +574,7 @@ func (s *Server) cachedQuotaReport(refresh bool) []ProviderQuota {
 	quotaReport = rep
 	quotaUntil = time.Now().Add(quotaTTL)
 	quotaMu.Unlock()
+	s.storeExhaustedSet(rep)
 	return rep
 }
 
@@ -651,4 +655,123 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 		report = append(report, *g.pq)
 	}
 	return report
+}
+
+// ---- quota-aware routing (skip exhausted providers) ----
+
+// exhaustedMu guards the exhausted-provider set the proxy's QuotaExhausted
+// hook reads (its own lock — the quota cache lock must never be held while
+// dispatch consults the hook).
+var exhaustedMu sync.Mutex
+var exhaustedSet map[string]bool // config provider name → source exhausted
+
+// sourceExhausted reports whether a quota source is fully exhausted: at
+// least one account with a reported window, and EVERY window of EVERY
+// account Exceeded — or an account flagged Limited (no windows reported;
+// e.g. DeepSeek reports limited:true instead of window data). Accounts that
+// failed to report (error, no windows, not limited) contribute nothing —
+// unknown quota must not gate routing, so an all-error source is NOT
+// exhausted (fail open).
+func sourceExhausted(g ProviderQuota) bool {
+	anyWindows := false
+	for _, a := range g.Accounts {
+		has := false
+		for _, w := range []*QuotaWindow{a.FiveHour, a.Weekly, a.Monthly} {
+			if w == nil {
+				continue
+			}
+			has = true
+			if !w.Exceeded {
+				return false // one open window: the source can still serve
+			}
+		}
+		if has {
+			anyWindows = true
+		} else if a.Limited {
+			// no windows but explicitly Limited: the account is exhausted —
+			// this counts as a reported contribution (gates skip_when_exhausted)
+			anyWindows = true
+		}
+		// an account with no windows and not limited is a fetch error / no
+		// data — unknown, never guessed. It cannot mark the source
+		// exhausted; if EVERY account is unknown, anyWindows stays false.
+	}
+	return anyWindows
+}
+
+// storeExhaustedSet recomputes the exhausted-provider set from a fresh
+// report (a source serves every config provider listed in
+// ProviderQuota.Providers — several can share one billing origin). Called
+// wherever the quota cache is invalidated or refreshed; nil report clears.
+func (s *Server) storeExhaustedSet(rep []ProviderQuota) {
+	next := map[string]bool{}
+	for _, g := range rep {
+		if !sourceExhausted(g) {
+			continue
+		}
+		for _, name := range g.Providers {
+			next[name] = true
+		}
+	}
+	exhaustedMu.Lock()
+	exhaustedSet = next
+	exhaustedMu.Unlock()
+}
+
+// quotaExhausted is the proxy hook: true when the named config provider's
+// quota source reported fully exhausted. Providers with no quota source are
+// never exhausted (absent = unknown = route normally).
+func quotaExhausted(provider string) bool {
+	exhaustedMu.Lock()
+	set := exhaustedSet
+	exhaustedMu.Unlock()
+	return set[provider]
+}
+
+// StartQuotaRefresher spawns the process-lifetime goroutine that keeps the
+// exhausted-provider set fresh without dashboard traffic: headless installs
+// never call the quota API, so without it the set stays nil forever (M4).
+// Each tick, only if some provider opts in via skip_when_exhausted (flag is
+// re-read every tick — a reload may flip it), it forces a report rebuild,
+// which calls storeExhaustedSet. Staleness is thus bounded to ~interval in
+// both directions. Started from cmd/yardmaster run — NOT from server.New,
+// which tests call constantly; leaked tickers would pile up there.
+// Returns a stop func (waits for goroutine exit — tests must stop it so a
+// live ticker never writes the shared quota cache under a later test); the
+// production caller ignores it.
+func (s *Server) StartQuotaRefresher(interval time.Duration) (stop func()) {
+	if s.Proxy == nil {
+		return func() {}
+	}
+	quit := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cfg := s.Proxy.Reg.Config()
+				if cfg == nil {
+					continue
+				}
+				for _, pv := range cfg.Providers {
+					if pv.SkipWhenExhausted {
+						s.cachedQuotaReport(true)
+						break
+					}
+				}
+			case <-quit:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(quit)
+			<-exited // joined: no tick can touch the quota cache afterwards
+		})
+	}
 }

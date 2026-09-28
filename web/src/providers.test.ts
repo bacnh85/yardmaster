@@ -105,8 +105,8 @@ describe("zai preset defaults", () => {
     expect(d.extra_headers).toEqual({ "anthropic-beta": "fast-mode-2026-02-01" });
     expect(d.body_overrides).toEqual({ speed: "fast" });
   });
-  it("only zai and classifier entries carry defaults — others create bare providers", () => {
-    for (const r of REGISTRY.filter((r) => r.id !== "zai")) {
+  it("only zai, qwen and classifier entries carry defaults — others create bare providers", () => {
+    for (const r of REGISTRY.filter((r) => r.id !== "zai" && r.id !== "qwen")) {
       for (const e of r.entries) {
         if (e.wire === "classifier") continue; // curated jev ids ship as defaults
         expect(e.defaults).toBeUndefined();
@@ -124,10 +124,10 @@ const baseRow: ProviderRow = {
 describe("prefix registry", () => {
   it("every registry provider carries a short routing prefix", () => {
     expect(REGISTRY.map((r) => [r.id, r.prefix])).toEqual([
-      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"], ["typesafe", "jev"], ["ollama", "ol"], ["nvidia", "nv"],
+      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"], ["typesafe", "jev"], ["ollama", "ol"], ["nvidia", "nv"], ["qwen", "qw"], ["copilot", "cp"],
     ]);
     expect(REGISTRY.map((r) => [r.id, r.code])).toEqual([
-      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"], ["typesafe", "TS"], ["ollama", "OL"], ["nvidia", "NV"],
+      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"], ["typesafe", "TS"], ["ollama", "OL"], ["nvidia", "NV"], ["qwen", "QW"], ["copilot", "CP"],
     ]);
   });
 });
@@ -153,7 +153,7 @@ describe("registry", () => {
   });
 
   it("has the providers the product must support", () => {
-    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "deepseek", "nvidia", "ollama", "opencode-go", "openrouter", "typesafe", "zai"]);
+    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "copilot", "deepseek", "nvidia", "ollama", "opencode-go", "openrouter", "qwen", "typesafe", "zai"]);
     const zen = REGISTRY.find((r) => r.id === "opencode-go")!;
     expect(zen.entries).toHaveLength(3); // one config provider per wire family
     for (const e of zen.entries) {
@@ -190,6 +190,19 @@ describe("registry", () => {
     expect(nv.plans).toBeFalsy();
     expect(nv.entries).toHaveLength(1);
     expect(nv.entries[0]).toMatchObject({ name: "nvidia", wire: "openai", base_url: "https://integrate.api.nvidia.com/v1", family: "chat" });
+    // Qwen Code: one openai-wire entry at the DashScope compatible endpoint,
+    // oauth kind qwen with sensible model defaults
+    const qw = REGISTRY.find((r) => r.id === "qwen")!;
+    expect(qw.entries).toHaveLength(1);
+    expect(qw.entries[0]).toMatchObject({ name: "qwen", wire: "openai", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", family: "chat" });
+    expect(qw.entries[0].defaults).toEqual({ models: ["qwen3-coder-plus", "qwen3-max"] });
+    // GitHub Copilot: three wire entries like DeepSeek — /chat/completions,
+    // /responses, and the anthropic shim for claude-* models
+    const cp = REGISTRY.find((r) => r.id === "copilot")!;
+    expect(cp.entries).toHaveLength(3);
+    expect(cp.entries.map((e) => e.family).sort()).toEqual(["anthropic", "chat", "responses"]);
+    expect(cp.entries.find((e) => e.wire === "anthropic")!.base_url).toBe("https://api.githubcopilot.com"); // anthropicEndpoint() appends /v1/messages
+    expect(new Set(cp.entries.filter((e) => e.wire !== "anthropic").map((e) => e.base_url)).size).toBe(1);
   });
 
   it("classifies CommandCode models per plan (live catalog ids)", () => {

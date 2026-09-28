@@ -119,10 +119,16 @@ func probeParse(wire string, body []byte) (string, Usage) {
 			}
 		}
 		return sb.String(), ParseUsageJSON(wire, body)
-	case WireResponses:
-		chat := translate.ResponsesRespToChat(m)
-		b, _ := json.Marshal(chat)
-		return probeOpenAIText(chat), ParseUsageJSON(WireOpenAI, b)
+	case WireResponses, WireGemini:
+		// normalize to the chat hub, then read the openai shape; gemini usage
+		// rides the hub usage map after GeminiRespToChat (cache-exclusive)
+		if wire == WireGemini {
+			m = translate.GeminiRespToChat(m, "")
+		} else {
+			m = translate.ResponsesRespToChat(m)
+		}
+		b, _ := json.Marshal(m)
+		return probeOpenAIText(m), ParseUsageJSON(WireOpenAI, b)
 	default:
 		return probeOpenAIText(m), ParseUsageJSON(wire, body)
 	}

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
@@ -18,7 +19,8 @@ func TestCheckConcurrentRPM(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, ok := ks.Check("ar-race"); !ok {
+			k, err := ks.Check("ar-race")
+			if err != nil || k == nil {
 				t.Error("Check should succeed")
 			}
 		}()
@@ -30,14 +32,19 @@ func TestCheckUnknownKeyAndRPM(t *testing.T) {
 	ks := NewKeyStore([]*config.Key{
 		{Key: "ar-k", Name: "t", Allow: []string{"*"}, RPM: 1},
 	})
-	if _, ok := ks.Check("nope"); ok {
-		t.Fatal("unknown key accepted")
+	if _, err := ks.Check("nope"); !errors.Is(err, ErrUnknownKey) {
+		t.Fatalf("unknown key: err = %v, want ErrUnknownKey", err)
 	}
 	// RPM=1 → second immediate call in the same window is rejected
-	if _, ok := ks.Check("ar-k"); !ok {
-		t.Fatal("first call should pass")
+	if _, err := ks.Check("ar-k"); err != nil {
+		t.Fatalf("first call should pass: %v", err)
 	}
-	if _, ok := ks.Check("ar-k"); ok {
-		t.Fatal("second call should be rate limited")
+	k, err := ks.Check("ar-k")
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("second call: err = %v, want ErrRateLimited", err)
+	}
+	// key config rides along so the caller can name the limit in the 429 body
+	if k == nil || k.RPM != 1 {
+		t.Fatalf("rate-limited Check returned key %+v, want config with RPM 1", k)
 	}
 }

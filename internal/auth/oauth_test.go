@@ -134,6 +134,103 @@ func TestOAuthMarkResultCooldown(t *testing.T) {
 	}
 }
 
+// qwen: refresh grant must ride as an RFC 6749 form (its endpoint is not the
+// JSON dialect claude/codex speak), rotation must persist, and the response's
+// resource_url is ignored.
+func TestOAuthQwenFormRefresh(t *testing.T) {
+	var refreshes atomic.Int32
+	var gotGrant string
+	var gotRefresh, gotClientID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshes.Add(1)
+		if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
+			t.Errorf("content-type = %q, want form-encoded", ct)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		gotGrant = r.PostForm.Get("grant_type")
+		gotRefresh = r.PostForm.Get("refresh_token")
+		gotClientID = r.PostForm.Get("client_id")
+		// rotate every time: qwen hands back a fresh refresh token per grant
+		n := refreshes.Load()
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "at-qw-" + fmt.Sprint(n),
+			"refresh_token": "rt-qw-" + fmt.Sprint(n),
+			"expires_in":    3600,
+			"resource_url":  "https://chat.qwen.ai", // must be ignored
+		})
+	}))
+	defer srv.Close()
+	st, err := store.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p := NewOAuthPool(st)
+	defer p.Close()
+	p.Register("qwen-sub", &config.OAuthAcct{
+		Name: "qwen-main", Kind: "qwen", RefreshTok: "rt-seed",
+		TokenEndpoint: srv.URL + "/token", ClientID: "f0304373b74a44d2b584a3fb70ca9e56",
+		ExpiresAt: time.Now().Add(-time.Hour).Unix(), // stale
+	})
+
+	ctx := context.Background()
+	tok, err := p.Token(ctx, "qwen-sub", "qwen-main")
+	if err != nil || tok != "at-qw-1" {
+		t.Fatalf("first token: %q %v", tok, err)
+	}
+	if gotGrant != "refresh_token" || gotRefresh != "rt-seed" || gotClientID != "f0304373b74a44d2b584a3fb70ca9e56" {
+		t.Fatalf("form grant: grant=%q refresh=%q client_id=%q", gotGrant, gotRefresh, gotClientID)
+	}
+	// rotation persisted (survives restart)
+	if _, rt, _ := st.LoadOAuth("qwen-sub", "qwen-main"); rt != "rt-qw-1" {
+		t.Fatalf("rotated refresh token not persisted: %q", rt)
+	}
+	// second round-trip: expire the cached access token; the next grant must
+	// carry the ROTATED refresh token, not the config seed
+	tok2, err := p.Token(ctx, "qwen-sub", "qwen-main") // fresh — must not hit the endpoint
+	if err != nil || tok2 != "at-qw-1" || refreshes.Load() != 1 {
+		t.Fatalf("fresh token should not refresh: %q n=%d err=%v", tok2, refreshes.Load(), err)
+	}
+	a := p.get("qwen-sub", "qwen-main")
+	p.mu.Lock()
+	a.expires = time.Now().Add(-time.Minute)
+	p.mu.Unlock()
+	tok3, err := p.Token(ctx, "qwen-sub", "qwen-main")
+	if err != nil || tok3 != "at-qw-2" {
+		t.Fatalf("second refresh: %q %v", tok3, err)
+	}
+	if gotRefresh != "rt-qw-1" {
+		t.Fatalf("second grant used refresh token %q, want rotated rt-qw-1", gotRefresh)
+	}
+	if _, rt, _ := st.LoadOAuth("qwen-sub", "qwen-main"); rt != "rt-qw-2" {
+		t.Fatalf("second rotation not persisted: %q", rt)
+	}
+}
+
+// copilot: refresh_token carries the long-lived GitHub access token, so the
+// pool must NEVER call a token endpoint for it — with or without an expiry.
+func TestOAuthCopilotNeverRefreshes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("copilot account must not hit a token endpoint")
+	}))
+	defer srv.Close()
+	for _, exp := range []int64{0, time.Now().Add(-time.Hour).Unix()} {
+		p := NewOAuthPool(nil)
+		p.Register("copilot-sub", &config.OAuthAcct{
+			Name: "copilot-main", Kind: "copilot", RefreshTok: "ghp_live",
+			TokenEndpoint: srv.URL + "/token", ClientID: "irrelevant",
+			ExpiresAt: exp, // 0 = long-lived; stale = past expiry, still no refresh grant
+		})
+		tok, err := p.Token(context.Background(), "copilot-sub", "copilot-main")
+		if err == nil || tok != "" {
+			t.Fatalf("exp=%d: want error (no access token), got %q %v", exp, tok, err)
+		}
+		p.Close()
+	}
+}
+
 func TestOAuthNoRefreshToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("must not call endpoint") }))
 	defer srv.Close()

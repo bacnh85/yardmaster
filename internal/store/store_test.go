@@ -249,3 +249,134 @@ func TestSummarySinceLongRangeSkipsPercentiles(t *testing.T) {
 		t.Errorf("short window must compute percentiles, got %v", recent.TTFTp50)
 	}
 }
+
+// SaveCooldown→LoadCooldowns round-trip at unix-second granularity; upsert
+// overwrites in place (one row per target); zero-or-past until clears; rows
+// survive the reopen a restart performs.
+func TestCooldownPersistence(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "t.db")
+	s, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(5 * time.Minute).Truncate(time.Second) // store keeps whole seconds
+	if err := s.SaveCooldown("p", "k1", "429", until); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCooldown("p2", "k2", "breaker", until.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.LoadCooldowns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 rows, got %d: %+v", len(got), got)
+	}
+	byKey := map[string]CooldownRow{}
+	for _, r := range got {
+		byKey[r.Provider+"\x00"+r.Key] = r
+	}
+	r := byKey["p\x00k1"]
+	if r.Reason != "429" || !r.Until.Equal(until) {
+		t.Errorf("p/k1: got %+v, want reason 429 until %v", r, until)
+	}
+	r = byKey["p2\x00k2"]
+	if r.Reason != "breaker" || !r.Until.Equal(until.Add(-time.Minute)) {
+		t.Errorf("p2/k2: got %+v, want reason breaker until %v", r, until.Add(-time.Minute))
+	}
+
+	// upsert: same PK replaces reason+until instead of erroring or doubling
+	if err := s.SaveCooldown("p", "k1", "429", until.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.LoadCooldowns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("upsert must keep one row per target, got %d: %+v", len(got), got)
+	}
+	for _, r := range got {
+		if r.Provider == "p" && !r.Until.Equal(until.Add(3*time.Minute)) {
+			t.Errorf("upsert until = %v, want %v", r.Until, until.Add(3*time.Minute))
+		}
+	}
+
+	// zero until clears (Reset), past until clears too
+	if err := s.SaveCooldown("p", "k1", "429", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCooldown("p2", "k2", "breaker", time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.LoadCooldowns(); err != nil || len(got) != 0 {
+		t.Fatalf("cleared rows: got %d rows (%v, %v), want 0", len(got), got, err)
+	}
+
+	// empty-then-cleared state survives the reopen
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Minute).Truncate(time.Second)
+	if err := s2.SaveCooldown("p3", "k3", "429", future); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s3, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s3.Close()
+	got, err = s3.LoadCooldowns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Provider != "p3" || got[0].Key != "k3" || !got[0].Until.Equal(future) {
+		t.Fatalf("after reopen: got %+v, want [{p3 k3 429 %v}]", got, future)
+	}
+}
+
+// MonthSpend sums only the key's rows at/after the cutoff; rows for other keys
+// and rows before the cutoff stay out of the sum.
+func TestMonthSpend(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "t.db")
+	s, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	inside := now - 24*time.Hour.Milliseconds()
+	before := now - 35*24*time.Hour.Milliseconds()
+	s.Submit(&Record{Ts: inside, Key: "alpha", CostUSD: 1.25})
+	s.Submit(&Record{Ts: inside, Key: "alpha", CostUSD: 0.75})
+	s.Submit(&Record{Ts: before, Key: "alpha", CostUSD: 5}) // outside the window
+	s.Submit(&Record{Ts: inside, Key: "beta", CostUSD: 9})  // other key
+	if err := s.Close(); err != nil {                       // drain the async batch writer
+		t.Fatal(err)
+	}
+
+	s2, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	cutoff := now - 30*24*time.Hour.Milliseconds()
+	got, err := s2.MonthSpend("alpha", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 2.0 {
+		t.Fatalf("MonthSpend(alpha) = %v, want 2.0 (pre-cutoff and other-key rows excluded)", got)
+	}
+	if got, err := s2.MonthSpend("ghost", cutoff); err != nil || got != 0 {
+		t.Fatalf("MonthSpend(unknown key) = %v, %v; want 0, nil", got, err)
+	}
+}

@@ -3,12 +3,21 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 
 	"github.com/bacnh85/yardmaster/internal/config"
+)
+
+// Check outcomes: unknown keys and RPM exhaustion must be distinguishable —
+// both used to collapse to "not ok" and look like a fatal bad-key 401 to
+// agents, which then stopped retrying.
+var (
+	ErrUnknownKey  = errors.New("unknown API key")
+	ErrRateLimited = errors.New("key RPM limit exceeded")
 )
 
 // Limiter spaces dispatch STARTS at least `interval` apart. Streams themselves
@@ -75,14 +84,17 @@ func (ks *KeyStore) Replace(keys []*config.Key) {
 }
 
 // Check validates a key value and its RPM budget. Returns the key config.
+// nil error = allowed; ErrUnknownKey = not a configured key (caller answers
+// 401); ErrRateLimited = RPM exhausted (caller answers 429 so agents retry
+// instead of treating it as a fatal bad-key auth failure).
 // Full lock (not RLock): limiter creation mutates limiters; concurrent map
 // writes here would crash the process.
-func (ks *KeyStore) Check(value string) (*config.Key, bool) {
+func (ks *KeyStore) Check(value string) (*config.Key, error) {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	k, ok := ks.keys[value]
 	if !ok {
-		return nil, false
+		return nil, ErrUnknownKey
 	}
 	if k.RPM > 0 {
 		lim := ks.limiters[value]
@@ -91,8 +103,10 @@ func (ks *KeyStore) Check(value string) (*config.Key, bool) {
 			ks.limiters[value] = lim
 		}
 		if !lim.Allow() {
-			return nil, false
+			// key config still returned so the caller can name the RPM limit
+			// in the 429 body.
+			return k, ErrRateLimited
 		}
 	}
-	return k, true
+	return k, nil
 }

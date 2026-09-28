@@ -75,7 +75,7 @@ Source: <https://github.com/maximhq/bifrost>
 | Latency-based (EMA) | Serving user-facing chat | ❌ Agent workloads tolerate latency; adds state |
 | Cost-based routing | Equivalent models at different prices | ❌ Subscription economics trump price here |
 | Usage/rate-limit aware (TPM headroom) | Known per-account quotas | ❌ Needs per-key usage accounting; only worth it at volume |
-| Sticky sessions | Providers with prompt caching (DeepSeek auto-cache, Z.ai cache_control) | ⏸️ Deferred — would raise cache-hit rate materially |
+| Sticky sessions | Providers with prompt caching (DeepSeek auto-cache, Z.ai cache_control) | ✅ Opt-in `routing.affinity` — see implementation §5 |
 | Capability filters (`require_parameters`) | Aggregators serving many mirrors | ❌ Curated model lists already do this |
 
 ## Yardmaster implementation (what shipped)
@@ -101,11 +101,31 @@ behavior exactly:
    3 × 5xx (500/502/503/504/529) within 60s cools for 30s; success resets.
    Cooling targets are skipped at dispatch. Thresholds are hardcoded
    deliberately — promote to config when someone actually needs a knob.
+5. **Session affinity** (opt-in `routing.affinity`) — requests carrying a
+   session id (configured header, default `x-session-id`, falling back to the
+   opencode session header, anthropic `metadata.user_id`, or the openai
+   `user` body field) pin to the provider+connection that served their first
+   request for `ttl_s` (default 3600). The pin REORDERs the resolved target
+   list — rotation, cooldowns and failover stay intact — so provider-side
+   prompt caches (paid `cache_write` under inject_cache_control) hit. If the
+   pinned connection fails, the pin is cleared/re-bound to whoever serves; a
+   dead connection is never re-pinned (the binding is dropped on the dispatch
+   path via `affinityClear` only when the *pinned* connection itself fails —
+   a later-chain failure says nothing about the pin; both HTTP >=400 and
+   transport-level errors count as the pinned connection failing). The
+   binding map is capped at 10k
+   entries (expired-first, then random eviction: bounded memory beats perfect
+   LRU for one-row-per-conversation traffic). Pins are in-process and keyed by
+   connection LABEL (default labels are positional "Key N") — single-instance
+   or session-sticky-LB deployments only, and a key reorder reinterprets
+   positional pins (one cold cache, then stable again); set explicit
+   `key_labels` to keep identity stable across reorders. The pin is
+   per-session, not per-(session, model): an agent alternating models
+   flip-flops between chains and gains little. Disabled (default) = zero
+   behavior change.
 
 ### Rejected / deferred
 
-- **Sticky sessions** — deferred follow-up; session-id → provider pin with TTL
-  for prompt-cache hit rate.
 - Latency-based, least-busy, cost-based, usage-headroom routing — no payoff at
   this fleet size.
 - Random key pick — round_robin spreads quota deterministically.

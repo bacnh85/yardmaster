@@ -145,6 +145,21 @@ func (t *UsageTee) parse(m map[string]any) {
 		}
 		return
 	}
+	if t.wire == "gemini" {
+		// gemini alt=sse chunks and full generateContent bodies alike carry
+		// usageMetadata; promptTokenCount is cache-INCLUSIVE (same convention
+		// as openai prompt_tokens) — report cache-exclusive for the store
+		// invariant, thoughts fold into output (openai reasoning convention)
+		if u, ok := m["usageMetadata"].(map[string]any); ok && u != nil {
+			t.usage.In = num(u["promptTokenCount"])
+			t.usage.Out = num(u["candidatesTokenCount"]) + num(u["thoughtsTokenCount"])
+			t.usage.CacheR = num(u["cachedContentTokenCount"])
+			if t.usage.CacheR > 0 {
+				t.usage.In = max(0, t.usage.In-t.usage.CacheR)
+			}
+		}
+		return
+	}
 	// openai chunk
 	if u, ok := m["usage"].(map[string]any); ok && u != nil {
 		applyOpenAIUsage(&t.usage, u)

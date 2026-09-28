@@ -44,10 +44,12 @@ providers:
     auth: { type: static, keys: ["..."] }
     models: [glm-5.3, glm-5.3-flash]
     dispatch_interval_ms: 1000
+    skip_when_exhausted: false      # quota-aware routing: skip this provider while its billing windows report exhausted (fail-open)
     adaptive_thinking: true
     inject_cache_control: true
     extra_headers: { anthropic-beta: "fast-mode-2026-02-01" }
     body_overrides: { speed: fast }
+    body_overrides_mode: fill        # fill (default): only set keys absent in client body; override: force e.g. { reasoning_effort: high }
     zcode_signing: true   # ZCode identity + Client-Signing V4; fail-open when the gate is off
     # rotation: round_robin        # rotate starting key/account per request
     #                              # (default first = config order; spreads quota)
@@ -195,11 +197,59 @@ providers:
   #       - { name: codex-main, kind: codex, refresh_token: "...", account_id: "..." }
   #   models: [gpt-5.5]
 
+  # --- Qwen Code subscription (OAuth; import: yardmaster oauth import qwen --refresh-token ...) ---
+  # Qwen Code CLI login (qwen) leaves the refresh token in ~/.qwen/oauth_creds.json.
+  # Response's resource_url is ignored — point base_url where you actually call.
+  # - name: qwen-sub
+  #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  #   wire: openai
+  #   auth:
+  #     type: oauth
+  #     oauth_accounts:
+  #       - { name: qwen-main, kind: qwen, refresh_token: "..." }
+  #   models: [qwen3-coder-plus, qwen3-max]
+
+  # --- GitHub Copilot subscription (token; import: yardmaster oauth import copilot --token ...) ---
+  # refresh_token holds the long-lived GitHub access token (never refreshed);
+  # each dispatch exchanges it for a short-lived Copilot token automatically.
+  # - name: copilot-sub
+  #   base_url: https://api.githubcopilot.com
+  #   wire: openai             # anthropic shim: https://api.githubcopilot.com/v1/messages
+  #   auth:
+  #     type: oauth
+  #     oauth_accounts:
+  #       - { name: copilot-main, kind: copilot, refresh_token: "ghp_..." }
+  #   models: [gpt-5.5]
+
+  # --- Gemini API (gemini wire: POST {base}/v1beta/models/{model}:generateContent) ---
+  # Static API key only today (sent as x-goog-api-key; aistudio.google.com → Get API key).
+  # The gemini-cli OAuth kind exists as a refresh default only — its Code Assist
+  # endpoint speaks a different (v1internal) API shape and is out of scope.
+  # Gemini-native clients hit yardmaster at /v1beta/models/{model}[:streamGenerateContent?alt=sse].
+  # - name: gemini
+  #   base_url: https://generativelanguage.googleapis.com
+  #   wire: gemini
+  #   auth: { type: static, keys: ["AIza..."] }
+  #   models: [gemini-3-pro, gemini-3-flash]
+  #   # proxy_url: socks5://127.0.0.1:1080   # per-provider outbound proxy
+  #   #                                      # (http|https|socks5) — upstream
+  #   #                                      # dispatch only; oauth refresh,
+  #   #                                      # quota windows, catalog fetches
+  #   #                                      # stay direct
+
 # -*- optional global routing defaults: every route/provider inherits these;
 # per-route `strategy:` and per-provider `rotation:` override them.
 # routing:
 #   strategy: priority     # priority | weighted-rr
 #   rotation: first        # first | round_robin
+#   # session affinity: pin a coding-agent session to the provider+connection
+#   # that served its first request so upstream prompt caches hit. Session id
+#   # = first non-empty of the header below, the opencode session header,
+#   # anthropic metadata.user_id, openai body "user".
+#   # affinity:
+#   #   enabled: true
+#   #   ttl_s: 3600         # binding lifetime; 0 = default (3600)
+#   #   header: x-session-id
 
 routes:
   - match: "glm-*"
@@ -248,10 +298,14 @@ routes:
 # keys CLI agents authenticate with (yardmaster key add NAME generates one)
 # usage: false revokes the key's access to GET /v1/usage (upstream provider
 # usage report); unset/true = allowed (default).
+# monthly_usd caps the key's calendar-month spend: month-to-date cost from the
+# request log >= cap answers 429 budget_exceeded (+ Retry-After to month end);
+# 0/unset = unlimited. count_tokens stays usable for context trimming.
 keys:
   - key: "ar-REPLACE_ME"
     name: pi-laptop
     allow: ["*"]
+    # monthly_usd: 20
 
 # optional per-model cost overrides ($/Mtok); built-in defaults cover common models
 costs:

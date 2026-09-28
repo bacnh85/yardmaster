@@ -9,8 +9,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,22 +40,92 @@ type Server struct {
 	adminMu   sync.Mutex
 	adminPass string
 	sessions  map[string]time.Time
+	// login throttle: per client IP consecutive failure count + ban deadline.
+	// Keyed by the raw host part of RemoteAddr — no trusted-proxy header
+	// parsing (X-Forwarded-For is client-controlled unless a trusted proxy
+	// rewrites it; per instructions we do not attempt it).
+	loginFails  map[string]int
+	loginBanTil map[string]time.Time
+
+	budgets budgetCache
+}
+
+// budgetCache is the per-key month-to-date spend cache behind the budget
+// gate: 60s TTL, lazily populated. The budget gate runs on every request
+// ahead of dispatch, but the spend number comes from an indexed SUM over
+// request history — caching keeps the gate O(1) in practice. Freshness is
+// deliberately loose: cost rows land via the store's async batch writer, so
+// enforcement already lags the flush window; +60s of cache skew is within
+// the same error budget as MonthSpend's own lag.
+type budgetCache struct {
+	mu    sync.Mutex
+	spend map[string]spendCacheEntry
+}
+
+// budgetCacheTTL is how long a cached spend answer stays authoritative.
+const budgetCacheTTL = 60 * time.Second
+
+type spendCacheEntry struct {
+	spend     float64
+	checkedAt time.Time
+}
+
+// monthSpendCached returns a key's month-to-date spend, hitting the store
+// only on a TTL miss. A store error bypasses the cache and reads as
+// unlimited — a DB hiccup must not 429 every key on the box.
+func (s *Server) monthSpendCached(name string, sinceUnixMS int64) (float64, error) {
+	if s.budgets.spend == nil {
+		s.budgets.spend = map[string]spendCacheEntry{}
+	}
+	if e, ok := s.budgets.spend[name]; ok && time.Since(e.checkedAt) < budgetCacheTTL {
+		return e.spend, nil
+	}
+	spend, err := s.Store.MonthSpend(name, sinceUnixMS)
+	if err != nil {
+		return 0, err
+	}
+	s.budgets.spend[name] = spendCacheEntry{spend: spend, checkedAt: time.Now()}
+	return spend, nil
 }
 
 func New(p *proxy.Proxy, keys *auth.KeyStore, st *store.Store, cfgPath, adminPass, version string) *Server {
+	// quota-aware routing: skip providers whose billing source reports
+	// exhausted (skip_when_exhausted). Guarded like the quota cache: the
+	// hook is only attached when some provider maps to a quota source —
+	// no source, no exhaustion, plain routing. p may be nil in tests that
+	// exercise admin handlers without a proxy.
+	if p != nil {
+		for _, pv := range p.Reg.Config().Providers {
+			if quotaSource(pv.BaseURL) != "" {
+				p.QuotaExhausted = quotaExhausted
+				break
+			}
+		}
+	}
 	return &Server{
 		Proxy: p, Keys: keys, Store: st,
 		ConfigPath: cfgPath, Version: version,
 		adminPass: adminPass, sessions: map[string]time.Time{},
+		loginFails: map[string]int{}, loginBanTil: map[string]time.Time{},
 	}
 }
+
+// countTokensPath is exempt from the budget gate: an agent over budget must
+// stay able to count tokens — the tool it uses to trim context (and spend)
+// back under the cap. Auth + RPM still apply.
+const countTokensPath = "/v1/messages/count_tokens"
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.wrap(s.Proxy.ServeChat))
 	mux.HandleFunc("POST /v1/responses", s.wrap(s.Proxy.ServeResponses))
 	mux.HandleFunc("POST /v1/messages", s.wrap(s.Proxy.ServeMessages))
-	mux.HandleFunc("POST /v1/messages/count_tokens", s.wrap(s.wrapCountTokens))
+	// Gemini-native wire: the model rides the path (ServeMux patterns are
+	// exact-match, so both streaming variants are registered; alt=sse decides
+	// streaming inside the handler).
+	mux.HandleFunc("POST /v1beta/models/", s.wrap(s.Proxy.ServeGemini))
+	mux.HandleFunc("GET /v1beta/models", s.wrap(s.handleGeminiModels))
+	mux.HandleFunc("POST "+countTokensPath, s.wrap(s.wrapCountTokens))
 	// System One decision wire: /v1/systemone canonical (TypeSafe-SDK and
 	// OpenRouter-SystemOne compatible via TYPESAFE_BASE_URL=https://<host>/v1);
 	// /v1/decisions + /v1/classifier are aliases of the same handler.
@@ -76,13 +148,35 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) wrap(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		k, ok := s.authenticate(r)
-		if !ok {
+		k, err := s.authenticate(r)
+		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
+			if errors.Is(err, auth.ErrRateLimited) {
+				// RPM exhaustion is transient: 429 + Retry-After so agents back
+				// off and retry instead of treating it as a fatal bad-key 401.
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(429)
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+					"message": fmt.Sprintf("key rate limit exceeded (%d requests per minute)", k.RPM), "type": "rate_limit_error"}})
+				return
+			}
 			w.WriteHeader(401)
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
 				"message": "invalid or missing API key", "type": "authentication_error"}})
 			return
+		}
+		if k.MonthlyUSD > 0 && r.URL.Path != countTokensPath {
+			if spent, limit, ok := s.budgetExceeded(k); ok {
+				// Budget exhaustion is month-scoped, not transient in the RPM
+				// sense, but Retry-After still names the reset: seconds until
+				// the 1st of next month (local tz), when spend starts from 0.
+				w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(nextMonthStart()).Seconds())))
+				w.WriteHeader(429)
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+					"message": fmt.Sprintf("key %q monthly budget exceeded: $%.2f spent of $%.2f cap for this month", k.Name, spent, limit),
+					"type":    "budget_exceeded"}})
+				return
+			}
 		}
 		ctx := r.Context()
 		ctx = proxy.WithStartTime(ctx, start)
@@ -101,7 +195,63 @@ func inboundKey(r *http.Request) *config.Key {
 	return k
 }
 
-func (s *Server) authenticate(r *http.Request) (*config.Key, bool) {
+// nextMonthStart is the local-time first of next month, midnight — when
+// month-to-date spend resets and a budget gate reopens.
+func nextMonthStart() time.Time {
+	now := time.Now()
+	return time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, now.Location())
+}
+
+// monthStartUnixMS is this calendar month's local midnight in unix ms — the
+// MonthSpend window.
+func monthStartUnixMS() int64 {
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).UnixMilli()
+}
+
+// budgetExceeded reports whether key is over its monthly_usd cap. Keys
+// without a budget (0) never reach here. A store error or nil store reads as
+// unlimited — enforcement is best-effort, never a self-inflicted outage.
+func (s *Server) budgetExceeded(k *config.Key) (spent, limit float64, exceeded bool) {
+	spent, err := s.monthSpendCached(k.Name, monthStartUnixMS())
+	if err != nil {
+		return 0, k.MonthlyUSD, false
+	}
+	return spent, k.MonthlyUSD, spent >= k.MonthlyUSD
+}
+
+// budgetInvalidate drops a key's cached spend — on delete/rename, so a later
+// key reusing the name never inherits a dead key's spend window.
+func (s *Server) budgetInvalidate(name string) {
+	s.budgets.mu.Lock()
+	delete(s.budgets.spend, name)
+	s.budgets.mu.Unlock()
+}
+
+// monthSpentFresh forces a fresh MonthSpend for the admin keys page so the
+// dashboard's spend/limit view matches what the gate decides next; the fresh
+// read also refreshes the gate's cache entry. 0 on store error (display-only
+// column — one bad SUM must not blank the keys page).
+func (s *Server) monthSpentFresh(name string) float64 {
+	s.budgetInvalidate(name)
+	spent, err := s.monthSpendCached(name, monthStartUnixMS())
+	if err != nil {
+		return 0
+	}
+	return spent
+}
+
+// monthLimitPct is month-to-date spend as a share of the cap, 0-100+ (100 is
+// exactly at budget; >100 is over). 0 when unlimited — there is no cap to
+// divide by.
+func (s *Server) monthLimitPct(k *config.Key) float64 {
+	if k.MonthlyUSD <= 0 {
+		return 0
+	}
+	return s.monthSpentFresh(k.Name) / k.MonthlyUSD * 100
+}
+
+func (s *Server) authenticate(r *http.Request) (*config.Key, error) {
 	key := ""
 	if ah := r.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
 		key = strings.TrimPrefix(ah, "Bearer ")
@@ -110,7 +260,12 @@ func (s *Server) authenticate(r *http.Request) (*config.Key, bool) {
 		key = r.Header.Get("x-api-key")
 	}
 	if key == "" {
-		return nil, false
+		// Gemini-native clients (x-goog-api-key; read last so the
+		// openai/anthropic conventions keep winning)
+		key = r.Header.Get("x-goog-api-key")
+	}
+	if key == "" {
+		return nil, auth.ErrUnknownKey
 	}
 	return s.Keys.Check(key)
 }
@@ -126,8 +281,15 @@ func (s *Server) wrapCountTokens(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", 400)
 		return
 	}
+	// Real count first (same-wire anthropic upstream); the chars/4 estimate
+	// undercounts badly and Claude Code trims context off this number, so the
+	// exact path matters — estimate is only the fallback shape.
+	n, ok := s.Proxy.CountTokens(r.Context(), body)
+	if !ok {
+		n = translate.CountTokensEstimate(req)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"input_tokens": translate.CountTokensEstimate(req)})
+	json.NewEncoder(w).Encode(map[string]any{"input_tokens": n})
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +371,28 @@ func (s *Server) handleSystemoneModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 }
 
+// handleGeminiModels serves GET /v1beta/models — the Gemini CLI's discovery
+// shape (name + supportedGenerationMethods). Same ids as /v1/models; the
+// gemini wire carries no pricing/context metadata.
+func (s *Server) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
+	seen := map[string]bool{}
+	type gm struct {
+		Name                       string   `json:"name"`
+		SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+	}
+	models := make([]gm, 0) // never nil — empty registry marshals as []
+	for _, m := range s.Proxy.Reg.Models() {
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		models = append(models, gm{Name: m,
+			SupportedGenerationMethods: []string{"generateContent", "streamGenerateContent"}})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"models": models})
+}
+
 // lookupMeta finds catalog metadata for an advertised id, trying the id
 // verbatim then with a known provider prefix stripped.
 func lookupMeta(metas map[string]ModelMeta, id string) (ModelMeta, bool) {
@@ -259,7 +443,31 @@ func cachedCatalogMetas(providers []*config.Provider) map[string]ModelMeta {
 
 // ---- admin ----
 
+// loginBanWindow is how long an IP stays banned after 5 consecutive failures;
+// loginMaxFails is the consecutive-failure threshold. Success resets the count.
+const (
+	loginMaxFails   = 5
+	loginBanWindow  = 30 * time.Minute
+	loginRetryAfter = 1800 // seconds, mirrors loginBanWindow
+)
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// host part of RemoteAddr only — no trusted-proxy header parsing
+	// (X-Forwarded-For is client-controlled unless a trusted proxy rewrites it).
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	s.adminMu.Lock()
+	if until, banned := s.loginBanTil[ip]; banned && time.Now().Before(until) {
+		s.adminMu.Unlock()
+		// banned IPs get 429 even with the correct password — the ban is the point
+		w.Header().Set("Retry-After", strconv.Itoa(loginRetryAfter))
+		http.Error(w, "too many failed login attempts", 429)
+		return
+	}
+	s.adminMu.Unlock()
+
 	var req struct {
 		Password string `json:"password"`
 	}
@@ -268,6 +476,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.adminPass == "" || subtle.ConstantTimeCompare([]byte(req.Password), []byte(s.adminPass)) != 1 {
+		s.adminMu.Lock()
+		s.loginFails[ip]++
+		if s.loginFails[ip] >= loginMaxFails {
+			s.loginBanTil[ip] = time.Now().Add(loginBanWindow)
+		}
+		// the failure maps never expire on their own — a scanner rotating
+		// source IPs would grow them forever. Purge in place once large:
+		// lapsed bans and stale counts go; live entries stay and counts
+		// re-populate on the next failure.
+		if len(s.loginFails) > 1000 {
+			cutoff := time.Now().Add(-loginBanWindow)
+			for f := range s.loginFails {
+				if f == ip {
+					continue // never purge the requester's own fresh count
+				}
+				if _, banned := s.loginBanTil[f]; !banned || s.loginBanTil[f].Before(cutoff) {
+					delete(s.loginFails, f)
+				}
+			}
+			for f, until := range s.loginBanTil {
+				if until.Before(cutoff) {
+					delete(s.loginBanTil, f)
+				}
+			}
+		}
+		s.adminMu.Unlock()
 		http.Error(w, "unauthorized", 401)
 		return
 	}
@@ -278,6 +512,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	token := hex.EncodeToString(tok)
 	s.adminMu.Lock()
+	delete(s.loginFails, ip) // success resets the consecutive-failure counter
 	s.sessions[token] = time.Now().Add(7 * 24 * time.Hour)
 	s.adminMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
@@ -387,14 +622,21 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		out := make([]map[string]any, 0, len(s.Proxy.Reg.Config().Keys))
 		for _, k := range s.Proxy.Reg.Config().Keys {
-			out = append(out, map[string]any{
+			row := map[string]any{
 				"name": k.Name, "key_suffix": suffix(k.Key), "allow": k.Allow, "rpm": k.RPM,
 				"usage": k.Usage, // nil = allowed (default ON)
 				"id":    keyID(k.Key),
 				// unix ms, same unit as last_used so the UI renders both with one formatter
 				"created_at": k.CreatedAt,
 				"last_used":  lastUsed[k.Name],
-			})
+				// month-to-date spend vs the monthly_usd cap (0 = unlimited)
+				"monthly_usd": k.MonthlyUSD,
+				"month_spent": s.monthSpentFresh(k.Name),
+			}
+			if k.MonthlyUSD > 0 {
+				row["month_limit_pct"] = s.monthLimitPct(k) // omitted when unlimited
+			}
+			out = append(out, row)
 		}
 		writeJSON(map[string]any{"keys": out})
 	case path == "providers" && r.Method == "GET":
@@ -429,13 +671,18 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.serveLive(w, r)
 	case path == "keys" && r.Method == "POST":
 		var req struct {
-			Name  string   `json:"name"`
-			Allow []string `json:"allow"`
-			RPM   int      `json:"rpm"`
-			Usage *bool    `json:"usage"`
+			Name       string   `json:"name"`
+			Allow      []string `json:"allow"`
+			RPM        int      `json:"rpm"`
+			Usage      *bool    `json:"usage"`
+			MonthlyUSD *float64 `json:"monthly_usd"`
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil || req.Name == "" {
 			http.Error(w, "name required", 400)
+			return
+		}
+		if req.MonthlyUSD != nil && *req.MonthlyUSD < 0 {
+			http.Error(w, "monthly_usd must be >= 0", 400)
 			return
 		}
 		raw := config.GenKey()
@@ -449,9 +696,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			if len(allow) == 0 {
 				allow = []string{"*"}
 			}
+			monthlyUSD := 0.0
+			if req.MonthlyUSD != nil {
+				monthlyUSD = *req.MonthlyUSD
+			}
 			c.Keys = append(c.Keys, &config.Key{
 				Key: raw, Name: req.Name, Allow: allow, RPM: req.RPM, Usage: req.Usage,
-				CreatedAt: time.Now().UnixMilli(), // unix ms, same unit as request ts
+				MonthlyUSD: monthlyUSD,
+				CreatedAt:  time.Now().UnixMilli(), // unix ms, same unit as request ts
 			})
 			return nil
 		}) {
@@ -460,18 +712,23 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		// the raw key is shown exactly once, in this response
 		writeJSON(map[string]any{"ok": true, "key": raw})
 	case strings.HasPrefix(path, "keys/") && r.Method == "PUT":
-		// edit a key: {name?, allow?, rpm?, usage?, key?} — nil pointers keep
-		// stored values; a non-empty key rotates the secret in place
+		// edit a key: {name?, allow?, rpm?, usage?, monthly_usd?, key?} — nil
+		// pointers keep stored values; a non-empty key rotates the secret in place
 		name := strings.TrimPrefix(path, "keys/")
 		var req struct {
-			Name  *string   `json:"name"`
-			Allow *[]string `json:"allow"`
-			RPM   *int      `json:"rpm"`
-			Usage *bool     `json:"usage"`
-			Key   *string   `json:"key"`
+			Name       *string   `json:"name"`
+			Allow      *[]string `json:"allow"`
+			RPM        *int      `json:"rpm"`
+			Usage      *bool     `json:"usage"`
+			MonthlyUSD *float64  `json:"monthly_usd"` // 0 = lift the cap (unlimited)
+			Key        *string   `json:"key"`
 		}
 		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
 			http.Error(w, "bad json", 400)
+			return
+		}
+		if req.MonthlyUSD != nil && *req.MonthlyUSD < 0 {
+			http.Error(w, "monthly_usd must be >= 0", 400)
 			return
 		}
 		if !s.mutate(w, func(c *config.Config) error {
@@ -499,8 +756,11 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				if req.Usage != nil {
 					k.Usage = req.Usage
 				}
+				if req.MonthlyUSD != nil {
+					k.MonthlyUSD = *req.MonthlyUSD
+				}
 				if req.Key != nil && *req.Key != "" {
-					k.Key = *req.Key // rotation; empty string keeps the stored secret
+					k.Key = *req.Key                     // rotation; empty string keeps the stored secret
 					k.CreatedAt = time.Now().UnixMilli() // the new credential starts its own clock
 				}
 				return nil
@@ -516,6 +776,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			if err := s.Store.RenameKey(name, *req.Name); err != nil {
 				fmt.Printf("keys: re-attribute history %q → %q: %v\n", name, *req.Name, err)
 			}
+			s.budgetInvalidate(name) // the cached spend belongs to the old name
 		}
 		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "keys/") && r.Method == "DELETE":
@@ -531,6 +792,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}) {
 			return
 		}
+		s.budgetInvalidate(name) // a later key reusing the name starts from a fresh read
 		writeJSON(map[string]any{"ok": true})
 	case path == "playground" && r.Method == "POST":
 		var req struct {
@@ -621,7 +883,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}) {
 			return
 		}
-		invalidateQuotaReport()
+		s.invalidateQuotaReport()
 		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "providers/") && strings.Contains(path, "/keys/") && r.Method == "DELETE":
 		rest := strings.TrimPrefix(path, "providers/")
@@ -657,7 +919,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}) {
 			return
 		}
-		invalidateQuotaReport()
+		s.invalidateQuotaReport()
 		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "providers/") && strings.Contains(path, "/keys/") && r.Method == "PUT":
 		// edit one stored connection: {label?, key?} — nil/empty keeps. Index-
@@ -712,7 +974,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}) {
 			return
 		}
-		invalidateQuotaReport()
+		s.invalidateQuotaReport()
 		writeJSON(map[string]any{"ok": true})
 	case strings.HasPrefix(path, "providers/") && strings.HasSuffix(path, "/subscription") && r.Method == "PUT":
 		// change the plan tier of one provider entry: {plan} — "" clears.
@@ -786,12 +1048,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					if f.Keys == nil {
 						p.Auth.Keys = x.Auth.Keys
 					}
-			if f.KeyLabels == nil {
-				p.Auth.KeyLabels = x.Auth.KeyLabels // survive key edits unless explicitly sent
-			}
-			if f.KeyDisabled == nil {
-				p.Auth.KeyDisabled = x.Auth.KeyDisabled // omitted (model toggles etc.) keeps per-connection flags
-			}
+					if f.KeyLabels == nil {
+						p.Auth.KeyLabels = x.Auth.KeyLabels // survive key edits unless explicitly sent
+					}
+					if f.KeyDisabled == nil {
+						p.Auth.KeyDisabled = x.Auth.KeyDisabled // omitted (model toggles etc.) keeps per-connection flags
+					}
 					if f.Prefix == nil {
 						p.Prefix = x.Prefix // omitted field keeps the stored prefix
 					}
@@ -868,7 +1130,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("no provider named %q", name)
 			}
 			c.Providers = kept
-			invalidateQuotaReport()
+			s.invalidateQuotaReport()
 			// scrub routes that pointed at the removed provider — weights stay
 			// index-aligned with the chain so a weighted-rr route survives
 			routes := c.Routes[:0]
@@ -1088,10 +1350,10 @@ type providerForm struct {
 	Models             []string          `json:"models"`
 	Keys               []string          `json:"keys"`
 	KeyLabels          []string          `json:"keyLabels"`
-	KeyDisabled        []bool            `json:"keyDisabled"` // index-aligned with Keys; nil = keep stored
-	Prefix             *string           `json:"prefix"`   // nil = omitted (keep stored); "" = none; else routing prefix
-	Session            *string           `json:"session"`  // nil = omitted (keep stored); "" = none; "opencode" = session headers
-	Rotation           *string           `json:"rotation"` // nil = omitted (keep stored); first | round_robin
+	KeyDisabled        []bool            `json:"keyDisabled"`  // index-aligned with Keys; nil = keep stored
+	Prefix             *string           `json:"prefix"`       // nil = omitted (keep stored); "" = none; else routing prefix
+	Session            *string           `json:"session"`      // nil = omitted (keep stored); "" = none; "opencode" = session headers
+	Rotation           *string           `json:"rotation"`     // nil = omitted (keep stored); first | round_robin
 	Subscription       *string           `json:"subscription"` // nil = omitted (keep stored); "" = none; goat|pro|max|free
 	Preset             string            `json:"preset"`
 	Disabled           *bool             `json:"disabled"`             // nil = omitted (keep stored)
@@ -1112,8 +1374,8 @@ func derefInt(p *int) int {
 }
 
 func (f providerForm) provider() (*config.Provider, error) {
-	if f.Wire != "openai" && f.Wire != "anthropic" && f.Wire != "responses" && f.Wire != "classifier" {
-		return nil, fmt.Errorf("wire must be openai, anthropic, responses, or classifier")
+	if f.Wire != "openai" && f.Wire != "anthropic" && f.Wire != "responses" && f.Wire != "classifier" && f.Wire != "gemini" {
+		return nil, fmt.Errorf("wire must be openai, anthropic, responses, classifier, or gemini")
 	}
 	u, err := url.Parse(f.BaseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

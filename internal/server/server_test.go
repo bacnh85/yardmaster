@@ -1619,3 +1619,175 @@ func TestAdminTimeseries(t *testing.T) {
 		}
 	}
 }
+
+// authHarness: minimal server whose auth path is exercised via
+// /v1/messages/count_tokens (auth-wrapped, then 400s on an empty body without
+// touching the proxy upstream).
+func authHarness(t *testing.T, keys []*config.Key) *httptest.Server {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{Listen: ":0", Keys: keys}
+	cfg.Defaults()
+	cfg.Validate()
+	reg := provider.New(cfg)
+	p := proxy.NewProxy(reg, st, cfg.CostFor)
+	srv := New(p, auth.NewKeyStore(cfg.Keys), st, "", "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// countTokensAuth posts to the count_tokens endpoint, returning the status and
+// the Retry-After header value ("" if absent).
+func countTokensAuth(t *testing.T, ts *httptest.Server, key string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/messages/count_tokens", strings.NewReader(`{}`))
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, resp.Header.Get("Retry-After")
+}
+
+// RPM exhaustion must come back as 429 + Retry-After (transient, agents keep
+// retrying), not the 401 bad-key envelope that made agents give up.
+func TestRPMExhaustion429(t *testing.T) {
+	ts := authHarness(t, []*config.Key{{Key: "ar-rpm", Name: "t", Allow: []string{"*"}, RPM: 1}})
+
+	// first request passes auth (handler 200s on the count of `{}`)
+	if code, _ := countTokensAuth(t, ts, "ar-rpm"); code != 200 {
+		t.Fatalf("first request: want 200 (auth ok), got %d", code)
+	}
+	code, retry := countTokensAuth(t, ts, "ar-rpm")
+	if code != 429 {
+		t.Fatalf("second request: want 429, got %d", code)
+	}
+	if retry != "1" {
+		t.Fatalf("Retry-After = %q, want 1", retry)
+	}
+	// unknown key stays a plain 401
+	if code, _ = countTokensAuth(t, ts, "ar-wrong"); code != 401 {
+		t.Fatalf("unknown key: want 401, got %d", code)
+	}
+}
+
+// login throttle: 5 consecutive failures from one IP bans it for 30 minutes —
+// even the correct password then gets 429 — and a successful login resets the
+// failure counter.
+func TestLoginThrottle(t *testing.T) {
+	ts := authHarness(t, []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}})
+
+	login := func(pw string) (int, string) {
+		resp, err := http.Post(ts.URL+"/admin/api/login", "application/json",
+			strings.NewReader(`{"password":"`+pw+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode, resp.Header.Get("Retry-After")
+	}
+
+	for range 5 {
+		if code, _ := login("wrong"); code != 401 {
+			t.Fatalf("failure: want 401, got %d", code)
+		}
+	}
+	// banned: even the correct password is refused
+	code, retry := login("secretpw")
+	if code != 429 {
+		t.Fatalf("banned login: want 429, got %d", code)
+	}
+	if retry != "1800" {
+		t.Fatalf("Retry-After = %q, want 1800", retry)
+	}
+
+	// fresh server: success resets the counter — 4 wrong, one correct, then
+	// 4 more wrong must NOT trip the 5-failure ban.
+	ts2 := authHarness(t, []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}})
+	login2 := func(pw string) int {
+		resp, err := http.Post(ts2.URL+"/admin/api/login", "application/json",
+			strings.NewReader(`{"password":"`+pw+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode
+	}
+	for range 4 {
+		login2("wrong")
+	}
+	if code := login2("secretpw"); code != 200 {
+		t.Fatalf("good login: want 200, got %d", code)
+	}
+	for range 4 {
+		if code := login2("wrong"); code != 401 {
+			t.Fatalf("post-reset failure: want 401, got %d", code)
+		}
+	}
+	if code := login2("secretpw"); code != 200 {
+		t.Fatalf("counter did not reset: want 200, got %d", code)
+	}
+}
+
+// The failure maps are purged once large: lapsed bans and their failure
+// counts go, live bans survive, and the requester's own fresh count is kept.
+func TestLoginThrottlePurge(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{Listen: ":0", Keys: []*config.Key{{Key: "ar-agent", Name: "pi", Allow: []string{"*"}}}}
+	cfg.Defaults()
+	cfg.Validate()
+	reg := provider.New(cfg)
+	srv := New(proxy.NewProxy(reg, st, cfg.CostFor), auth.NewKeyStore(cfg.Keys), st, "", "secretpw", "test")
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	srv.adminMu.Lock()
+	for i := 0; i < 1200; i++ {
+		ip := fmt.Sprintf("10.0.%d.%d", i/250, i%250)
+		srv.loginFails[ip] = 2
+		if i%3 == 0 { // every third has a lapsed ban
+			srv.loginBanTil[ip] = time.Now().Add(-2 * time.Hour)
+		}
+	}
+	srv.loginBanTil["10.9.9.9"] = time.Now().Add(time.Hour) // live ban must survive
+	srv.loginFails["10.9.9.9"] = 5
+	srv.adminMu.Unlock()
+
+	// one more failed login from a fresh IP trips the purge
+	resp, err := http.Post(ts.URL+"/admin/api/login", "application/json",
+		strings.NewReader(`{"password":"wrong"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("failure: want 401, got %d", resp.StatusCode)
+	}
+
+	srv.adminMu.Lock()
+	defer srv.adminMu.Unlock()
+	if len(srv.loginFails) > 10 {
+		t.Fatalf("loginFails not purged: %d entries", len(srv.loginFails))
+	}
+	if _, ok := srv.loginBanTil["10.9.9.9"]; !ok {
+		t.Fatal("live ban was purged")
+	}
+	if _, ok := srv.loginFails["127.0.0.1"]; !ok {
+		t.Fatal("requester's own fresh failure was purged")
+	}
+}
