@@ -86,6 +86,7 @@ type Provider struct {
 	Models             []string          `yaml:"models"`               // upstream models this provider serves; empty = any
 	ModelMap           map[string]string `yaml:"model_map"`            // requested model -> upstream model id
 	DispatchIntervalMS int               `yaml:"dispatch_interval_ms"` // per-key min interval between request starts; 0 = unthrottled
+	DispatchBurst      int               `yaml:"dispatch_burst"`       // immediate dispatch slots before spacing applies; 0/1 = strict spacing
 	ExtraHeaders       map[string]string `yaml:"extra_headers"`
 	BodyOverrides      map[string]any    `yaml:"body_overrides"`
 	BodyOverridesMode  string            `yaml:"body_overrides_mode"`  // "" = fill (default); override = replace client-sent keys
@@ -414,6 +415,12 @@ func (c *Config) Validate() error {
 		}
 		if p.Rotation != "" && p.Rotation != "first" && p.Rotation != "round_robin" {
 			return fmt.Errorf("provider %s: rotation must be first|round_robin", p.Name)
+		}
+		if p.DispatchIntervalMS < 0 {
+			return fmt.Errorf("provider %s: dispatch_interval_ms must be >= 0", p.Name)
+		}
+		if p.DispatchBurst < 0 {
+			return fmt.Errorf("provider %s: dispatch_burst must be >= 0", p.Name)
 		}
 		if p.BodyOverridesMode != "" && p.BodyOverridesMode != "fill" && p.BodyOverridesMode != "override" {
 			return fmt.Errorf("provider %s: body_overrides_mode must be fill|override", p.Name)

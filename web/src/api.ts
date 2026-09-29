@@ -38,6 +38,7 @@ export interface ReqRow {
   status: number; stream: boolean; ttft_ms: number; dur_ms: number;
   tok_in: number; tok_out: number; cache_read: number; cache_write: number;
   cost_usd: number; err: string; attempts: number;
+  queue_ms?: number; // absent from older servers → undefined → "–"
 }
 export interface BreakdownRow {
   name: string; requests: number; errors: number; tok_in: number; tok_out: number;
@@ -61,6 +62,7 @@ export interface ProviderRow {
   subscription?: string; // absent from older servers → "" (no plan tier)
   preset: string; disabled: boolean;
   dispatch_interval_ms: number; auth_type: string;
+  dispatch_burst?: number; // absent from older servers → 0 (= strict spacing)
   adaptive_thinking: boolean; inject_cache_control: boolean;
   zcode_signing?: boolean; // absent from older servers → prefill degrades to false
   extra_headers?: Record<string, string> | null;

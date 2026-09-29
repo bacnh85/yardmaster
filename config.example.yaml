@@ -44,6 +44,7 @@ providers:
     auth: { type: static, keys: ["..."] }
     models: [glm-5.3, glm-5.3-flash]
     dispatch_interval_ms: 1000
+    dispatch_burst: 3               # immediate dispatch slots before spacing applies (0/1 = strict spacing); lets parallel agent fan-out through without weakening the sustained 1/s that avoids 1302
     skip_when_exhausted: false      # quota-aware routing: skip this provider while its billing windows report exhausted (fail-open)
     adaptive_thinking: true
     inject_cache_control: true

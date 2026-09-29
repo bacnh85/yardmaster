@@ -348,6 +348,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 	activeID := fmt.Sprintf("%d-%d", start.UnixNano(), rand.Int63n(1e9))
 	var usage Usage
 	var ttft time.Duration
+	var queueDur time.Duration // dispatch-throttle wait (serving attempt)
 	forwarded := false
 	lastErr := ""
 	var lastStatus int
@@ -406,10 +407,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			continue
 		}
 		if lim := p.Reg.Limiter(tgt.Provider, limKey); lim != nil {
+			w0 := time.Now()
 			if err := lim.Wait(r.Context()); err != nil {
 				rec.Status = 499
 				return
 			}
+			queueDur = time.Since(w0)
 		}
 
 		reqModel := model // combo requests dispatch under the natural model id
@@ -493,6 +496,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 
 		rec.Status = 200
 		rec.TTFTms = float64(ttft.Milliseconds())
+		rec.QueueMs = float64(queueDur.Milliseconds())
 		rec.TokIn, rec.TokOut, rec.CacheRead, rec.CacheWrt = usage.In, usage.Out, usage.CacheR, usage.CacheW
 		if p.Cost != nil {
 			c := p.Cost(reqModel) // combo dispatch: price the natural model, not combo/<name>
@@ -515,10 +519,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			qLimKey = "oauth:" + quotaSkipped.AcctName
 		}
 		if lim := p.Reg.Limiter(quotaSkipped.Provider, qLimKey); lim != nil {
+			w0 := time.Now()
 			if err := lim.Wait(r.Context()); err != nil {
 				rec.Status = 499
 				return
 			}
+			queueDur = time.Since(w0)
 		}
 		qReqModel := model
 		if quotaSkipped.ModelOverride != "" {
@@ -546,6 +552,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 				p.affinityPin(session, quotaSkipped.Provider.Name, connectionLabel(quotaSkipped))
 				rec.Status = 200
 				rec.TTFTms = float64(ttft.Milliseconds())
+				rec.QueueMs = float64(queueDur.Milliseconds())
 				rec.TokIn, rec.TokOut, rec.CacheRead, rec.CacheWrt = usage.In, usage.Out, usage.CacheR, usage.CacheW
 				if p.Cost != nil {
 					c := p.Cost(qReqModel)

@@ -36,6 +36,7 @@ export function RequestsTab() {
                 {th("status", "status")}
                 <th aria-label="error" className="col-lg" />
                 {th("ttft_ms", "ttft", true)}
+                {th("queue_ms", "queue", true, "col-md")}
                 {th("dur_ms", "dur", true)}
                 {th("tok_in", "in", true)}
                 {th("tok_out", "out", true)}
@@ -56,6 +57,7 @@ export function RequestsTab() {
                     <td><StatusBadge status={r.status} /></td>
                     <td className="col-lg"><ErrCell err={r.err} /></td>
                     <td className="n">{fmtMs(r.ttft_ms)}</td>
+                    <td className="n col-md">{r.queue_ms === undefined ? "–" : fmtMs(r.queue_ms)}</td>
                     <td className="n">{fmtDur(r.dur_ms)}</td>
                     <td className="n">{fmtN(r.tok_in)}</td>
                     <td className="n">{fmtN(r.tok_out)}</td>
@@ -83,6 +85,7 @@ function RequestDetail({ r, onClose }: { r: ReqRow; onClose: () => void }) {
     ["status", <StatusBadge status={r.status} />],
     ["stream", r.stream ? "yes" : "no"],
     ["ttft", fmtMs(r.ttft_ms)],
+    ["queue", r.queue_ms === undefined ? "–" : fmtMs(r.queue_ms)],
     ["duration", fmtDur(r.dur_ms)],
     ["tokens in", fmtN(r.tok_in)],
     ["tokens out", fmtN(r.tok_out)],

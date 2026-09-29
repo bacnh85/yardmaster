@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ type Record struct {
 	CostUSD   float64
 	Err       string
 	Attempts  int
+	QueueMs   float64 // dispatch-throttle wait (0 = dispatched immediately)
 }
 
 type Store struct {
@@ -50,6 +52,7 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
+	applyColumnMigrations(db)
 	s := &Store{db: db, ch: make(chan *Record, 4096), done: make(chan struct{})}
 	s.wg.Add(1)
 	go s.run()
@@ -102,6 +105,45 @@ var schema = []string{
 	)`,
 }
 
+// ensureQueueMsCol adds requests.queue_ms to databases created before the
+// dispatch-throttle observability change. Idempotent: PRAGMA check + ALTER,
+// runs per boot. Later columns go here too (append an ensure*Col call).
+const ensureQueueMsCol = `requests:queue_ms:REAL NOT NULL DEFAULT 0`
+
+func applyColumnMigrations(db *sql.DB) {
+	for _, spec := range []string{ensureQueueMsCol} {
+		table, rest, ok := strings.Cut(spec, ":")
+		if !ok {
+			continue
+		}
+		col, def, _ := strings.Cut(rest, ":")
+		rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+		if err != nil {
+			log.Printf("store: migrate pragma %s: %v", table, err)
+			continue
+		}
+		found := false
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull int
+			var dflt any
+			var pk int
+			if rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk) == nil && name == col {
+				found = true
+			}
+		}
+		rows.Close()
+		if !found {
+			if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + col + " " + def); err != nil {
+				log.Printf("store: migrate add %s.%s: %v", table, col, err)
+			} else {
+				log.Printf("store: migrated %s.%s", table, col)
+			}
+		}
+	}
+}
+
 func (s *Store) Submit(r *Record) {
 	if s == nil {
 		return
@@ -130,10 +172,10 @@ func (s *Store) run() {
 		}
 		for _, r := range buf {
 			_, err := tx.Exec(`INSERT INTO requests
-				(ts,key_name,model,provider,status,stream,ttft_ms,dur_ms,tok_in,tok_out,cache_read,cache_write,cost_usd,err,attempts)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				(ts,key_name,model,provider,status,stream,ttft_ms,dur_ms,tok_in,tok_out,cache_read,cache_write,cost_usd,err,attempts,queue_ms)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				r.Ts, r.Key, r.Model, r.Provider, r.Status, b2i(r.Stream), r.TTFTms, r.DurMs,
-				r.TokIn, r.TokOut, r.CacheRead, r.CacheWrt, r.CostUSD, r.Err, r.Attempts)
+				r.TokIn, r.TokOut, r.CacheRead, r.CacheWrt, r.CostUSD, r.Err, r.Attempts, r.QueueMs)
 			if err != nil {
 				log.Printf("store: insert: %v", err)
 			}
@@ -413,6 +455,7 @@ type Row struct {
 	CostUSD   float64 `json:"cost_usd"`
 	Err       string  `json:"err"`
 	Attempts  int     `json:"attempts"`
+	QueueMs   float64 `json:"queue_ms"`
 }
 
 func (s *Store) Recent(limit int) ([]Row, error) {
@@ -420,7 +463,7 @@ func (s *Store) Recent(limit int) ([]Row, error) {
 		limit = 100
 	}
 	rows, err := s.db.Query(`SELECT id,ts,key_name,model,provider,status,stream,ttft_ms,dur_ms,
-		tok_in,tok_out,cache_read,cache_write,cost_usd,err,attempts
+		tok_in,tok_out,cache_read,cache_write,cost_usd,err,attempts,queue_ms
 		FROM requests ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -432,7 +475,7 @@ func (s *Store) Recent(limit int) ([]Row, error) {
 		var stream int
 		if err := rows.Scan(&r.ID, &r.Ts, &r.Key, &r.Model, &r.Provider, &r.Status, &stream,
 			&r.TTFTms, &r.DurMs, &r.TokIn, &r.TokOut, &r.CacheRead, &r.CacheWrt,
-			&r.CostUSD, &r.Err, &r.Attempts); err == nil {
+			&r.CostUSD, &r.Err, &r.Attempts, &r.QueueMs); err == nil {
 			r.Stream = stream == 1
 			out = append(out, r)
 		}

@@ -11,6 +11,7 @@ interface ProviderForm {
   name: string; wire: string; base_url: string; models: string; prefix: string;
   keys: string; session: string; rotation: string; subscription: string;
   dispatch_interval_ms: number;
+  dispatch_burst: number;
   adaptive_thinking: boolean; inject_cache_control: boolean;
   zcode_signing: boolean;
   extra_headers: string; body_overrides: string; // JSON text ("" = none)
@@ -18,7 +19,7 @@ interface ProviderForm {
 
 export const EMPTY_FORM: ProviderForm = {
   name: "", wire: "openai", base_url: "", models: "", prefix: "", keys: "", session: "", rotation: "", subscription: "",
-  dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
+  dispatch_interval_ms: 0, dispatch_burst: 0, adaptive_thinking: false, inject_cache_control: false,
   zcode_signing: false, extra_headers: "", body_overrides: "",
 };
 
@@ -35,6 +36,7 @@ export interface ProviderBody {
   keys?: string[];
   preset?: string; disabled?: boolean;
   dispatch_interval_ms: number; adaptive_thinking: boolean; inject_cache_control: boolean;
+  dispatch_burst?: number;
   zcode_signing: boolean;
   extra_headers?: Record<string, string>; body_overrides?: Record<string, unknown>;
 }
@@ -57,6 +59,7 @@ export const providerBody = (form: ProviderForm): ProviderBody => ({
   subscription: form.subscription,
   ...(form.keys.trim() ? { keys: form.keys.split("\n").map((s) => s.trim()).filter(Boolean) } : {}),
   dispatch_interval_ms: Number(form.dispatch_interval_ms) || 0, // type=number inputs yield strings; Go rejects string→int
+  dispatch_burst: Number(form.dispatch_burst) || 0,
   adaptive_thinking: form.adaptive_thinking,
   inject_cache_control: form.inject_cache_control,
   zcode_signing: form.zcode_signing,
@@ -74,6 +77,7 @@ export const providerUpdateBody = (p: ProviderRow, models: string[]): ProviderBo
   subscription: p.subscription ?? "",
   preset: p.preset, disabled: p.disabled,
   dispatch_interval_ms: p.dispatch_interval_ms,
+  dispatch_burst: p.dispatch_burst ?? 0,
   adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
   zcode_signing: p.zcode_signing ?? false,
   ...(p.extra_headers ? { extra_headers: p.extra_headers } : {}),
@@ -91,6 +95,7 @@ export const rowToForm = (p: ProviderRow): ProviderForm => ({
   rotation: p.rotation ?? "",
   subscription: p.subscription ?? "",
   dispatch_interval_ms: p.dispatch_interval_ms,
+  dispatch_burst: p.dispatch_burst ?? 0,
   adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
   zcode_signing: p.zcode_signing ?? false,
   extra_headers: p.extra_headers ? JSON.stringify(p.extra_headers, null, 2) : "",
@@ -426,6 +431,8 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
             <div className="field">
               <label htmlFor="pf-dispatch">dispatch spacing (ms, 0 = off)</label>
               <input id="pf-dispatch" type="number" min={0} value={form.dispatch_interval_ms} onChange={set("dispatch_interval_ms")} />
+              <div className="field-hint">burst: requests allowed to dispatch immediately before spacing applies</div>
+              <input id="pf-burst" type="number" min={0} aria-label="dispatch burst" value={form.dispatch_burst} onChange={set("dispatch_burst")} />
             </div>
             <div className="field">
               <label>options</label>
@@ -611,7 +618,7 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
           await post("providers", {
             name: entry.name, wire: entry.wire, base_url: entry.base_url,
             models: [], session: entry.session ?? "", preset: r.id, prefix: r.prefix,
-            dispatch_interval_ms: 0, adaptive_thinking: false, inject_cache_control: false,
+            dispatch_interval_ms: 0, dispatch_burst: 0, adaptive_thinking: false, inject_cache_control: false,
             zcode_signing: false,
             ...(subPlan ? { subscription: subPlan } : {}),
             ...entry.defaults, // preset tricks (zai: cache injection, fast mode, zcode signing)

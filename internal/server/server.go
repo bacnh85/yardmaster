@@ -650,6 +650,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			out = append(out, map[string]any{
 				"name": p.Name, "wire": p.Wire, "base_url": p.BaseURL,
 				"models": nonNil(p.Models), "dispatch_interval_ms": p.DispatchIntervalMS,
+				"dispatch_burst":    p.DispatchBurst,
 				"prefix":            p.Prefix,
 				"preset":            p.Preset,
 				"disabled":          p.Disabled,
@@ -1089,6 +1090,11 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					} else {
 						p.DispatchIntervalMS = x.DispatchIntervalMS
 					}
+					if f.DispatchBurst != nil {
+						p.DispatchBurst = *f.DispatchBurst
+					} else {
+						p.DispatchBurst = x.DispatchBurst
+					}
 					if f.AdaptiveThinking != nil {
 						p.AdaptiveThinking = *f.AdaptiveThinking
 					} else {
@@ -1189,6 +1195,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				"num_keys": len(p.Auth.Keys), "num_accounts": len(p.Auth.OAuth),
 				"session":              p.Session,
 				"dispatch_interval_ms": p.DispatchIntervalMS,
+				"dispatch_burst":       p.DispatchBurst,
 				"adaptive_thinking":    p.AdaptiveThinking,
 				"inject_cache_control": p.InjectCacheControl,
 				"zcode_signing":        p.ZcodeSigning,
@@ -1358,6 +1365,7 @@ type providerForm struct {
 	Preset             string            `json:"preset"`
 	Disabled           *bool             `json:"disabled"`             // nil = omitted (keep stored)
 	DispatchIntervalMS *int              `json:"dispatch_interval_ms"` // nil = omitted (keep stored)
+	DispatchBurst      *int              `json:"dispatch_burst"`       // nil = omitted (keep stored)
 	AdaptiveThinking   *bool             `json:"adaptive_thinking"`    // nil = omitted (keep stored)
 	InjectCacheControl *bool             `json:"inject_cache_control"` // nil = omitted (keep stored)
 	ZcodeSigning       *bool             `json:"zcode_signing"`        // nil = omitted (keep stored)
@@ -1426,6 +1434,7 @@ func (f providerForm) provider() (*config.Provider, error) {
 		Subscription:       subscription,
 		Disabled:           disabled,
 		DispatchIntervalMS: derefInt(f.DispatchIntervalMS),
+		DispatchBurst:      derefInt(f.DispatchBurst),
 		AdaptiveThinking:   derefBool(f.AdaptiveThinking),
 		InjectCacheControl: derefBool(f.InjectCacheControl),
 		ZcodeSigning:       derefBool(f.ZcodeSigning),

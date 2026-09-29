@@ -1,9 +1,12 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // Close must persist records accepted before Close was called.
@@ -34,6 +37,77 @@ func TestCloseDrains(t *testing.T) {
 	if len(rows) != n {
 		t.Fatalf("lost records: want %d, got %d", n, len(rows))
 	}
+}
+
+// queue_ms must migrate onto databases created before the column existed,
+// round-trip through Submit/Recent, and default to 0 for old rows.
+func TestQueueMsMigrationAndRoundTrip(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "t.db")
+	s, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Now().UnixMilli()
+	s.Submit(&Record{Ts: ts, Key: "k", Model: "m", Provider: "p", Status: 200, QueueMs: 123.5})
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// simulate a pre-migration DB: rebuild without queue_ms, restoring the row
+	if err := dropQueueMs(db); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(db) // boot must re-add the column
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s2.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(rows))
+	}
+	if rows[0].QueueMs != 0 {
+		t.Fatalf("pre-migration row queue_ms = %v, want 0 (column was absent)", rows[0].QueueMs)
+	}
+	// new records round-trip the value
+	s2.Submit(&Record{Ts: ts + 1, Key: "k", Model: "m", Provider: "p", Status: 200, QueueMs: 123.5})
+	s2.Close() // drains (the deferred Close is then a no-op guard — see below)
+	s3, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s3.Close()
+	rows, err = s3.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].QueueMs != 123.5 {
+		t.Fatalf("new row queue_ms = %v (rows=%d), want 123.5", rows[0].QueueMs, len(rows))
+	}
+}
+
+// dropQueueMs rebuilds requests without queue_ms (test-only migration check).
+func dropQueueMs(path string) error {
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	steps := []string{
+		`ALTER TABLE requests RENAME TO requests_old`,
+		schema[0],
+		`INSERT INTO requests (id,ts,key_name,model,provider,status,stream,ttft_ms,dur_ms,tok_in,tok_out,cache_read,cache_write,cost_usd,err,attempts)
+			SELECT id,ts,key_name,model,provider,status,stream,ttft_ms,dur_ms,tok_in,tok_out,cache_read,cache_write,cost_usd,err,attempts FROM requests_old`,
+		`DROP TABLE requests_old`,
+	}
+	for _, q := range steps {
+		if _, err := db.Exec(q); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Breakdown must carry cache_write so the UI's totalInput (tok_in+cache_read+

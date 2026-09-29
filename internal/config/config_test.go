@@ -40,6 +40,44 @@ providers:
 	}
 }
 
+// dispatch_burst round-trips from YAML, defaults to 0 (strict spacing —
+// legacy configs keep byte-identical pacing), and negative values are
+// rejected at load.
+func TestDispatchBurstConfig(t *testing.T) {
+	var cfg Config
+	err := yaml.Unmarshal([]byte(`
+providers:
+  - name: a
+    base_url: https://a.example/v1
+    wire: openai
+    dispatch_interval_ms: 1000
+    dispatch_burst: 4
+    auth: {type: static, keys: [k]}
+  - name: b
+    base_url: https://b.example/v1
+    wire: openai
+    dispatch_interval_ms: 500
+    auth: {type: static, keys: [k]}
+`), &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers[0].DispatchBurst != 4 {
+		t.Fatal("provider a: dispatch_burst not parsed from yaml")
+	}
+	if cfg.Providers[1].DispatchBurst != 0 {
+		t.Fatal("provider b: dispatch_burst must default to 0 (strict spacing)")
+	}
+	cfg.Providers[1].DispatchBurst = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "dispatch_burst") {
+		t.Fatalf("negative burst: err = %v, want dispatch_burst rejection", err)
+	}
+}
+
 // proxy_url: per-provider outbound proxy for upstream dispatch. Empty =
 // direct; otherwise it must parse and carry an http/https/socks5 scheme —
 // the set http.Transport dials natively. Rejected at load so a typo never

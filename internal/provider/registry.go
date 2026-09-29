@@ -438,16 +438,24 @@ func rotate[T any](s []T, n uint64) []T {
 }
 
 // Limiter returns the per-provider-key dispatch limiter (nil = unthrottled).
+// Cached per name:apiKey, but rebuilt when the provider's interval/burst
+// changes (hot-reload / dashboard edit) so pacing config lands without a restart.
 func (r *Registry) Limiter(p *config.Provider, apiKey string) *auth.Limiter {
 	if p.DispatchIntervalMS <= 0 {
 		return nil
 	}
+	type pace struct {
+		interval time.Duration
+		burst    int
+	}
+	want := pace{time.Duration(p.DispatchIntervalMS) * time.Millisecond, p.DispatchBurst}
 	key := p.Name + ":" + apiKey
 	if l, ok := r.limiters.Load(key); ok {
-		return l.(*auth.Limiter)
+		if cached, ok2 := l.(*auth.Limiter); ok2 && cached.PaceMatches(want.interval, want.burst) {
+			return cached
+		}
 	}
-	l := auth.NewLimiter(time.Duration(p.DispatchIntervalMS) * time.Millisecond)
-	actual, _ := r.limiters.LoadOrStore(key, l)
+	actual, _ := r.limiters.LoadOrStore(key, auth.NewLimiter(want.interval, want.burst))
 	return actual.(*auth.Limiter)
 }
 

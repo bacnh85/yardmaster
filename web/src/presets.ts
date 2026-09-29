@@ -50,6 +50,7 @@ export const REGISTRY: RegistryProvider[] = [
         defaults: {
           models: ["glm-5.3", "glm-5.3-flash"],
           dispatch_interval_ms: 1000,           // zai 429/1302 request-rate protection
+          dispatch_burst: 3,                    // parallel fan-out dispatches immediately, sustained still 1/s
           adaptive_thinking: true,              // thinking:{type:adaptive} + output_config.effort
           inject_cache_control: true,           // ephemeral markers: cached input costs 1.7 vs 6.9 credits/10k
           zcode_signing: true,                  // ZCode parity (Client-Signing V4); fail-open when gate off

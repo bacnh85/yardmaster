@@ -2,7 +2,6 @@
 package auth
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"time"
@@ -20,43 +19,29 @@ var (
 	ErrRateLimited = errors.New("key RPM limit exceeded")
 )
 
-// Limiter spaces dispatch STARTS at least `interval` apart. Streams themselves
-// are never serialized — the lock is held only to compute the next slot
-// (same design as pi-model-tools' zai-throttle, but in-process since the
-// router owns every dispatch).
+// Limiter paces dispatch STARTS: burst concurrent fan-out requests dispatch
+// immediately, sustained traffic is spaced `interval` apart (token bucket —
+// same design as pi-model-tools' zai-throttle for Z.ai 1302 protection, but
+// burst-capable for parallel agent fan-out). Streams themselves are never
+// serialized. burst < 1 = 1: strict spacing, byte-identical to the original
+// hand-rolled slot limiter.
 type Limiter struct {
+	*rate.Limiter
 	interval time.Duration
-	mu       sync.Mutex
-	next     time.Time
+	burst    int
 }
 
-func NewLimiter(interval time.Duration) *Limiter {
-	return &Limiter{interval: interval}
+func NewLimiter(interval time.Duration, burst int) *Limiter {
+	if burst < 1 {
+		burst = 1
+	}
+	return &Limiter{rate.NewLimiter(rate.Every(interval), burst), interval, burst}
 }
 
-// Wait blocks until this caller's dispatch slot, or ctx is done.
-func (l *Limiter) Wait(ctx context.Context) error {
-	l.mu.Lock()
-	now := time.Now()
-	start := l.next
-	if start.Before(now) {
-		start = now
-	}
-	l.next = start.Add(l.interval)
-	l.mu.Unlock()
-
-	d := time.Until(start)
-	if d <= 0 {
-		return nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+// PaceMatches reports whether the limiter's config equals interval+burst, so
+// callers can detect a config change and rebuild (hot reload / dashboard edit).
+func (l *Limiter) PaceMatches(interval time.Duration, burst int) bool {
+	return l.interval == interval && l.burst == burst
 }
 
 // ---- inbound API keys ----
