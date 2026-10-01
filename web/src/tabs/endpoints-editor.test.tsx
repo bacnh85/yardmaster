@@ -78,6 +78,15 @@ const openEdit = (name: string) => {
 };
 
 describe("key dialog model picker", () => {
+  it("key rows keep table-cell layout for the edit/revoke actions", () => {
+    // regression: <td className="row"> made the cell display:flex, which drops
+    // the td out of table layout (anonymous wrapper) and misaligned the row
+    act(() => root!.render(<EndpointsTab />));
+    const cell = [...host!.querySelectorAll("td")].find((td) => td.textContent === "editrevoke")!;
+    expect(cell.className).not.toContain("row");
+    expect(cell.querySelector("div.row")).not.toBeNull();
+  });
+
   it("defaults to all models; search + exact pick + pattern land in the POST body", () => {
     openAdd();
     const all = document.querySelector("#mp-all") as HTMLInputElement;

@@ -191,9 +191,13 @@ export function EndpointsTab() {
                           <option value="revoked">revoked</option>
                         </select>
                       </td>
-                      <td className="row" style={{ gap: 6 }}>
-                        <button className="btn sm" aria-label={`edit key ${k.name}`} onClick={() => setEditing(k)}>edit</button>
-                        <button className="btn sm danger" aria-label={`revoke key ${k.name}`} onClick={() => setRevoking(k)}>revoke</button>
+                      <td>
+                        {/* flex goes on a div, never on the td: a flex td drops out of
+                            table-cell layout (anonymous wrapper) and misaligns the row */}
+                        <div className="row" style={{ gap: 6 }}>
+                          <button className="btn sm" aria-label={`edit key ${k.name}`} onClick={() => setEditing(k)}>edit</button>
+                          <button className="btn sm danger" aria-label={`revoke key ${k.name}`} onClick={() => setRevoking(k)}>revoke</button>
+                        </div>
                       </td>
                     </tr>
                   ))}
