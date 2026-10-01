@@ -330,25 +330,23 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 // as /v1/systemone resolves them. /v1/models deliberately excludes them —
 // chat advertisement must stay clean; this is the discovery path for System
 // One clients (pi-classifier model picker).
-func (s *Server) handleSystemoneModels(w http.ResponseWriter, r *http.Request) {
-	type model struct {
-		ID     string `json:"id"`
-		Object string `json:"object"`
-		Owned  string `json:"owned_by"`
-		Family string `json:"family"`
-	}
-	data := make([]model, 0) // never nil — empty registry must marshal as [], not null
+// decisionModelIDs lists decision-model ids (classifier combos + classifier-wire
+// providers, prefixed ids) with their owner ("combo" or provider name) — the
+// shared source for /v1/systemone/models and the admin "routable" picker
+// endpoint. Disjoint from Registry.Models() (which already excludes decision
+// combos and classifier providers).
+func (s *Server) decisionModelIDs() []struct{ ID, Owned string } {
 	seen := map[string]bool{}
+	var out []struct{ ID, Owned string }
 	for _, cb := range s.Proxy.Reg.Config().Combos {
 		if !s.Proxy.Reg.ClassifierCombo(cb) {
 			continue // chat combos live on /v1/models
 		}
 		id := config.ComboID(cb.Name)
-		if seen[id] {
-			continue
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, struct{ ID, Owned string }{id, "combo"})
 		}
-		seen[id] = true
-		data = append(data, model{ID: id, Object: "model", Owned: "combo", Family: "classifier"})
 	}
 	for _, p := range s.Proxy.Reg.Config().Providers {
 		if p.Disabled || p.Wire != proxy.WireClassifier {
@@ -360,12 +358,25 @@ func (s *Server) handleSystemoneModels(w http.ResponseWriter, r *http.Request) {
 			if p.Prefix != "" {
 				id = p.Prefix + "/" + m
 			}
-			if seen[id] {
-				continue
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, struct{ ID, Owned string }{id, p.Name})
 			}
-			seen[id] = true
-			data = append(data, model{ID: id, Object: "model", Owned: p.Name, Family: "classifier"})
 		}
+	}
+	return out
+}
+
+func (s *Server) handleSystemoneModels(w http.ResponseWriter, r *http.Request) {
+	type model struct {
+		ID     string `json:"id"`
+		Object string `json:"object"`
+		Owned  string `json:"owned_by"`
+		Family string `json:"family"`
+	}
+	data := make([]model, 0) // never nil — empty registry must marshal as [], not null
+	for _, d := range s.decisionModelIDs() {
+		data = append(data, model{ID: d.ID, Object: "model", Owned: d.Owned, Family: "classifier"})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
@@ -838,6 +849,23 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(res)
+	case path == "routable" && r.Method == "GET":
+		// every model id an inbound key's allow list can match — the picker
+		// source for the key dialogs. Chat ids (combos, route aliases, provider
+		// curated ids) + decision ids, exactly what /v1/models and
+		// /v1/systemone/models advertise.
+		type routableModel struct {
+			ID     string `json:"id"`
+			Family string `json:"family"`
+		}
+		out := make([]routableModel, 0, 16)
+		for _, id := range s.Proxy.Reg.Models() {
+			out = append(out, routableModel{ID: id, Family: "chat"})
+		}
+		for _, d := range s.decisionModelIDs() {
+			out = append(out, routableModel{ID: d.ID, Family: "decision"})
+		}
+		writeJSON(map[string]any{"models": out})
 	case path == "catalog" && r.Method == "GET":
 		// aggregate model catalog across every enabled provider, deduped by
 		// canonical id; exposed=1 keeps only models some provider serves

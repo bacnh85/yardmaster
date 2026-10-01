@@ -447,3 +447,30 @@ th.sortable:focus-visible, tr.clickable:focus-visible {
   overflow-x: auto; font-size: 12px; margin: 8px 0;
 }
 .reconnecting { color: var(--faint); font-size: 12px; padding: 4px 0; }
+
+/* model picker (key dialogs): search + checkbox list + selected tokens */
+.mp { display: grid; gap: 8px; }
+.mp-list {
+  max-height: 220px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.mp-row {
+  display: flex; gap: 8px; align-items: center;
+  padding: 6px 10px; cursor: pointer; font-size: 13px;
+}
+.mp-row:hover { background: var(--surface2); }
+.mp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.mp-chip {
+  display: inline-flex; gap: 6px; align-items: center;
+  background: var(--accent-soft); color: var(--accent);
+  border-radius: var(--radius-sm); padding: 2px 4px 2px 10px; font-size: 13px;
+}
+.mp-chip .badge.muted { background: var(--surface2); }
+.mp-x {
+  border: 0; background: none; color: inherit; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: var(--radius-sm);
+}
+.mp-x:hover { background: var(--accent-hover); color: var(--accent-soft); }
+.mp-pattern { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.mp-pattern input { flex: 1; min-width: 160px; }
+.mp-pattern .field-hint { flex-basis: 100%; }

@@ -3,6 +3,7 @@ import { get, post, put, del, KeyCreated, KeyRow } from "../api";
 import { useApi } from "../hooks";
 import { Confirm, CopyBtn, Empty, ErrorBanner, Modal, PageHead, toast } from "../components";
 import { IconPlus } from "../icons";
+import { ModelPicker, type RoutableModel } from "../ModelPicker";
 
 /** unix ms → local date-time; "—" for legacy keys (no timestamp recorded). */
 const fmtWhen = (ms?: number) => (ms ? new Date(ms).toLocaleString() : "—");
@@ -32,9 +33,10 @@ const ENDPOINTS: [string, string, string][] = [
 export function EndpointsTab() {
   const { data, error, loading, reload } = useApi<{ keys: KeyRow[] }>("keys");
   const { data: cfg } = useApi<{ listen: string }>("config");
+  const { data: routable } = useApi<{ models: RoutableModel[] }>("routable");
   const keys = data?.keys ?? [];
   const [name, setName] = useState("");
-  const [allow, setAllow] = useState("*");
+  const [allow, setAllow] = useState<string[]>([]); // [] = all models (server coerces to ["*"])
   const [allowUsage, setAllowUsage] = useState(true);
   const [created, setCreated] = useState<KeyCreated | null>(null);
   const [err, setErr] = useState("");
@@ -56,11 +58,11 @@ export function EndpointsTab() {
     setErr("");
     setBusy(true);
     try {
-      const allowList = allow.split(",").map((s) => s.trim()).filter(Boolean);
-      const r = (await post("keys", { name: name.trim(), allow: allowList, usage: allowUsage })) as KeyCreated;
+      const r = (await post("keys", { name: name.trim(), allow, usage: allowUsage })) as KeyCreated;
       setCreated(r);
       setShowAdd(false);
       setName("");
+      setAllow([]);
       reload();
       toast(`key "${r.key.slice(0, 12)}…" created`);
     } catch (e2) {
@@ -93,10 +95,9 @@ export function EndpointsTab() {
 
   const saveEdit = async (k: KeyRow, d: KeyDraft) => {
     try {
-      const allowList = d.allow.split(",").map((s) => s.trim()).filter(Boolean);
       await put(`keys/${encodeURIComponent(k.name)}`, {
         name: d.name.trim(),
-        allow: allowList.length ? allowList : ["*"],
+        allow: d.allow.length ? d.allow : ["*"],
         rpm: Number(d.rpm) || 0,
         usage: d.usage,
         ...(d.key.trim() ? { key: d.key.trim() } : {}), // blank = keep the secret
@@ -219,9 +220,7 @@ export function EndpointsTab() {
               </div>
               <div className="field full">
                 <label htmlFor="ak-allow">allowed models</label>
-                <input id="ak-allow" placeholder="glm-* or * (optional)" value={allow}
-                  onChange={(e) => setAllow(e.target.value)} />
-                <div className="field-hint">comma-separated globs; empty = all models</div>
+                <ModelPicker models={routable?.models ?? []} value={allow} onChange={setAllow} />
               </div>
               <div className="field full">
                 <label className="checkbox"><input type="checkbox" checked={allowUsage} onChange={(e) => setAllowUsage(e.target.checked)} /> allow usage reporting (GET /v1/usage)</label>
@@ -239,19 +238,19 @@ export function EndpointsTab() {
       )}
 
       {editing && (
-        <KeyEdit k={editing} onSave={(d) => saveEdit(editing, d)} onClose={() => setEditing(null)} />
+        <KeyEdit k={editing} models={routable?.models ?? []} onSave={(d) => saveEdit(editing, d)} onClose={() => setEditing(null)} />
       )}
     </>
   );
 }
 
-interface KeyDraft { name: string; allow: string; rpm: number; usage: boolean; key: string; monthly: string }
+interface KeyDraft { name: string; allow: string[]; rpm: number; usage: boolean; key: string; monthly: string }
 
 /** Edit an existing inbound key: rename, scope, rate limit, usage permission,
  *  and optional secret rotation (blank key field = keep the stored secret). */
-function KeyEdit({ k, onSave, onClose }: { k: KeyRow; onSave: (d: KeyDraft) => void; onClose: () => void }) {
+function KeyEdit({ k, models, onSave, onClose }: { k: KeyRow; models: RoutableModel[]; onSave: (d: KeyDraft) => void; onClose: () => void }) {
   const [d, setD] = useState<KeyDraft>(() => ({
-    name: k.name, allow: k.allow.join(", "), rpm: k.rpm, usage: k.usage !== false, key: "",
+    name: k.name, allow: k.allow[0] === "*" ? [] : k.allow, rpm: k.rpm, usage: k.usage !== false, key: "",
     monthly: k.monthly_usd && k.monthly_usd > 0 ? String(k.monthly_usd) : "", // "" = keep stored value
   }));
   return (
@@ -270,9 +269,8 @@ function KeyEdit({ k, onSave, onClose }: { k: KeyRow; onSave: (d: KeyDraft) => v
           </div>
           <div className="field full">
             <label htmlFor="ek-allow">allowed models</label>
-            <input id="ek-allow" placeholder="glm-* or * (optional)" value={d.allow}
-              onChange={(e) => setD({ ...d, allow: e.target.value })} />
-            <div className="field-hint">comma-separated globs; empty = all models</div>
+            <ModelPicker models={models} value={d.allow}
+              onChange={(v) => setD({ ...d, allow: v })} />
           </div>
           <div className="field">
             <label htmlFor="ek-rpm">rpm limit</label>
