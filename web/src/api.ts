@@ -95,11 +95,18 @@ export interface ComboUsageRow {
   failovers: number; avg_attempts: number; ttft_p50_ms?: number | null;
 }
 export interface CooldownRow { provider: string; key: string; until: string }
+export interface CatalogProvider {
+  name: string; wire: string; prefix?: string; exposed: boolean;
+  served_as: string; // routable id on this provider: "prefix/model" or bare
+  input: number; output: number; cache_read: number; // this provider's own $/Mtok
+}
 export interface CatalogModel {
   id: string; name?: string; family: string; context?: number; max_output?: number;
   input: number; output: number; cache_read: number; cache_write: number;
   reasoning?: boolean; tool_call?: boolean; image?: boolean; free?: boolean;
   manual?: boolean; // curated by hand: not in the provider's catalog (no metadata)
+  providers?: CatalogProvider[];
+  combos?: string[]; // combo/<name> ids pooling this model
 }
 export interface ProbeResult {
   text: string; tok_in: number; tok_out: number;

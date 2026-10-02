@@ -273,6 +273,43 @@ table.kv td { border-bottom: 1px solid var(--line); padding: 6px 0; }
 .badge.warn { background: var(--warn-soft); color: var(--warn); }
 .badge.danger { background: var(--danger-soft); color: var(--danger); }
 
+/* copy-chip: clickable monospace id (models page "use as", model id cells) —
+   reads as a badge, behaves as a copy button */
+.copy-chip {
+  appearance: none; display: inline-block; padding: 2px 8px; margin: 1px;
+  border: none; border-radius: 999px; cursor: copy;
+  background: var(--surface2); color: var(--ink);
+  font-family: var(--mono); font-size: 12px; font-weight: 500;
+}
+.copy-chip:hover { background: var(--accent-soft); color: var(--accent); }
+.use-as { display: flex; flex-wrap: wrap; gap: 2px; }
+
+/* models page: expandable per-provider pricing */
+.model-cell { display: inline-flex; align-items: center; gap: 6px; }
+.expand-btn {
+  appearance: none; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--accent); cursor: pointer;
+  min-width: 22px; height: 22px; padding: 0 6px;
+  font-size: 11px; font-weight: 600; font-family: var(--mono);
+}
+.expand-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+tr.expanded > td { border-bottom: none; }
+tr.prov-row > td { padding-top: 0; border-bottom: none; }
+tr.prov-row.last > td { border-bottom: 1px solid var(--line); }
+/* tree guide: a vertical line from the − toggle down through the variants;
+   stops mid-row on the last (└) so the connector closes like tree(1) */
+tr.prov-row > td:first-child { position: relative; }
+tr.prov-row > td:first-child::before {
+  content: ""; position: absolute; left: 21px; top: 0; bottom: 0;
+  width: 1px; background: var(--line);
+}
+tr.prov-row.last > td:first-child::before { bottom: 55%; }
+.tree {
+  color: var(--muted); margin-right: 8px; user-select: none;
+  display: inline-block; white-space: pre;
+}
+td.spread { color: var(--accent); font-weight: 600; }
+
 /* buttons */
 .btn {
   border: 1px solid var(--line); background: var(--surface); color: var(--ink);

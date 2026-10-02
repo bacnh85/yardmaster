@@ -307,6 +307,20 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// DeleteOlderThan prunes request rows older than d (0 = nothing). Returns the
+// rows removed. Uses idx_requests_ts; the freed pages are reused, the file
+// only shrinks on VACUUM.
+func (s *Store) DeleteOlderThan(d time.Duration) (int64, error) {
+	if s == nil || d <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.Exec(`DELETE FROM requests WHERE ts < ?`, time.Now().Add(-d).UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ---- queries (admin API) ----
 
 type Summary struct {
@@ -319,11 +333,11 @@ type Summary struct {
 	CachedRequests int64         `json:"cached_requests"` // requests with cache_read > 0
 	CacheSavedUSD  float64       `json:"cache_saved_usd"` // computed in the server layer (needs per-model prices)
 	CostUSD        float64       `json:"cost_usd"`
-	TTFTp50    *float64      `json:"ttft_p50_ms"`
-	TTFTp95    *float64      `json:"ttft_p95_ms"`
-	AvgDurMs   float64       `json:"avg_dur_ms"`
-	Bucket     string        `json:"bucket"`
-	Series     []SeriesPoint `json:"series"`
+	TTFTp50        *float64      `json:"ttft_p50_ms"`
+	TTFTp95        *float64      `json:"ttft_p95_ms"`
+	AvgDurMs       float64       `json:"avg_dur_ms"`
+	Bucket         string        `json:"bucket"`
+	Series         []SeriesPoint `json:"series"`
 }
 
 type SeriesPoint struct {
@@ -490,7 +504,7 @@ type Breakdown struct {
 	TokIn      int64    `json:"tok_in"`
 	TokOut     int64    `json:"tok_out"`
 	CacheRd    int64    `json:"cache_read"`
-	CacheWrt   int64    `json:"cache_write"` // totalInput needs it: card/table reconciliation
+	CacheWrt   int64    `json:"cache_write"`     // totalInput needs it: card/table reconciliation
 	CachedReqs int64    `json:"cached_requests"` // requests with cache_read > 0
 	Cost       float64  `json:"cost"`
 	TTFTp50    *float64 `json:"ttft_p50_ms"`

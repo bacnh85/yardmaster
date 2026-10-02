@@ -34,6 +34,14 @@ func TestCatalogRows(t *testing.T) {
 			{Name: "zen-chat", BaseURL: "https://gw.example/v1", Wire: "openai", Models: []string{"m-chat"}},
 			{Name: "zen-claude", BaseURL: "https://gw.example/v1", Wire: "anthropic", Models: []string{"m-chat", "m-hidden"}},
 		},
+		Combos: []*config.Combo{
+			{Name: "fast", Type: "chat", Members: []*config.ComboMember{
+				{Provider: "zen-chat", Model: "m-chat"}, {Provider: "zen-claude", Model: "m-chat"},
+			}},
+			{Name: "clf", Type: "decision", Members: []*config.ComboMember{
+				{Provider: "zen-chat", Model: "m-chat"},
+			}},
+		},
 	}
 	cfg.Defaults()
 	cfg.Validate()
@@ -67,10 +75,46 @@ func TestCatalogRows(t *testing.T) {
 	if all[2].exposedAny() {
 		t.Fatalf("m-orphan is in no provider's list: %+v", all[2])
 	}
+	// served_as: bare id for unprefixed providers, prefix/id would be the
+	// prefixed shape (neither provider here has a prefix)
+	for _, p := range all[0].Providers {
+		if p.ServedAs != "m-chat" {
+			t.Fatalf("unprefixed served_as = %q, want m-chat: %+v", p.ServedAs, p)
+		}
+	}
+	// combos: chat combo pooling m-chat listed once (two members), decision
+	// combo excluded
+	if got := all[0].Combos; len(got) != 1 || got[0] != "combo/fast" {
+		t.Fatalf("combos = %v, want [combo/fast]", got)
+	}
+	if got := all[1].Combos; len(got) != 0 {
+		t.Fatalf("m-hidden combos = %v, want empty", got)
+	}
 
 	exposed := srv.catalogRows(t.Context(), true)
 	if len(exposed) != 2 || exposed[0].ID != "m-chat" || exposed[1].ID != "m-hidden" {
 		t.Fatalf("exposedOnly must drop unexposed rows: %+v", exposed)
+	}
+
+	// prefixed provider: served_as must be the routable "prefix/model" shape
+	cfgP := &config.Config{
+		Listen: ":0",
+		Keys:   []*config.Key{{Key: "k", Name: "pi", Allow: []string{"*"}}},
+		Providers: []*config.Provider{
+			{Name: "nim", BaseURL: "https://nim.example/v1", Wire: "openai", Prefix: "nv", Models: []string{"kimi-k3"}},
+		},
+	}
+	cfgP.Defaults()
+	cfgP.Validate()
+	pP := proxy.NewProxy(provider.New(cfgP), st, cfgP.CostFor)
+	srvP := New(pP, auth.NewKeyStore(cfgP.Keys), st, "", "pw", "test")
+	catalogCache.Store("https://nim.example/v1", catalogEntry{models: []ModelMeta{
+		{ID: "kimi-k3", Family: "chat", Input: 1, Output: 2},
+	}, until: time.Now().Add(time.Hour)})
+	t.Cleanup(func() { catalogCache.Delete("https://nim.example/v1") })
+	rowsP := srvP.catalogRows(t.Context(), true)
+	if len(rowsP) != 1 || len(rowsP[0].Providers) != 1 || rowsP[0].Providers[0].ServedAs != "nv/kimi-k3" {
+		t.Fatalf("prefixed served_as: %+v", rowsP)
 	}
 }
 

@@ -17,6 +17,7 @@ type Config struct {
 	Listen        string           `yaml:"listen"`
 	AdminPassword string           `yaml:"admin_password"`
 	DBPath        string           `yaml:"db_path"`
+	RetentionDays int              `yaml:"retention_days" json:"retention_days"` // prune requests older than this; 0 = keep forever
 	Routing       Routing          `yaml:"routing"`
 	Providers     []*Provider      `yaml:"providers"`
 	Routes        []*Route         `yaml:"routes"`
@@ -354,6 +355,9 @@ func (c *Config) Defaults() {
 }
 
 func (c *Config) Validate() error {
+	if c.RetentionDays < 0 {
+		return fmt.Errorf("retention_days must be >= 0 (0 = keep forever)")
+	}
 	// affinity: 0 ttl_s means "use the default" (applied lazily by the proxy
 	// via EffectiveTTL — left 0 here so Validate stays side-effect-light and
 	// Reload-while-running doesn't surprise readers); negative is a config bug

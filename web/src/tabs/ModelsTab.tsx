@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { get, fmtN, fmtPrice, fmtTok, type CatalogModel, type ProviderRow } from "../api";
 import { useApi } from "../hooks";
 import { useSorted, cmpVals } from "../hooks";
-import { Empty, ErrorBanner, PageHead, Skeleton } from "../components";
+import { Empty, ErrorBanner, PageHead, Skeleton, toast } from "../components";
+import { copyText } from "../clipboard";
 import { REGISTRY, registryFor, wireFamily } from "../presets";
 import { Playground, type PgTarget } from "../Playground";
 import { IconList, IconPlay } from "../icons";
@@ -13,33 +14,67 @@ export interface CatalogRowUI {
   context: number; max_output: number;   // 0 = unknown
   input: number; output: number; cache_read: number; // -1 = unknown price
   reasoning: boolean; tool_call: boolean; image: boolean; free: boolean; manual: boolean;
-  providers: { name: string; prefix: string; exposed: boolean }[];
+  providers: { name: string; prefix: string; exposed: boolean; served_as: string;
+               input: number; output: number; cache_read: number }[];
+  combos: string[]; // combo/<name> ids pooling this model
 }
 
 /** Server CatalogRow → UI row: null out unknown prices so cmpVals sorts them
  *  last (BreakTable precedent), drop unknown context/max to 0 → "—". */
-export const toRow = (m: CatalogModel & { providers?: { name: string; prefix?: string; exposed: boolean }[] }): CatalogRowUI => ({
+export const toRow = (m: CatalogModel): CatalogRowUI => ({
   id: m.id, name: m.name ?? "", family: m.family,
   context: m.context ?? 0, max_output: m.max_output ?? 0,
   input: m.input, output: m.output, cache_read: m.cache_read,
   reasoning: !!m.reasoning, tool_call: !!m.tool_call, image: !!m.image,
   free: !!m.free, manual: !!m.manual,
-  providers: (m.providers ?? []).map((p) => ({ name: p.name, prefix: p.prefix ?? "", exposed: p.exposed })),
+  providers: (m.providers ?? []).map((p) => ({
+    name: p.name, prefix: p.prefix ?? "", exposed: p.exposed, served_as: p.served_as,
+    input: p.input ?? -1, output: p.output ?? -1, cache_read: p.cache_read ?? -1,
+  })),
+  combos: m.combos ?? [],
 });
+
+/** Every routable id for a row: served_as per provider + combo ids. Deduped —
+ *  a bare id on an unprefixed provider and the same served id twice collapse. */
+export const servedIds = (m: CatalogRowUI): string[] =>
+  [...new Set([...m.providers.filter((p) => p.exposed).map((p) => p.served_as), ...m.combos])];
+
+/** Display name: strip the vendor namespace prefix ("deepseek/deepseek-v4-flash"
+ *  → "deepseek-v4-flash") — the providers column already says who serves it.
+ *  Display only; the full id stays in the tooltip and is what copy copies. */
+export const displayName = (id: string): string =>
+  id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+
+/** Price spread across the row's EXPOSED providers: null when none (or one,
+ *  or all equal — nothing worth expanding); else [min, max] over each price
+ *  class. Known prices only; unknown (-1) never widens the range. */
+export const priceSpread = (m: CatalogRowUI): [number, number] | null => {
+  const provs = m.providers.filter((p) => p.exposed);
+  if (provs.length <= 1) return null;
+  const range = (get: (p: CatalogRowUI["providers"][number]) => number): [number, number] | null => {
+    const vals = provs.map(get).filter((v) => v >= 0);
+    if (vals.length <= 1) return null;
+    const min = Math.min(...vals), max = Math.max(...vals);
+    return min === max ? null : [min, max];
+  };
+  return range((p) => p.input) ?? range((p) => p.output) ?? range((p) => p.cache_read);
+};
 
 export const sortPrice = (n: number): number | null => (n < 0 ? null : n);
 
-/** Filter chain (pure, unit-tested): text substring on id+name, provider name
- *  or registry title, price class, capability flags, exposed-only toggle.
- *  exposedOnly drops unexposed provider ENTRIES from the returned rows — a
- *  model exposed on one provider must not list/badge under another where it's
- *  catalog-only. */
+/** Filter chain (pure, unit-tested): text substring on id+name+served ids
+ *  (so "nv/" or "combo/" find their rows), provider name or registry title,
+ *  price class, capability flags, exposed-only toggle. exposedOnly drops
+ *  unexposed provider ENTRIES from the returned rows — a model exposed on one
+ *  provider must not list/badge under another where it's catalog-only. */
 export const filterRows = (rows: CatalogRowUI[], f: Filters): CatalogRowUI[] => {
   const out: CatalogRowUI[] = [];
   for (const m of rows) {
     const provs = f.exposedOnly ? m.providers.filter((p) => p.exposed) : m.providers;
+    const served = servedIds({ ...m, providers: provs });
     if (
-    (!f.text || m.id.toLowerCase().includes(f.text) || m.name.toLowerCase().includes(f.text)) &&
+    (!f.text || m.id.toLowerCase().includes(f.text) || m.name.toLowerCase().includes(f.text) ||
+      served.some((s) => s.toLowerCase().includes(f.text))) &&
     (f.provider === "all" ||
       provs.some((p) => p.name === f.provider || registryFor({ preset: "", name: p.name })?.id === f.provider)) &&
     (f.price === "all" || (f.price === "free" ? m.free && !sortPrice(m.input) : !m.free && sortPrice(m.input) !== null)) &&
@@ -67,7 +102,7 @@ export const initialLimit = () => Math.ceil(window.innerHeight / 36) + 10;
 export const PAGE = 60;
 
 export function ModelsTab() {
-  const cat = useApi<{ models: (CatalogModel & { providers?: { name: string; prefix?: string; exposed: boolean }[] })[] }>("catalog");
+  const cat = useApi<{ models: CatalogModel[] }>("catalog");
   const provReq = useApi<{ providers: ProviderRow[] }>("providers");
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [limit, setLimit] = useState(initialLimit);
@@ -75,6 +110,8 @@ export function ModelsTab() {
   const pgRef = useRef<HTMLDivElement>(null);
   // playground state: selected model + the provider (key source) serving it
   const [pg, setPg] = useState<null | { model: string; provider: string }>(null);
+  // rows expanded to per-provider pricing (ids survive lazy-load pagination)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const provs = provReq.data?.providers ?? [];
   const rows = (cat.data?.models ?? []).map(toRow);
@@ -156,6 +193,7 @@ export function ModelsTab() {
                 <thead>
                   <tr>
                     {sort.th("id", "model")}
+                    <th className="col-lg">use as</th>
                     <th className="col-lg">providers</th>
                     {sort.th("context", "context", true)}
                     {sort.th("max_output", "max out", true, "col-md")}
@@ -167,9 +205,32 @@ export function ModelsTab() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.map((m) => (
-                    <tr key={m.id}>
-                      <td className="mono" title={m.name || m.id}>{m.id}</td>
+                  {visible.map((m) => {
+                    const spread = priceSpread(m);
+                    const open = expanded.has(m.id);
+                    return (
+                    <Fragment key={m.id}>
+                    <tr className={open ? "expanded" : undefined}>
+                      <td className="mono" title={m.name || m.id}>
+                        <span className="model-cell">
+                          {spread && (
+                            <button className="expand-btn" aria-expanded={open}
+                              aria-label={`${open ? "hide" : "show"} per-provider pricing for ${m.id}`}
+                              title="per-provider pricing"
+                              onClick={() => setExpanded((s) => { const n = new Set(s); if (n.has(m.id)) { n.delete(m.id); } else { n.add(m.id); } return n; })}>
+                              {open ? "−" : `+${m.providers.filter((p) => p.exposed).length}`}
+                            </button>
+                          )}
+                          <button className="copy-chip" aria-label={`copy model id ${m.id}`} title={m.name ? `${m.name} (${m.id})` : m.id}
+                            onClick={() => copyText(m.id).then(() => toast("model id copied")).catch(() => toast("could not copy", "err"))}>{displayName(m.id)}</button>
+                        </span>
+                      </td>
+                      <td className="col-lg use-as">
+                        {servedIds(m).map((s) => (
+                          <button key={s} className="copy-chip" aria-label={`copy ${s}`} title="copy — request the model with this id"
+                            onClick={() => copyText(s).then(() => toast(`${s} copied`)).catch(() => toast("could not copy", "err"))}>{s}</button>
+                        ))}
+                      </td>
                       <td className="col-lg">
                         {m.providers.map((p) => (
                           <span key={p.name} className={`badge ${p.exposed ? "ok" : "muted"}`} title={p.exposed ? "exposed" : "in catalog, not exposed"}>{p.name}</span>
@@ -177,9 +238,17 @@ export function ModelsTab() {
                       </td>
                       <td className="num">{m.context ? fmtTok(m.context) : "—"}</td>
                       <td className="num col-md">{m.max_output ? fmtTok(m.max_output) : "—"}</td>
-                      <td className="num">{fmtPrice(m.input)}</td>
-                      <td className="num">{fmtPrice(m.output)}</td>
-                      <td className="num col-md">{m.cache_read > 0 ? fmtPrice(m.cache_read) : "—"}</td>
+                      {spread ? (
+                        <td className="num spread" colSpan={3} title="same model, different prices per provider — expand for details">
+                          {fmtPrice(spread[0])}–{fmtPrice(spread[1])}
+                        </td>
+                      ) : (
+                        <>
+                          <td className="num">{fmtPrice(m.input)}</td>
+                          <td className="num">{fmtPrice(m.output)}</td>
+                          <td className="num col-md">{m.cache_read > 0 ? fmtPrice(m.cache_read) : "—"}</td>
+                        </>
+                      )}
                       <td className="col-lg">
                         {m.reasoning && <span className="badge muted" title="extended thinking">think</span>}
                         {m.tool_call && <span className="badge muted" title="tool calling">tools</span>}
@@ -200,7 +269,23 @@ export function ModelsTab() {
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    {open && spread && m.providers.filter((p) => p.exposed).map((p, i, all) => (
+                      <tr key={`${m.id}:${p.name}`} className={i === all.length - 1 ? "prov-row last" : "prov-row"}>
+                        <td colSpan={5} className="mono">
+                          <span className={i === all.length - 1 ? "tree last" : "tree"} aria-hidden="true">{i === all.length - 1 ? "└──" : "├──"}</span>
+                          <span className="badge ok">{p.name}</span>
+                          <button className="copy-chip" aria-label={`copy ${p.served_as}`} title={`copy — request the model with this id on ${p.name}`}
+                            onClick={() => copyText(p.served_as).then(() => toast(`${p.served_as} copied`)).catch(() => toast("could not copy", "err"))}>{p.served_as}</button>
+                        </td>
+                        <td className="num">{fmtPrice(p.input)}</td>
+                        <td className="num">{fmtPrice(p.output)}</td>
+                        <td className="num col-md">{p.cache_read > 0 ? fmtPrice(p.cache_read) : "—"}</td>
+                        <td colSpan={2} />
+                      </tr>
+                    ))}
+                    </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
               <div ref={sentinel} style={{ height: 1 }} aria-hidden="true" />

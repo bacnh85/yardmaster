@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toRow, sortPrice, filterRows, DEFAULT_FILTERS, type CatalogRowUI } from "./tabs/ModelsTab";
+import { toRow, sortPrice, filterRows, servedIds, priceSpread, displayName, DEFAULT_FILTERS, type CatalogRowUI } from "./tabs/ModelsTab";
 import { fmtPrice } from "./api";
 import { Playground, type PgTarget } from "./Playground";
 import { renderToString } from "react-dom/server";
@@ -9,7 +9,8 @@ const row = (over: Partial<CatalogRowUI>): CatalogRowUI => ({
   context: 0, max_output: 0,
   input: -1, output: -1, cache_read: 0,
   reasoning: false, tool_call: false, image: false, free: false, manual: false,
-  providers: [{ name: "p1", prefix: "", exposed: true }],
+  providers: [{ name: "p1", prefix: "", exposed: true, served_as: "m", input: -1, output: -1, cache_read: -1 }],
+  combos: [],
   ...over,
 });
 
@@ -38,17 +39,62 @@ describe("fmtPrice", () => {
 describe("filterRows", () => {
   const rows: CatalogRowUI[] = [
     row({ id: "glm-5.3", name: "GLM-5.3", input: 0.6, output: 2, reasoning: true, tool_call: true,
-      providers: [{ name: "zai", prefix: "zai", exposed: true }] }),
+      providers: [{ name: "zai", prefix: "zai", exposed: true, served_as: "zai/glm-5.3", input: 0.6, output: 2, cache_read: 0.1 }],
+      combos: ["combo/fast"] }),
     row({ id: "gpt-5.6", input: 1.25, output: 10, image: true,
-      providers: [{ name: "or", prefix: "or", exposed: true }, { name: "cc", prefix: "", exposed: false }] }),
+      providers: [{ name: "or", prefix: "or", exposed: true, served_as: "or/X", input: 1.25, output: 10, cache_read: 0.2 }, { name: "cc", prefix: "", exposed: false, served_as: "cc-secret", input: -1, output: -1, cache_read: -1 }] }),
     row({ id: "tiny-free", free: true, input: 0, output: 0,
-      providers: [{ name: "or", prefix: "or", exposed: true }] }),
+      providers: [{ name: "or", prefix: "or", exposed: true, served_as: "or/X", input: 1.25, output: 10, cache_read: 0.2 }] }),
   ];
 
   it("matches text against id and name, case-insensitive", () => {
     expect(filterRows(rows, { ...DEFAULT_FILTERS, text: "glm" }).map((r) => r.id)).toEqual(["glm-5.3"]);
     expect(filterRows(rows, { ...DEFAULT_FILTERS, text: "gpt" }).map((r) => r.id)).toEqual(["gpt-5.6"]);
     expect(filterRows(rows, { ...DEFAULT_FILTERS, text: "5.3" }).map((r) => r.id)).toEqual(["glm-5.3"]);
+  });
+
+  it("matches text against served ids (prefix/model, combo ids)", () => {
+    expect(filterRows(rows, { ...DEFAULT_FILTERS, text: "zai/" }).map((r) => r.id)).toEqual(["glm-5.3"]);
+    expect(filterRows(rows, { ...DEFAULT_FILTERS, text: "combo/fast" }).map((r) => r.id)).toEqual(["glm-5.3"]);
+    // unexposed entries' served ids don't match at all — servedIds lists only
+    // routable (exposed) ids, whatever exposedOnly is set to
+    expect(filterRows(rows, { ...DEFAULT_FILTERS, text: "cc-secret" })).toEqual([]);
+    expect(filterRows(rows, { ...DEFAULT_FILTERS, text: "cc-secret", exposedOnly: false })).toEqual([]);
+  });
+
+  it("servedIds unions exposed served_as + combos, deduped", () => {
+    const m = row({ id: "k", providers: [
+      { name: "a", prefix: "a", exposed: true, served_as: "a/k", input: 1, output: 2, cache_read: 0 },
+      { name: "b", prefix: "", exposed: false, served_as: "k", input: -1, output: -1, cache_read: -1 },
+    ], combos: ["combo/fast", "combo/fast"] });
+    expect(servedIds(m)).toEqual(["a/k", "combo/fast"]);
+  });
+
+  it("displayName strips the vendor namespace for display only", () => {
+    expect(displayName("deepseek/deepseek-v4-flash")).toBe("deepseek-v4-flash");
+    expect(displayName("google/gemini-3.7-flash")).toBe("gemini-3.7-flash");
+    expect(displayName("Qwen/Qwen3.8-Omni-Flash")).toBe("Qwen3.8-Omni-Flash");
+    expect(displayName("glm-5.3")).toBe("glm-5.3"); // bare id untouched
+  });
+
+  it("priceSpread: null for single/price-identical providers, [min,max] across exposed only", () => {
+    expect(priceSpread(row({ id: "solo" }))).toBeNull(); // one provider
+    const same = row({ id: "same", providers: [
+      { name: "a", prefix: "", exposed: true, served_as: "same", input: 1, output: 2, cache_read: 0.1 },
+      { name: "b", prefix: "", exposed: true, served_as: "same", input: 1, output: 2, cache_read: 0.1 },
+    ] });
+    expect(priceSpread(same)).toBeNull(); // equal prices → nothing to expand
+    const diff = row({ id: "diff", input: 0.13, providers: [
+      { name: "cmdcode", prefix: "cmd", exposed: true, served_as: "cmd/q", input: 0.13, output: 0.43, cache_read: 0.016 },
+      { name: "nvidia", prefix: "nv", exposed: true, served_as: "nv/q", input: 0, output: 0, cache_read: 0 },
+    ] });
+    expect(priceSpread(diff)).toEqual([0, 0.13]); // input class: free vs paid
+    // unexposed provider's price never widens the spread
+    const hiddenDiff = row({ id: "hd", providers: [
+      { name: "a", prefix: "", exposed: true, served_as: "hd", input: 1, output: 2, cache_read: 0 },
+      { name: "b", prefix: "", exposed: false, served_as: "hd", input: 99, output: 99, cache_read: 99 },
+    ] });
+    expect(priceSpread(hiddenDiff)).toBeNull();
   });
 
   it("filters by provider config name (unexposed entries only match with exposedOnly off)", () => {
@@ -69,7 +115,7 @@ describe("filterRows", () => {
   });
 
   it("exposedOnly drops rows no provider exposes (default on)", () => {
-    const hidden = row({ id: "ghost", providers: [{ name: "p", prefix: "", exposed: false }] });
+    const hidden = row({ id: "ghost", providers: [{ name: "p", prefix: "", exposed: false, served_as: "ghost", input: -1, output: -1, cache_read: -1 }] });
     expect(filterRows([...rows, hidden], DEFAULT_FILTERS).some((r) => r.id === "ghost")).toBe(false);
     expect(filterRows([...rows, hidden], { ...DEFAULT_FILTERS, exposedOnly: false }).some((r) => r.id === "ghost")).toBe(true);
   });
@@ -83,22 +129,22 @@ describe("filterRows", () => {
   it("exposedOnly + provider filter: a model exposed elsewhere must not list under a provider where it's catalog-only", () => {
     // kimi-k3 lives in opencode-go's models list but is ONLY in ollama's catalog
     const kimi = row({ id: "kimi-k3", providers: [
-      { name: "opencode-go", prefix: "ocg", exposed: true },
-      { name: "ollama", prefix: "ol", exposed: false },
+      { name: "opencode-go", prefix: "ocg", exposed: true, served_as: "ocg/kimi-k3", input: 3, output: 15, cache_read: 0.3 },
+      { name: "ollama", prefix: "ol", exposed: false, served_as: "ol/kimi-k3", input: 0.1, output: 3, cache_read: 0 },
     ] });
     const byOllama = filterRows([kimi], { ...DEFAULT_FILTERS, provider: "ollama" });
     expect(byOllama).toEqual([]); // not exposed there → must not appear
     // exposed entries survive the filter; the unexposed one is trimmed from the row
     const kept = filterRows([kimi], { ...DEFAULT_FILTERS, provider: "opencode-go" });
     expect(kept).toHaveLength(1);
-    expect(kept[0].providers).toEqual([{ name: "opencode-go", prefix: "ocg", exposed: true }]);
+    expect(kept[0].providers).toEqual([{ name: "opencode-go", prefix: "ocg", exposed: true, served_as: "ocg/kimi-k3", input: 3, output: 15, cache_read: 0.3 }]);
     // same trimming applies with provider=all (badges never show catalog-only entries)
     const trimmed = filterRows([kimi], DEFAULT_FILTERS)[0];
-    expect(trimmed.providers).toEqual([{ name: "opencode-go", prefix: "ocg", exposed: true }]);
+    expect(trimmed.providers).toEqual([{ name: "opencode-go", prefix: "ocg", exposed: true, served_as: "ocg/kimi-k3", input: 3, output: 15, cache_read: 0.3 }]);
     // exposedOnly off → the catalog-only entry is visible again (badge shows muted)
     const all = filterRows([kimi], { ...DEFAULT_FILTERS, provider: "ollama", exposedOnly: false });
     expect(all).toHaveLength(1);
-    expect(all[0].providers).toContainEqual({ name: "ollama", prefix: "ol", exposed: false });
+    expect(all[0].providers).toContainEqual({ name: "ollama", prefix: "ol", exposed: false, served_as: "ol/kimi-k3", input: 0.1, output: 3, cache_read: 0 });
   });
 });
 
@@ -108,10 +154,17 @@ describe("toRow", () => {
     expect(r.context).toBe(0);
     expect(r.providers).toEqual([]);
   });
-  it("carries provider entries with prefix default", () => {
+  it("carries provider entries with prefix + served_as defaults", () => {
     const r = toRow({ id: "x", family: "chat", input: 0, output: 0, cache_read: 0, cache_write: 0,
-      providers: [{ name: "zai", exposed: true }] });
-    expect(r.providers).toEqual([{ name: "zai", prefix: "", exposed: true }]);
+      providers: [{ name: "zai", wire: "openai", exposed: true, served_as: "zai/x", input: 2, output: 8, cache_read: 0.2 }] });
+    expect(r.providers).toEqual([{ name: "zai", prefix: "", exposed: true, served_as: "zai/x", input: 2, output: 8, cache_read: 0.2 }]);
+  });
+
+  it("defaults absent combos to empty", () => {
+    const r = toRow({ id: "x", family: "chat", input: -1, output: -1, cache_read: 0, cache_write: 0 });
+    expect(r.combos).toEqual([]);
+    const c = toRow({ id: "x", family: "chat", input: -1, output: -1, cache_read: 0, cache_write: 0, combos: ["combo/fast"] });
+    expect(c.combos).toEqual(["combo/fast"]);
   });
 });
 

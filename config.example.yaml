@@ -1,6 +1,7 @@
 # yardmaster config — copy to config.yaml and fill in your keys.
 listen: ":8787"
 db_path: "yardmaster.db"
+# retention_days: 7          # prune requests older than N days (hourly); 0/absent = keep forever
 admin_password: "change-me"        # dashboard + admin API
 
 providers:

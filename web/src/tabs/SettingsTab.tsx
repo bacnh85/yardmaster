@@ -4,7 +4,8 @@ import { ErrorBanner, PageHead, Skeleton, toast } from "../components";
 import { IconX } from "../icons";
 
 interface Cfg {
-  listen: string; db_path: string; providers?: unknown[]; routes?: RouteRow[];
+  listen: string; db_path: string; retention_days?: number;
+  providers?: unknown[]; routes?: RouteRow[];
   routing?: { strategy?: string; rotation?: string };
 }
 
@@ -35,6 +36,7 @@ export function SettingsTab() {
   const [routes, setRoutes] = useState<RouteDraft[] | null>(null);
   const [gStrategy, setGStrategy] = useState("");
   const [gRotation, setGRotation] = useState("");
+  const [retention, setRetention] = useState(0);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -44,6 +46,7 @@ export function SettingsTab() {
     setRoutes((c.routes ?? []).map(draftOf));
     setGStrategy(c.routing?.strategy === "weighted-rr" ? "weighted-rr" : "");
     setGRotation(c.routing?.rotation === "round_robin" ? "round_robin" : "");
+    setRetention(c.retention_days ?? 0);
     setErr("");
   }).catch((e: unknown) => setErr(String(e instanceof Error ? e.message : e)));
   useEffect(() => { load(); }, []);
@@ -75,6 +78,17 @@ export function SettingsTab() {
     } finally { setBusy(false); }
   };
 
+  const saveRetention = async () => {
+    setBusy(true);
+    try {
+      await put("retention", { days: retention });
+      toast("request history setting saved");
+      await load();
+    } catch (e) {
+      toast(String(e instanceof Error ? e.message : e), "err");
+    } finally { setBusy(false); }
+  };
+
   const saveRoutes = async () => {
     if (!routes) return;
     setBusy(true);
@@ -94,6 +108,7 @@ export function SettingsTab() {
   };
   const routingDirty = () =>
     (cfg?.routing?.strategy ?? "") !== gStrategy || (cfg?.routing?.rotation ?? "") !== gRotation;
+  const retentionDirty = () => (cfg?.retention_days ?? 0) !== retention;
   // a route's weights matter when it opts into weighted-rr itself or inherits it globally
   const effWeighted = (r: RouteDraft) => r.strategy === "weighted-rr" || (r.strategy === "" && gStrategy === "weighted-rr");
 
@@ -131,6 +146,32 @@ export function SettingsTab() {
             <div className="row" style={{ marginTop: 10 }}>
               <button className="btn primary" onClick={saveRouting} disabled={busy || !routingDirty()}>
                 {busy ? "saving…" : "Save routing"}
+              </button>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginBottom: 16 }}>
+            <h3>Request history</h3>
+            <div className="form-grid">
+              <div className="field">
+                <label htmlFor="retention-days">keep requests for</label>
+                <select id="retention-days" value={retention}
+                  onChange={(e) => setRetention(parseInt(e.target.value, 10))}>
+                  <option value={0}>keep forever (default)</option>
+                  <option value={1}>1 day</option>
+                  <option value={7}>1 week</option>
+                  <option value={30}>30 days</option>
+                  <option value={90}>90 days</option>
+                </select>
+                <div className="field-hint">
+                  request rows older than this are pruned hourly — keeps the database small.
+                  changing this only affects future pruning; deleted history is gone.
+                </div>
+              </div>
+            </div>
+            <div className="row" style={{ marginTop: 10 }}>
+              <button className="btn primary" onClick={saveRetention} disabled={busy || !retentionDirty()}>
+                {busy ? "saving…" : "Save request history"}
               </button>
             </div>
           </div>

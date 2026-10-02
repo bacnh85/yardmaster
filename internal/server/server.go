@@ -1231,8 +1231,25 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(map[string]any{
 			"listen": cfg.Listen, "db_path": cfg.DBPath,
-			"providers": provs, "routes": cfg.Routes,
+			"retention_days": cfg.RetentionDays,
+			"providers":      provs, "routes": cfg.Routes,
 		})
+	case path == "retention" && r.Method == "PUT":
+		// request-history retention: {"days": N}; 0 = keep forever
+		var in struct {
+			Days int `json:"days"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+			http.Error(w, "bad json", 400)
+			return
+		}
+		if !s.mutate(w, func(c *config.Config) error {
+			c.RetentionDays = in.Days
+			return nil
+		}) {
+			return
+		}
+		writeJSON(map[string]any{"ok": true})
 	case path == "routes" && r.Method == "PUT":
 		// replaces the whole routes list: [{match, chain, strategy, weights}]
 		var routes []*config.Route

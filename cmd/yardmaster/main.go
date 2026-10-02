@@ -95,6 +95,7 @@ func cmdRun(args []string) {
 	p.DumpDir = os.Getenv("YARDMASTER_DUMP_DIR")
 	srv := server.New(p, keys, st, *cfgPath, cfg.AdminPassword, version)
 	srv.StartQuotaRefresher(60 * time.Second) // quotaTTL: bounds skip_when_exhausted staleness
+	srv.StartRetentionPruner(time.Hour)       // request-history pruning per config retention_days
 	go srv.WarmCatalogs(context.Background())
 
 	httpSrv := &http.Server{

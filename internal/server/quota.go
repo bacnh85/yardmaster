@@ -775,3 +775,45 @@ func (s *Server) StartQuotaRefresher(interval time.Duration) (stop func()) {
 		})
 	}
 }
+
+// StartRetentionPruner deletes request rows older than the configured
+// retention window, hourly. Re-reads Reg.Config() each tick so a dashboard
+// retention change takes effect without a restart (same shape as
+// StartQuotaRefresher). 0/absent retention = no-op. Returns a stop func for
+// tests; the production caller ignores it.
+func (s *Server) StartRetentionPruner(interval time.Duration) (stop func()) {
+	if s.Proxy == nil || s.Store == nil {
+		return func() {}
+	}
+	quit := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				days := s.Proxy.Reg.Config().RetentionDays
+				if days <= 0 {
+					continue
+				}
+				n, err := s.Store.DeleteOlderThan(time.Duration(days) * 24 * time.Hour)
+				if err != nil {
+					fmt.Printf("retention prune failed: %v\n", err)
+				} else if n > 0 {
+					fmt.Printf("pruned %d request rows (older than %dd)\n", n, days)
+				}
+			case <-quit:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(quit)
+			<-exited
+		})
+	}
+}
