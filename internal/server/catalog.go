@@ -554,6 +554,11 @@ func canonModelID(id string) string {
 // ticker so /v1/models enrichment and the detail page never start cold.
 func (s *Server) WarmCatalogs(ctx context.Context) {
 	for {
+		// models.dev BEFORE the first provider pass: enrichCatalog reads the
+		// snapshot lock-free (modelsDevCached on hot paths) and a cold snapshot
+		// would cache -1 prices for the full 1h base_url TTL. One blocking fetch
+		// at startup (15s timeout) closes that race for every provider after.
+		modelsDevSnapshot()
 		for _, p := range s.Proxy.Reg.Config().Providers {
 			if p.Disabled {
 				continue
