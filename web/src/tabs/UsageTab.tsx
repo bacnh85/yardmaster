@@ -19,12 +19,40 @@ export const heatLevel = (tokens: number, max: number) =>
 /** Daily activity cell for the heatmap (server day buckets, keyed by UTC date —
  * buckets are UTC-midnight boundaries, so local keys would mislabel by a day). */
 export interface HeatCell { key: string; ts: number; tokens: number }
+const DAY_MS = 86400000;
 const dayKey = (ts: number) => {
   const d = new Date(ts);
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 };
-export const heatCells = (series: Summary["series"]): HeatCell[] =>
-  series.map((p) => ({ key: dayKey(p.ts), ts: p.ts, tokens: p.tok_in + p.tok_out }));
+/** One cell per UTC day over the trailing 12 months. The server groups by
+ *  bucket, so days without requests come back as no row at all — zero-fill
+ *  them, or a short history collapses the calendar to a couple of columns. */
+export const heatCells = (series: Summary["series"], now = Date.now()): HeatCell[] => {
+  const today = Math.floor(now / DAY_MS) * DAY_MS; // UTC midnight today
+  // series[0] can sit one partial day before the aligned window start — keep it
+  const start = Math.min(today - 364 * DAY_MS, series[0]?.ts ?? Infinity);
+  const tokens = new Map(series.map((p) => [dayKey(p.ts), p.tok_in + p.tok_out]));
+  return Array.from({ length: Math.round((today - start) / DAY_MS) + 1 }, (_, i) => {
+    const ts = start + i * DAY_MS;
+    const key = dayKey(ts);
+    return { key, ts, tokens: tokens.get(key) ?? 0 };
+  });
+};
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** "Oct" at the week column where a month starts (pad = leading days of the
+ *  first partial week, so columns line up with the grid's Mon-first rows). */
+export const monthLabels = (cells: HeatCell[], pad: number) => {
+  const out: { label: string; col: number }[] = [];
+  let seen = "";
+  cells.forEach((c, i) => {
+    const month = c.key.slice(0, 7);
+    if (month === seen) return;
+    seen = month;
+    out.push({ label: MONTHS[Number(c.key.slice(5, 7)) - 1], col: Math.floor((pad + i) / 7) });
+  });
+  return out;
+};
 
 /** Total tokens per weekday, Monday-first (UTC — matches the day buckets). */
 export const weekdayTotals = (cells: HeatCell[]) => {
@@ -33,9 +61,11 @@ export const weekdayTotals = (cells: HeatCell[]) => {
   return sums;
 };
 
-/** Busiest day (max tokens), or null when there is no data. */
-export const busiestDay = (cells: HeatCell[]) =>
-  cells.reduce<HeatCell | null>((best, c) => (!best || c.tokens > best.tokens ? c : best), null);
+/** Busiest day (max tokens), or null when there is no activity at all. */
+export const busiestDay = (cells: HeatCell[]) => {
+  const best = cells.reduce<HeatCell | null>((b, c) => (!b || c.tokens > b.tokens ? c : b), null);
+  return best && best.tokens > 0 ? best : null;
+};
 
 /** Pivot (bucket, model) points into per-bucket rows for TimeChart: top N
  *  models by total tokens, everything else collapsed into "other". Model names
@@ -73,6 +103,8 @@ export function UsageTab() {
   const tsApi = useApi<{ series: ModelSeriesPoint[] }>(`timeseries?by=model&hours=${hours}&bucket=${bucketFor(hours)}`);
   // 12-month heatmap window — fetched once per mount, never polled
   const daily = useApi<{ summary: Summary }>(`summary?hours=8760&bucket=day`);
+  // retention explains a mostly-grey calendar (rows older than N days are pruned)
+  const cfg = useApi<{ retention_days?: number }>("config");
   const [byModel, setByModel] = useState<BreakdownRow[]>([]);
   const [byProvider, setByProvider] = useState<BreakdownRow[]>([]);
   const [byKey, setByKey] = useState<BreakdownRow[]>([]);
@@ -139,13 +171,13 @@ export function UsageTab() {
                 series={pivot.models.map((m) => ({ key: PIVOT_KEY + m, label: m }))} />
             </div>
           )}
-          <div className="grid half">
-            <div className="card">
-              <h3>Activity — last 12 months</h3>
-              {cells.length > 0 ? <Heatmap cells={cells} /> : <Empty>no data</Empty>}
-            </div>
-            <div className="card">
-              <h3>Highlights</h3>
+          <div className="card">
+            <h3>Activity — last 12 months</h3>
+            <div className="heat-row">
+              <div>
+                <Heatmap cells={cells} />
+                <ActivityNote cells={cells} retention={cfg.data?.retention_days ?? 0} />
+              </div>
               <Highlights cells={cells} />
             </div>
           </div>
@@ -164,16 +196,37 @@ function Heatmap({ cells }: { cells: HeatCell[] }) {
   const max = Math.max(...cells.map((c) => c.tokens), 0);
   // pad the leading partial week so each day lands on its weekday row (Mon-first, UTC)
   const pad = (new Date(cells[0].ts).getUTCDay() + 6) % 7;
+  const cols = Math.ceil((pad + cells.length) / 7);
   return (
     <div className="heat-wrap">
+      {/* label strip is absolutely positioned in px: the grid is a fixed 11px + 3px rhythm */}
+      <div className="heat-months" style={{ width: cols * 14 }} aria-hidden="true">
+        {monthLabels(cells, pad).map((m) => (
+          <span key={m.label + m.col} style={{ left: m.col * 14 }}>{m.label}</span>
+        ))}
+      </div>
       <div className="heat" role="img"
         aria-label={`daily token activity, ${cells[0].key} to ${cells[cells.length - 1].key}`}>
-        {Array.from({ length: pad }, (_, i) => <div key={`p${i}`} aria-hidden />)}
+        {Array.from({ length: pad }, (_, i) => <div key={`p${i}`} className="heat-pad" aria-hidden />)}
         {cells.map((c) => (
           <div key={c.key} className={`heat-cell heat-${heatLevel(c.tokens, max)}`}
             title={`${c.key} — ${fmtN(c.tokens)} tokens`} />
         ))}
       </div>
+    </div>
+  );
+}
+
+/** What the calendar actually covers — a 12-month window is mostly empty while
+ *  the history is short or pruned, and an unlabelled grey grid reads as broken. */
+function ActivityNote({ cells, retention }: { cells: HeatCell[]; retention: number }) {
+  const active = cells.filter((c) => c.tokens > 0);
+  const keep = retention > 0 ? ` History is pruned after ${retention} days.` : "";
+  return (
+    <div className="heat-cap">
+      {active.length === 0
+        ? <>No activity in the last 12 months.{keep}</>
+        : <>{active.length} of the last {cells.length} days have activity, since {active[0].key}.{keep}</>}
     </div>
   );
 }
@@ -185,11 +238,11 @@ function Highlights({ cells }: { cells: HeatCell[] }) {
   const wk = weekdayTotals(cells);
   const wkMax = Math.max(...wk, 1);
   return (
-    <div>
+    <div className="hl-col">
       <div className="hl-day">
         <div className="label">Most active day</div>
         <div className="value num">{best ? best.key : "–"}</div>
-        {best && best.tokens > 0 && <div className="sub">{fmtN(best.tokens)} tokens</div>}
+        {best && <div className="sub">{fmtN(best.tokens)} tokens</div>}
       </div>
       <div className="wd-bars" role="img" aria-label="total tokens by weekday">
         {wk.map((v, i) => (

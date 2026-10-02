@@ -170,7 +170,7 @@ func TestResponsesClientAllWires(t *testing.T) {
 			// store submit is async — poll for the record
 			var rec []store.Row
 			for deadline := time.Now().Add(5 * time.Second); ; {
-				rows, _ := p.Store.Recent(10)
+				rows, _ := p.Store.Recent(10, 0)
 				if len(rows) > 0 {
 					rec = rows
 					break

@@ -30,7 +30,7 @@ func TestCloseDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	rows, err := s2.Recent(n)
+	rows, err := s2.Recent(n, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestQueueMsMigrationAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := s2.Recent(10)
+	rows, err := s2.Recent(10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestQueueMsMigrationAndRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s3.Close()
-	rows, err = s3.Recent(10)
+	rows, err = s3.Recent(10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,5 +452,52 @@ func TestMonthSpend(t *testing.T) {
 	}
 	if got, err := s2.MonthSpend("ghost", cutoff); err != nil || got != 0 {
 		t.Fatalf("MonthSpend(unknown key) = %v, %v; want 0, nil", got, err)
+	}
+}
+
+// Keyset paging: Recent(limit, before) walks strictly older rows, so the
+// requests tab's infinite scroll cannot duplicate or skip rows while new
+// requests land (an OFFSET would).
+func TestRecentKeysetPaging(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "t.db")
+	s, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		s.Submit(&Record{Ts: time.Now().UnixMilli(), Key: "k", Model: "m"})
+	}
+	if err := s.Close(); err != nil { // drains the async writer
+		t.Fatal(err)
+	}
+	s2, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+
+	first, err := s2.Recent(4, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 4 || first[0].ID <= first[3].ID {
+		t.Fatalf("first page: want 4 rows newest-first, got %+v", first)
+	}
+	second, err := s2.Recent(4, first[3].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 4 || second[0].ID >= first[3].ID {
+		t.Fatalf("second page must be strictly older than the cursor: %+v", second)
+	}
+	third, err := s2.Recent(4, second[3].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third) != 2 { // short page = end of history
+		t.Fatalf("last page: want the 2 remaining rows, got %d", len(third))
+	}
+	if rest, err := s2.Recent(4, third[len(third)-1].ID); err != nil || len(rest) != 0 {
+		t.Fatalf("past the end: want 0 rows, got %d (%v)", len(rest), err)
 	}
 }

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 // UsageTab pulls in Chart.tsx → real uplot; jsdom lacks what uPlot needs at import
 vi.mock("uplot", () => ({ default: class { width = 0; destroy() {} setData() {} setSize() {} } }));
 vi.mock("uplot/dist/uPlot.min.css", () => ({}));
-import { bucketFor, sharePct, heatLevel, heatCells, weekdayTotals, busiestDay, pivotModels, PIVOT_KEY } from "./tabs/UsageTab";
+import { bucketFor, sharePct, heatLevel, heatCells, monthLabels, weekdayTotals, busiestDay, pivotModels, PIVOT_KEY } from "./tabs/UsageTab";
 
 describe("bucketFor", () => {
   it("minute at 1h, hour for 24h-30d, day at 90d", () => {
@@ -43,10 +43,19 @@ describe("heatCells + weekdayTotals + busiestDay", () => {
     { ts: day(2026, 9, 26), tok_in: 40, tok_out: 10 }, // Saturday
     { ts: day(2026, 9, 27), tok_in: 80, tok_out: 20 }, // Sunday
   ];
-  const cells = heatCells(series as never);
-  it("keys by local date and sums in+out", () => {
-    expect(cells.map((c) => c.tokens)).toEqual([110, 50, 100]);
-    expect(cells[0].key).toBe("2026-09-21");
+  const now = day(2026, 9, 30) + 5 * 3_600_000; // some instant inside 2026-09-30 UTC
+  const cells = heatCells(series as never, now);
+  it("zero-fills the full 12-month window (sparse days must not collapse the grid)", () => {
+    expect(cells).toHaveLength(365);
+    expect(cells[0].key).toBe("2025-10-01");
+    expect(cells[cells.length - 1].key).toBe("2026-09-30");
+    expect(cells.filter((c) => c.tokens > 0).map((c) => [c.key, c.tokens]))
+      .toEqual([["2026-09-21", 110], ["2026-09-26", 50], ["2026-09-27", 100]]);
+  });
+  it("keeps the server's leading partial day (window boundary)", () => {
+    const boundary = heatCells([{ ts: day(2025, 9, 30), tok_in: 7, tok_out: 0 }] as never, now);
+    expect(boundary).toHaveLength(366);
+    expect(boundary[0]).toMatchObject({ key: "2025-09-30", tokens: 7 });
   });
   it("aggregates Monday-first", () => {
     const wk = weekdayTotals(cells);
@@ -55,9 +64,21 @@ describe("heatCells + weekdayTotals + busiestDay", () => {
     expect(wk[6]).toBe(100); // Sun
     expect(wk.reduce((a, b) => a + b, 0)).toBe(260);
   });
-  it("picks the busiest day", () => {
+  it("picks the busiest day, and none when every day is empty", () => {
     expect(busiestDay(cells)?.key).toBe("2026-09-21");
+    expect(busiestDay(heatCells([], now))).toBe(null); // zero-filled ≠ "busiest"
     expect(busiestDay([])).toBe(null);
+  });
+});
+
+describe("monthLabels", () => {
+  const cells = heatCells([], day(2026, 9, 30));
+  const labels = monthLabels(cells, (new Date(cells[0].ts).getUTCDay() + 6) % 7);
+  it("labels every month once, at its starting week column", () => {
+    expect(labels.map((l) => l.label))
+      .toEqual(["Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep"]);
+    expect(labels[0]).toEqual({ label: "Oct", col: 0 }); // window starts 2025-10-01
+    expect(labels.map((l) => l.col)).toEqual([...labels.map((l) => l.col)].sort((a, b) => a - b));
   });
 });
 

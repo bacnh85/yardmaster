@@ -192,6 +192,17 @@ th.sortable:hover { color: var(--ink); }
 .sort-ind { display: inline-block; margin-left: 4px; font-size: 9px; opacity: 0.9; }
 tr.clickable { cursor: pointer; }
 
+/* the requests list is the one table you scroll through for thousands of rows:
+   bound its height so the sticky header actually sticks and the page does not
+   grow to 100k px — the sentinel scrolls inside this box */
+.table-card.scroll-y .table-wrap { max-height: calc(100vh - 200px); overflow: auto; }
+
+/* infinite-scroll footer: doubles as the sentinel the observer watches */
+.list-foot {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 34px; padding: 12px 0 16px; font-size: 12px; color: var(--muted);
+}
+
 /* responsive tables: progressive column disclosure, not horizontal scroll */
 @media (max-width: 1200px) { .col-lg { display: none; } }
 @media (max-width: 900px) { .col-md { display: none; } }
@@ -227,18 +238,26 @@ table.cache-t th:nth-child(8), table.cache-t td:nth-child(8) { width: 8%; }
 .share .quota-bar { width: 64px; }
 
 /* usage tab: 12-month activity heatmap — one column per week, Mon-first rows;
-   levels are color-mix steps of the accent token (themes automatically);
-   fixed cells + overflow: sparse history must not stretch cells into blocks */
+   fixed cells + overflow: the calendar is 53 weeks wide, it never stretches */
 .heat-wrap { overflow-x: auto; padding-bottom: 4px; }
+.heat-months { position: relative; height: 14px; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+.heat-months span { position: absolute; top: 0; white-space: nowrap; }
 .heat { display: grid; grid-template-rows: repeat(7, 11px); grid-auto-flow: column; grid-auto-columns: 11px; gap: 3px; width: max-content; }
 .heat > div { width: 11px; height: 11px; border-radius: 2px; background: var(--surface2); }
-.heat-1 { background: color-mix(in srgb, var(--accent) 25%, var(--surface2)); }
-.heat-2 { background: color-mix(in srgb, var(--accent) 45%, var(--surface2)); }
-.heat-3 { background: color-mix(in srgb, var(--accent) 70%, var(--surface2)); }
+.heat > div.heat-pad { background: none; }
+/* ramp starts at 55%: anything lighter is invisible against the empty cells
+   (level 1 measured Lc 22 light / −12 dark at 25% — under the non-text gate) */
+.heat-1 { background: color-mix(in srgb, var(--accent) 55%, var(--surface2)); }
+.heat-2 { background: color-mix(in srgb, var(--accent) 70%, var(--surface2)); }
+.heat-3 { background: color-mix(in srgb, var(--accent) 85%, var(--surface2)); }
 .heat-4 { background: var(--accent); }
+.heat-cap { margin-top: 8px; font-size: 12px; color: var(--muted); }
 
-/* usage tab: highlights card — most-active-day + weekday token bars */
-.hl-day { margin-bottom: 12px; }
+/* usage tab: 12-month activity card — calendar left, highlights beside it
+   (the calendar is a fixed 53-week grid, so it never fills a full-width card) */
+.heat-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 24px 32px; }
+@media (max-width: 800px) { .heat-row { grid-template-columns: 1fr; } }
+.hl-col { display: flex; flex-direction: column; gap: 12px; }
 .hl-day .label { font-size: 12px; color: var(--muted); }
 .hl-day .value { font-size: 25px; font-weight: 600; margin: 2px 0; }
 .hl-day .sub { font-size: 12px; color: var(--faint); }

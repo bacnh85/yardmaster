@@ -78,7 +78,7 @@ func TestDeleteOlderThan(t *testing.T) {
 	// rows flush on the 500ms batch tick — poll until both are visible
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		rows, err := st.Recent(10)
+		rows, err := st.Recent(10, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -97,7 +97,7 @@ func TestDeleteOlderThan(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("pruned %d rows, want 1", n)
 	}
-	rows, _ := st.Recent(10)
+	rows, _ := st.Recent(10, 0)
 	if len(rows) != 1 || rows[0].Model != "fresh" {
 		t.Fatalf("fresh row must survive: %+v", rows)
 	}
@@ -162,7 +162,7 @@ func TestRetentionPruner(t *testing.T) {
 	st.Submit(&store.Record{Ts: time.Now().Add(-48 * time.Hour).UnixMilli(), Model: "old"})
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		rows, _ := st.Recent(10)
+		rows, _ := st.Recent(10, 0)
 		if len(rows) == 0 || time.Now().After(deadline) {
 			if len(rows) != 0 {
 				t.Fatalf("old row survived pruning: %+v", rows)

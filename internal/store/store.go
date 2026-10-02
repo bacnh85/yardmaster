@@ -472,13 +472,24 @@ type Row struct {
 	QueueMs   float64 `json:"queue_ms"`
 }
 
-func (s *Store) Recent(limit int) ([]Row, error) {
+// Recent returns up to limit rows, newest first. before > 0 pages strictly
+// older than that id — keyset, not OFFSET: rows land constantly, and an offset
+// would duplicate/skip them mid-scroll.
+func (s *Store) Recent(limit int, before int64) ([]Row, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id,ts,key_name,model,provider,status,stream,ttft_ms,dur_ms,
+	q := `SELECT id,ts,key_name,model,provider,status,stream,ttft_ms,dur_ms,
 		tok_in,tok_out,cache_read,cache_write,cost_usd,err,attempts,queue_ms
-		FROM requests ORDER BY id DESC LIMIT ?`, limit)
+		FROM requests`
+	args := []any{}
+	if before > 0 {
+		q += ` WHERE id < ?`
+		args = append(args, before)
+	}
+	q += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}

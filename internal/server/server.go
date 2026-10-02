@@ -591,7 +591,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(map[string]any{"summary": sum, "inflight": inflight, "total": total})
 	case path == "requests" && r.Method == "GET":
 		limit, _ := strconv.Atoi(q.Get("limit"))
-		rows, err := s.Store.Recent(limit)
+		before, _ := strconv.ParseInt(q.Get("before"), 10, 64) // keyset page cursor (id)
+		rows, err := s.Store.Recent(limit, before)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
