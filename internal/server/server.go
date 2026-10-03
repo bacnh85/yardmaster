@@ -308,8 +308,12 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]model, 0) // never nil — empty registry must marshal as [], not null
 	seen := map[string]bool{}
+	allow := inboundKey(r).Allow
 	metas := cachedCatalogMetas(s.Proxy.Reg.Config().Providers)
 	for _, m := range s.Proxy.Reg.Models() {
+		if !provider.KeyAllowed(allow, m) {
+			continue // same matcher Registry.Resolve enforces — scoped keys see only routable ids
+		}
 		if seen[m] {
 			continue
 		}
@@ -375,7 +379,11 @@ func (s *Server) handleSystemoneModels(w http.ResponseWriter, r *http.Request) {
 		Family string `json:"family"`
 	}
 	data := make([]model, 0) // never nil — empty registry must marshal as [], not null
+	allow := inboundKey(r).Allow
 	for _, d := range s.decisionModelIDs() {
+		if !provider.KeyAllowed(allow, d.ID) {
+			continue
+		}
 		data = append(data, model{ID: d.ID, Object: "model", Owned: d.Owned, Family: "classifier"})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -392,7 +400,11 @@ func (s *Server) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
 		SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
 	}
 	models := make([]gm, 0) // never nil — empty registry marshals as []
+	allow := inboundKey(r).Allow
 	for _, m := range s.Proxy.Reg.Models() {
+		if !provider.KeyAllowed(allow, m) {
+			continue
+		}
 		if seen[m] {
 			continue
 		}
