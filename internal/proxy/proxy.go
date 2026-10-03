@@ -440,6 +440,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 				rec.Status = 499
 				return
 			}
+			// headers-timeout / transport death is a 5xx-shaped failure for
+			// the breaker: a stalled upstream must cool like one answering
+			// 502, or clustered stalls hammer the same dead target.
+			if p.Cd != nil {
+				p.Cd.MarkFail(tgt.Provider.Name, limKey)
+			}
 			continue
 		}
 
