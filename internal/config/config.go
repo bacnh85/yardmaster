@@ -95,7 +95,7 @@ type Provider struct {
 	InjectCacheControl bool              `yaml:"inject_cache_control"` // add ephemeral markers when translating to anthropic wire
 	ZcodeSigning       bool              `yaml:"zcode_signing"`        // zai: ZCode desktop parity (identity headers + Client-Signing V4)
 	Subscription       string            `yaml:"subscription"`         // curation guardrail: ""|goat|pro|max — dashboard filters/expose-alls cap to this plan tier
-	HeadersTimeoutS    int               `yaml:"headers_timeout_s"`    // max wait for upstream response headers (default 300)
+	HeadersTimeoutS    int               `yaml:"headers_timeout_s"`    // max wait for upstream response headers (default 60)
 	Rotation           string            `yaml:"rotation"`             // first (default) | round_robin — starting key/account per request
 	SkipWhenExhausted  bool              `yaml:"skip_when_exhausted"`  // route around this provider while its billing windows report exhausted
 }
@@ -414,8 +414,13 @@ func (c *Config) Validate() error {
 		if p.Auth.Type != "static" && p.Auth.Type != "oauth" {
 			return fmt.Errorf("provider %s: auth.type must be static|oauth", p.Name)
 		}
+		// HeadersTimeoutS is the per-attempt upstream response-header budget.
+		// The 300s default predates the Cloudflare (proxy-read-timeout 120s)
+		// front door: a first hop allowed 300s could consume the whole client
+		// window before failover even gets a chance. 60s matches the retryable
+		// half of Cloudflare's window and leaves a full 60s for chain failover.
 		if p.HeadersTimeoutS == 0 {
-			p.HeadersTimeoutS = 300
+			p.HeadersTimeoutS = 60
 		}
 		if p.Rotation != "" && p.Rotation != "first" && p.Rotation != "round_robin" {
 			return fmt.Errorf("provider %s: rotation must be first|round_robin", p.Name)

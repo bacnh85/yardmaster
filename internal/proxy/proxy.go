@@ -1180,7 +1180,22 @@ func (p *Proxy) do(tgt *provider.Target, req *http.Request) (*http.Response, err
 	req = req.WithContext(ctx)
 	ht := tgt.Provider.HeadersTimeoutS
 	if ht <= 0 {
-		ht = 300
+		ht = 60
+	}
+	// Never let one attempt consume the whole client window: behind
+	// Cloudflare (proxy-read-timeout 120s) a single 300s-configured hop
+	// would 524 before the failover chain gets a chance. Clamp each attempt
+	// to half the window so at least one failover hop can still run.
+	if abs, ok := ctx.Deadline(); ok {
+		if budget := time.Until(abs); budget > 0 {
+			cap := budget / 2
+			if cap > 0 && time.Duration(ht)*time.Second > cap {
+				ht = int(cap.Seconds())
+				if ht < 1 {
+					ht = 1
+				}
+			}
+		}
 	}
 	t := time.AfterFunc(time.Duration(ht)*time.Second, cancel)
 	resp, err := p.clientFor(tgt.Provider).Do(req)
