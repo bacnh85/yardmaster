@@ -303,6 +303,15 @@ table.kv td { border-bottom: 1px solid var(--line); padding: 6px 0; }
 .copy-chip:hover { background: var(--accent-soft); color: var(--accent); }
 .use-as { display: flex; flex-wrap: wrap; gap: 2px; }
 
+/* models page: provider badges wrap within their column — a model served by
+   many providers gets more rows, never a table-wide horizontal scrollbar */
+.models-providers { width: 26%; white-space: normal; }
+.models-providers .badges { display: flex; flex-wrap: wrap; gap: 2px; }
+.models-providers .badge {
+  max-width: 180px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
 /* models page: expandable per-provider pricing */
 .model-cell { display: inline-flex; align-items: center; gap: 6px; }
 .expand-btn {

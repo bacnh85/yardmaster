@@ -194,7 +194,7 @@ export function ModelsTab() {
                   <tr>
                     {sort.th("id", "model")}
                     <th className="col-lg">use as</th>
-                    <th className="col-lg">providers</th>
+                    <th className="col-lg models-providers">providers</th>
                     {sort.th("context", "context", true)}
                     {sort.th("max_output", "max out", true, "col-md")}
                     {sort.th("input", "$ in", true)}
@@ -231,10 +231,12 @@ export function ModelsTab() {
                             onClick={() => copyText(s).then(() => toast(`${s} copied`)).catch(() => toast("could not copy", "err"))}>{s}</button>
                         ))}
                       </td>
-                      <td className="col-lg">
-                        {m.providers.map((p) => (
-                          <span key={p.name} className={`badge ${p.exposed ? "ok" : "muted"}`} title={p.exposed ? "exposed" : "in catalog, not exposed"}>{p.name}</span>
-                        ))}
+                      <td className="col-lg models-providers">
+                        <span className="badges">
+                          {m.providers.map((p) => (
+                            <span key={p.name} className={`badge ${p.exposed ? "ok" : "muted"}`} title={p.exposed ? "exposed" : "in catalog, not exposed"}>{p.name}</span>
+                          ))}
+                        </span>
                       </td>
                       <td className="num">{m.context ? fmtTok(m.context) : "—"}</td>
                       <td className="num col-md">{m.max_output ? fmtTok(m.max_output) : "—"}</td>
