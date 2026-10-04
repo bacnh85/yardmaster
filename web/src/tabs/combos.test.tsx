@@ -68,6 +68,16 @@ describe("per-member models (combo model optional)", () => {
     expect(memberModelsFor(provs, "t", "decision", cat)).toEqual(["jev-latest"]);
     expect(memberModelsFor(provs, "t", "chat", cat)).toEqual(["jev-latest", "jev-1.13.0"]);
   });
+  it("memberModelsFor falls back to catalog ids for wildcard providers (no curated list)", () => {
+    const provs = [{ name: "openrouter", wire: "openai", models: [] }] as unknown as ProviderRow[];
+    const cat: CatalogModel[] = [
+      { id: "deepseek/deepseek-v4.1-flash", family: "chat", providers: [{ name: "openrouter" }] },
+      { id: "z-ai/glm-4.7", family: "chat", providers: [{ name: "openrouter" }] },
+      { id: "glm-5.3", family: "chat", providers: [{ name: "other" }] },
+    ] as unknown as CatalogModel[];
+    expect(memberModelsFor(provs, "openrouter", "chat", cat)).toEqual(["deepseek/deepseek-v4.1-flash", "z-ai/glm-4.7"]);
+    expect(memberModelsFor(provs, "openrouter", "decision", cat)).toEqual([]);
+  });
   it("option label carries context + prices from the catalog", () => {
     const catalog: CatalogModel[] = [
       { id: "m1", context: 128000, input: 0.3, output: 1.2, cache_read: 0, cache_write: 0 } as CatalogModel,

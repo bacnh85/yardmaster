@@ -54,12 +54,22 @@ export const providerModels = (providers: ProviderRow[], provider: string): stri
 export const providersForType = (providers: ProviderRow[], type: string): ProviderRow[] =>
   providers.filter((p) => !p.disabled && (type === "decision" ? p.wire === "classifier" : p.wire !== "classifier"));
 
-/** Model ids one provider serves, filtered to decision models when the combo is a decision combo. */
-export const memberModelsFor = (providers: ProviderRow[], provider: string, type: string, catalog: CatalogModel[]): string[] =>
-  providerModels(providers, provider).filter((id) => {
-    if (type !== "decision") return true;
-    return catalog.find((c) => c.id === id)?.family === "classifier";
-  });
+/** Catalog ids a provider can serve (models.dev/upstream catalog, any wire). */
+const catalogModelsFor = (catalog: CatalogModel[], provider: string): string[] =>
+  catalog.filter((m) => m.providers?.some((cp) => cp.name === provider)).map((m) => m.id);
+
+/** Model ids one provider serves: curated list, else catalog ids for wildcard providers (openrouter has no curated list). */
+export const memberModelsFor = (providers: ProviderRow[], provider: string, type: string, catalog: CatalogModel[]): string[] => {
+  const curated = providerModels(providers, provider);
+  if (curated.length > 0) {
+    return curated.filter((id) => {
+      if (type !== "decision") return true;
+      return catalog.find((c) => c.id === id)?.family === "classifier";
+    });
+  }
+  const ids = catalogModelsFor(catalog, provider);
+  return type === "decision" ? ids.filter((id) => catalog.find((c) => c.id === id)?.family === "classifier") : ids;
+};
 
 /** Model select option label: "id · 128K · $0.3/$1.2" from the catalog, "—" when unknown. */
 export const modelOptionLabel = (id: string, catalog: CatalogModel[]): string => {
