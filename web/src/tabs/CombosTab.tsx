@@ -195,7 +195,7 @@ export function CombosTab() {
                     <tr key={c.name}>
                       <td className="mono">{`combo/${c.name}`}{c.type === "decision" && <span className="badge" style={{ marginLeft: 6 }} title="decision models — advertised on /v1/systemone/models">clf</span>}</td>
                       <td className="col-lg">{c.members.map((m) => (
-                        <span key={m.provider} className="mono faint" style={{ marginRight: 8, fontSize: 13 }}>{m.provider}/{m.model || "?"}</span>
+                        <span key={m.provider} className="mono faint" style={{ marginRight: 8, fontSize: 13 }}>{m.provider} · {m.model || "?"}</span>
                       ))}</td>
                       <td>{c.strategy === "weighted-rr" ? "weighted-rr" : "priority"}</td>
                       <td className="n">{fmtN(t.requests)}</td>
