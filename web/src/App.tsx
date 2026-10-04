@@ -63,6 +63,13 @@ export default function App() {
     get("summary?hours=1").then(() => setAuthed(true)).catch(() => setAuthed(false));
   }, []);
 
+  // any 401 from an API call (poll, mutation, load) drops back to the login screen
+  useEffect(() => {
+    const on401 = () => setAuthed(false);
+    window.addEventListener("auth:unauthorized", on401);
+    return () => window.removeEventListener("auth:unauthorized", on401);
+  }, []);
+
   // two-way tab <-> URL hash
   useEffect(() => {
     const onHash = () => {

@@ -1,5 +1,8 @@
 const j = async (r: Response) => {
-  if (r.status === 401) throw new Error("unauthorized");
+  if (r.status === 401) {
+    window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+    throw new Error("unauthorized");
+  }
   if (!r.ok) throw new Error((await r.text()) || `http ${r.status}`);
   return r.json();
 };
