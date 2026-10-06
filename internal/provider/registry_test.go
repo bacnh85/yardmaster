@@ -56,8 +56,9 @@ func TestPrefixResolve(t *testing.T) {
 		{"zai/glm-5.2", []string{"zai"}},
 		// wildcard entry (empty Models) catches uncurated unprefixed ids
 		{"org/model", []string{"opencode-go-gpt"}},
-		// prefixed ids must be curated: uncurated → no target (404)
-		{"ocg/kimi-k3", nil},
+		// prefixed ids hit a curated model first; the wildcard sibling catches
+		// the uncurated remainder (upstream 404s truly unknown ids)
+		{"ocg/kimi-k3", []string{"opencode-go-gpt"}},
 		// unprefixed: back-compat — curated providers + wildcard entry, config order
 		{"glm-5.2", []string{"opencode-go", "opencode-go-gpt", "zai"}},
 		// natural "/" ids are not prefixes
@@ -144,6 +145,64 @@ func TestSplitPrefix(t *testing.T) {
 	}
 	if _, bare, ok := SplitPrefix(cfg, "ocg/"); ok || bare != "ocg/" {
 		t.Fatal("trailing slash must not match")
+	}
+}
+
+// wildcardConfig mirrors prod openrouter: a prefixed wildcard (empty Models)
+// chat provider + a classifier sibling curating ids on the SAME prefix.
+func wildcardConfig() *config.Config {
+	return &config.Config{
+		Providers: []*config.Provider{
+			{Name: "openrouter", Prefix: "or", Wire: "openai", BaseURL: "https://openrouter.ai/api/v1",
+				Auth: config.AuthConf{Type: "static", Keys: []string{"k1"}}},
+			{Name: "openrouter-classifier", Prefix: "or", Wire: "classifier", BaseURL: "https://openrouter.ai/api/v1",
+				Models: []string{"typesafe/jev-1.13"}, Auth: config.AuthConf{Type: "static", Keys: []string{"k2"}}},
+		},
+		Keys: []*config.Key{{Key: "ar-x", Name: "pi", Allow: []string{"*"}}},
+	}
+}
+
+// A wildcard provider with a prefix resolves "prefix/<upstream-id>" (prefix
+// stripped upstream) and is caught only when no curated sibling matches.
+func TestWildcardPrefixResolve(t *testing.T) {
+	reg := New(wildcardConfig())
+	tgts := reg.Resolve("or/deepseek/deepseek-v4.1-flash", []string{"*"})
+	if len(tgts) != 1 || names(tgts)[0] != "openrouter" {
+		t.Fatalf("wildcard prefixed: got %v", names(tgts))
+	}
+	if got := UpstreamModel(tgts[0].Provider, "or/deepseek/deepseek-v4.1-flash"); got != "deepseek/deepseek-v4.1-flash" {
+		t.Fatalf("wildcard prefixed upstream: got %q, want bare id", got)
+	}
+	// curated sibling wins over the wildcard on the same prefix — the
+	// classifier entry must not lose "or/typesafe/jev-1.13" to chat
+	if got := names(reg.Resolve("or/typesafe/jev-1.13", []string{"*"})); !eq(got, []string{"openrouter-classifier"}) {
+		t.Fatalf("curated must beat wildcard: got %v", got)
+	}
+}
+
+// Advertisement: prefixed wildcard providers expose prefix/<catalog-id> from
+// the WildcardCatalog callback — nil (cold cache) advertises nothing.
+func TestWildcardPrefixAdvertisement(t *testing.T) {
+	reg := New(wildcardConfig())
+	reg.WildcardCatalog = func(p *config.Provider) []string {
+		if p.Name != "openrouter" {
+			return nil
+		}
+		return []string{"deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3"}
+	}
+	ids := map[string]bool{}
+	for _, id := range reg.Models() {
+		ids[id] = true
+	}
+	if !ids["or/deepseek/deepseek-v4.1-flash"] || !ids["or/z-ai/glm-5.3"] {
+		t.Fatalf("wildcard prefix ids not advertised: %v", ids)
+	}
+	if ids["or/typesafe/jev-1.13"] {
+		t.Fatalf("classifier id advertised on chat: %v", ids)
+	}
+	// nil callback (catalog not yet warm) → no wildcard advertisement
+	if got := New(wildcardConfig()).Models(); len(got) != 0 {
+		t.Fatalf("nil callback must advertise nothing here: %v", got)
 	}
 }
 

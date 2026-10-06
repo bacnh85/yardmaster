@@ -27,6 +27,12 @@ type Registry struct {
 	limiters sync.Map // "provider:key" -> *auth.Limiter
 	wrr      sync.Map // route match -> *uint64 (weighted-rr pick counter)
 	rr       sync.Map // provider name -> *uint64 (round_robin key counter)
+
+	// WildcardCatalog lists the catalog ids a wildcard (empty Models) provider
+	// can serve, for advertisement of prefixed wildcard providers (openrouter
+	// "or/<upstream-id>"). Must be cache-hit only — Models() runs on the
+	// agent-facing /v1/models path, which never fetches upstream. Nil = none.
+	WildcardCatalog func(*config.Provider) []string
 }
 
 func New(cfg *config.Config) *Registry {
@@ -257,16 +263,33 @@ func (r *Registry) Resolve(model string, allow []string) []*Target {
 	}
 	if !matched {
 		if prefixed {
-			// prefixed requests must hit a curated model — an empty Models
-			// list (wildcard) inside the group would silently wrong-wire it.
+			// Curated matches win over wildcard siblings inside the prefix group
+			// (the classifier entry curating "or/typesafe/jev" must not lose to
+			// the openai wildcard on the same prefix). A wildcard provider
+			// (empty Models, non-classifier — validation forbids classifier
+			// wildcards) catches every uncurated bare id, matching the
+			// unprefixed auto-path semantics; upstream 404s unknown ids.
 			// A provider whose prefix equals a vendor namespace of its own
 			// natural ids (prefix "openrouter", curated "openrouter/auto")
 			// also serves the FULL id bare: SplitPrefix already stripped the
 			// segment, so match it back against the full model id too.
+			var wildcards []*config.Provider
+			curated := false
 			for _, p := range r.cfg.Providers {
-				if p.Prefix == prefix && (contains(p.Models, bare) || containsMap(p.ModelMap, bare) || contains(p.Models, model) || containsMap(p.ModelMap, model)) {
-					provs = append(provs, p)
+				if p.Prefix != prefix {
+					continue
 				}
+				if len(p.Models) == 0 && p.Wire != "classifier" {
+					wildcards = append(wildcards, p)
+					continue
+				}
+				if contains(p.Models, bare) || containsMap(p.ModelMap, bare) || contains(p.Models, model) || containsMap(p.ModelMap, model) {
+					provs = append(provs, p)
+					curated = true
+				}
+			}
+			if !curated {
+				provs = append(provs, wildcards...)
 			}
 		} else {
 			for _, p := range r.cfg.Providers {
@@ -512,6 +535,23 @@ func (r *Registry) Models() []string {
 	for _, p := range r.cfg.Providers {
 		if p.Disabled || p.Wire == "classifier" {
 			continue // disabled providers and decision models advertise nothing
+		}
+		if len(p.Models) == 0 {
+			// wildcard: unprefixed providers serve everything under their prefix
+			// (routes/auto path) and advertise only combos/aliases; a PREFIXED
+			// wildcard provider (openrouter "or") is reachable only as
+			// "prefix/<upstream-id>", so advertise exactly those ids from the
+			// warm catalog — empty/absent catalog (never fetched yet) = nothing
+			if p.Prefix == "" || r.WildcardCatalog == nil {
+				continue
+			}
+			for _, m := range r.WildcardCatalog(p) {
+				if id := p.Prefix + "/" + m; !seen[id] {
+					seen[id] = true
+					out = append(out, id)
+				}
+			}
+			continue
 		}
 		for _, m := range p.Models {
 			for _, id := range advertised(p.Prefix, m) {

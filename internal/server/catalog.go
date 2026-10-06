@@ -218,6 +218,24 @@ type catalogEntry struct {
 
 var catalogCache sync.Map // provider base_url -> catalogEntry
 
+// wildcardCatalogIDs lists the raw upstream ids of one provider's cached
+// catalog — the advertisement + prefixed-resolve source for wildcard (empty
+// Models) prefixed providers (openrouter "or/<upstream-id>"). Cache-hit ONLY:
+// called from Registry.Models() on the agent-facing /v1/models path, which
+// must never block on a fetch — nil until WarmCatalogs has populated it.
+func wildcardCatalogIDs(p *config.Provider) []string {
+	e, ok := catalogCache.Load(p.BaseURL)
+	if !ok {
+		return nil
+	}
+	models := e.(catalogEntry).models
+	out := make([]string, 0, len(models))
+	for _, mm := range models {
+		out = append(out, mm.ID)
+	}
+	return out
+}
+
 // catalog returns the model catalog for one provider: upstream /models ids
 // enriched with models.dev metadata, plus the provider's curated ids the
 // upstream omits (manually added models) enriched the same way. Never fails

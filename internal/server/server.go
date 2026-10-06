@@ -101,6 +101,10 @@ func New(p *proxy.Proxy, keys *auth.KeyStore, st *store.Store, cfgPath, adminPas
 				break
 			}
 		}
+		// prefixed wildcard providers (openrouter "or/...") advertise and
+		// resolve from the warm upstream catalog — cache-hit only, the models
+		// path must never fetch upstream (see Registry.WildcardCatalog).
+		p.Reg.WildcardCatalog = wildcardCatalogIDs
 	}
 	return &Server{
 		Proxy: p, Keys: keys, Store: st,
