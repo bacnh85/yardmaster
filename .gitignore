@@ -15,6 +15,7 @@ web/tsconfig.tsbuildinfo
 docs/*
 !docs/routing.md
 !docs/classifier.md
+!docs/tok-rate-parity.md
 !docs/banner.png
 !docs/dashboard-usage.png
 !docs/dashboard-providers.png

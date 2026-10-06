@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { get, fmtDur, fmtMs, fmtN, fmtTime, fmtUSD, ReqRow } from "../api";
+import { genTps, get, fmtDur, fmtMs, fmtN, fmtTime, fmtUSD, ReqRow } from "../api";
 import { useApi, usePoll, useSorted } from "../hooks";
 import { Empty, ErrCell, ErrorBanner, Modal, PageHead, Skeleton, StatusBadge } from "../components";
 
@@ -17,7 +17,8 @@ export function RequestsTab() {
   const sentinel = useRef<HTMLDivElement>(null);
   const wrap = useRef<HTMLDivElement>(null);
 
-  const rows = [...head, ...older];
+  // tps precomputed onto each row so the generic column sort can key on it
+  const rows = [...head, ...older].map((r) => ({ ...r, tps: genTps(r) }));
   const { sorted, th } = useSorted(rows, "ts");
   const [detail, setDetail] = useState<ReqRow | null>(null);
 
@@ -87,6 +88,7 @@ export function RequestsTab() {
                   {th("dur_ms", "dur", true)}
                   {th("tok_in", "in", true)}
                   {th("tok_out", "out", true)}
+                  {th("tps", "tok/s", true, "col-md")}
                   {th("cache_read", "cache", true, "col-md")}
                   {th("cost_usd", "cost", true, "col-lg")}
                   {th("attempts", "tries", true, "col-md")}
@@ -108,6 +110,7 @@ export function RequestsTab() {
                       <td className="n">{fmtDur(r.dur_ms)}</td>
                       <td className="n">{fmtN(r.tok_in)}</td>
                       <td className="n">{fmtN(r.tok_out)}</td>
+                      <td className="n col-md">{r.tps?.toFixed(0) ?? "–"}</td>
                       <td className="n col-md">{fmtN(r.cache_read)}</td>
                       <td className="n col-lg">{fmtUSD(r.cost_usd)}</td>
                       <td className="n col-md">{r.attempts}</td>
@@ -149,6 +152,7 @@ function RequestDetail({ r, onClose }: { r: ReqRow; onClose: () => void }) {
     ["duration", fmtDur(r.dur_ms)],
     ["tokens in", fmtN(r.tok_in)],
     ["tokens out", fmtN(r.tok_out)],
+    ["gen tok/s", genTps(r)?.toFixed(1) ?? "–"],
     ["cache read", fmtN(r.cache_read)],
     ["cache write", fmtN(r.cache_write)],
     ["cost", fmtUSD(r.cost_usd)],

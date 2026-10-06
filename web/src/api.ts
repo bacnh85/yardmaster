@@ -141,6 +141,17 @@ export const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
 export const fmtDur = (ms: number) =>
   ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 
+/** Generation tok/s — tokens out ÷ (duration − TTFT), the ZCode desktop
+ *  convention. Wall-clock rates fold the multi-second server-side first-token
+ *  wait into the divisor and read several times lower on short generations;
+ *  this is the decode-phase rate agents actually experience after the first
+ *  token. Null when degenerate (no output, non-stream, dur ≤ ttft). */
+export const genTps = (r: Pick<ReqRow, "tok_out" | "dur_ms" | "ttft_ms">) => {
+  const gen = r.dur_ms - r.ttft_ms;
+  if (r.tok_out <= 0 || gen <= 0) return null;
+  return r.tok_out / (gen / 1000);
+};
+
 /** Countdown label for an epoch-ms reset timestamp: "3h 57m", "4d", "—". */
 export const fmtResetIn = (resetAtMs: number | null | undefined) => {
   if (!resetAtMs) return "—";

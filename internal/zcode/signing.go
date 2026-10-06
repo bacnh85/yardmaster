@@ -49,7 +49,7 @@ var (
 	gatePath         = "/api/v1/agent/configs"
 	handshakePath    = "/api/paas/c1f3a7e2/v2/client"
 	appID            = "zcode"
-	defaultAppVer    = "3.10.2" // matches the ZCode desktop release the port tracked
+	defaultAppVer    = "3.14.4" // matches the ZCode desktop release the port tracked
 	kdfSalt          = "WD_CLIENT_SIGN_KDF_SALT"
 	kdfInfoHMAC      = "getSignKey_hmac"
 	kdfInfoEd25519   = "ed25519_priv"
