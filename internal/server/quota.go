@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bacnh85/yardmaster/internal/zcode"
 )
 
 // QuotaWindow is one rolling usage window. Used/Cap are USD; ResetAt is epoch ms.
@@ -89,6 +91,14 @@ var billingPaths = map[string]string{
 	"openrouter":  "/api/v1/credits",
 	"ollama":      "/api/usage",
 }
+
+// startPlanBillingPath is the start-plan credits-plane endpoint on zcode.z.ai
+// (app fingerprint query params the gateway expects; platform must be the
+// `${goos}-${arch}` shape, zcode-api billingPlatform).
+var startPlanBillingPath = func() string {
+	id := zcode.DefaultIdentity()
+	return "/api/v1/zcode-plan/billing/balance?app_version=" + url.QueryEscape(id.AppVersion) + "&platform=" + url.QueryEscape(id.Platform)
+}()
 
 // quotaClient fetches usage windows; var so tests can redirect upstream.
 var quotaClient = &http.Client{Timeout: 7 * time.Second}
@@ -316,6 +326,86 @@ func fetchZaiQuota(ctx context.Context, quotaURL, key string) (*QuotaAccount, er
 		} // unit 5 (MCP monthly) intentionally ignored
 	}
 	return acct, nil // PAYG key: no windows — empty account, never a fake 0%
+}
+
+// zaiBalanceResp mirrors GET https://zcode.z.ai/api/v1/zcode-plan/billing/balance
+// (start-plan credits plane; shape from zcode-api routes-quota.ts — snake_case
+// live, camelCase aliases accepted, bare numbers tolerated). The bucket is
+// unit-coded: unit_type "percentage" = pct, anything else = raw grant units.
+type zaiBalanceResp struct {
+	Data struct {
+		Balances []struct {
+			ShowName       string          `json:"show_name"`
+			RemainingUnits json.RawMessage `json:"remaining_units"`
+			TotalUnits     json.RawMessage `json:"total_units"`
+			UsedUnits      json.RawMessage `json:"used_units"`
+			UnitType       string          `json:"unit_type"`
+			ExpiresAt      int64           `json:"expires_at"`
+		} `json:"balances"`
+	} `json:"data"`
+}
+
+// bareNum accepts a JSON number or a numeric string (upstream mixes both).
+func bareNum(raw json.RawMessage) float64 {
+	var f float64
+	if json.Unmarshal(raw, &f) == nil {
+		return f
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		fmt.Sscanf(s, "%g", &f)
+	}
+	return f
+}
+
+// fetchZaiStartQuota reads the start-plan credits plane for one plan JWT.
+// Auth is the OAuth JWT as Bearer (NOT the coding-plan API key) and NO client
+// signing — the zcode-plan paths are on the gateway's permanent unsigned list.
+func fetchZaiStartQuota(ctx context.Context, quotaURL, key string) (*QuotaAccount, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, quotaURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	// The billing gateway requires the desktop identity fingerprint — without
+	// X-Device-Mid it rejects with biz 3001 "parameter error" (zcode-api
+	// billingHeaders; X-ZCode-Agent is dropped on control-plane calls).
+	idHeaders := zcode.DefaultIdentity().Headers()
+	delete(idHeaders, "X-ZCode-Agent")
+	for k, v := range idHeaders {
+		req.Header.Set(k, v)
+	}
+	resp, err := quotaClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	var body zaiBalanceResp
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	acct := &QuotaAccount{}
+	for _, b := range body.Data.Balances {
+		remaining, total, used := bareNum(b.RemainingUnits), bareNum(b.TotalUnits), bareNum(b.UsedUnits)
+		if remaining == 0 && total == 0 && used == 0 && b.ExpiresAt == 0 {
+			continue // display noise: no usable number at all
+		}
+		if used == 0 {
+			used = total - remaining
+		}
+		win := &QuotaWindow{Used: used, Cap: total, Unit: "units", ResetAt: b.ExpiresAt, Exceeded: total > 0 && remaining <= 0}
+		if strings.EqualFold(b.UnitType, "percentage") {
+			win.Unit = "pct"
+		}
+		acct.Monthly = win // credits bucket renders in the monthly column (it is the plan's total grant)
+		break              // one credits bucket per account (first wins — mirrors the desktop panel)
+	}
+	return acct, nil
 }
 
 // ocUsage mirrors GET https://opencode.ai/zen/go/v1/usage (live-verified
@@ -606,7 +696,11 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 		}
 		origin := u.Scheme + "://" + u.Host + billingPaths[src]
 		if src == "zai" {
-			origin = "https://api.z.ai" + billingPaths["zai"] // monitor endpoint lives on api.z.ai, even for ultra-route providers
+			if u.Host == "zcode.z.ai" {
+				origin = "https://zcode.z.ai" + startPlanBillingPath // start-plan credits plane (JWT accounts)
+			} else {
+				origin = "https://api.z.ai" + billingPaths["zai"] // monitor endpoint lives on api.z.ai, even for ultra-route providers
+			}
 		}
 		for i, key := range p.Auth.Keys {
 			if i < len(p.Auth.KeyDisabled) && p.Auth.KeyDisabled[i] {
@@ -622,7 +716,11 @@ func (s *Server) buildQuotaReport() []ProviderQuota {
 			case "deepseek":
 				acct, err = fetchDeepSeekQuota(context.Background(), origin, key)
 			case "zai":
-				acct, err = fetchZaiQuota(context.Background(), origin, key)
+				if u.Host == "zcode.z.ai" {
+					acct, err = fetchZaiStartQuota(context.Background(), origin, key)
+				} else {
+					acct, err = fetchZaiQuota(context.Background(), origin, key)
+				}
 			case "opencode":
 				acct, err = fetchOpencodeQuota(context.Background(), origin, key)
 			case "openrouter":

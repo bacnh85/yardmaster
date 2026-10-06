@@ -151,6 +151,16 @@ providers:
     body_overrides: { speed: fast }
     zcode_signing: true          # ZCode desktop parity (Client-Signing V4, fail-open)
 
+  # start-plan (free trial tokens) — combo zai-start (p1) → zai (p2) spends the
+  # expiring bucket first; 401/402/403 on the dead jwt auto-fallback to the
+  # coding plan. Login via the dashboard preset's "log in with Z.ai" button.
+  - name: zai-start
+    base_url: https://zcode.z.ai/api/v1/zcode-plan/anthropic
+    wire: anthropic
+    auth: { type: static, keys: ["<plan-jwt>"] }
+    start_plan: true
+    models: [glm-5.3-flash, glm-5.3]
+
 routes:
   - match: "glm-*"
     chain: [zai]

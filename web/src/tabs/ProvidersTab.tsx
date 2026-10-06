@@ -14,13 +14,14 @@ interface ProviderForm {
   dispatch_burst: number;
   adaptive_thinking: boolean; inject_cache_control: boolean;
   zcode_signing: boolean;
+  start_plan: boolean;
   extra_headers: string; body_overrides: string; // JSON text ("" = none)
 }
 
 export const EMPTY_FORM: ProviderForm = {
   name: "", wire: "openai", base_url: "", models: "", prefix: "", keys: "", session: "", rotation: "", subscription: "",
   dispatch_interval_ms: 0, dispatch_burst: 0, adaptive_thinking: false, inject_cache_control: false,
-  zcode_signing: false, extra_headers: "", body_overrides: "",
+  zcode_signing: false, start_plan: false, extra_headers: "", body_overrides: "",
 };
 
 const urlValid = (s: string) => {
@@ -38,6 +39,7 @@ export interface ProviderBody {
   dispatch_interval_ms: number; adaptive_thinking: boolean; inject_cache_control: boolean;
   dispatch_burst?: number;
   zcode_signing: boolean;
+  start_plan: boolean;
   extra_headers?: Record<string, string>; body_overrides?: Record<string, unknown>;
 }
 
@@ -63,6 +65,7 @@ export const providerBody = (form: ProviderForm): ProviderBody => ({
   adaptive_thinking: form.adaptive_thinking,
   inject_cache_control: form.inject_cache_control,
   zcode_signing: form.zcode_signing,
+  start_plan: form.start_plan,
   ...(Object.keys(parseJsonField(form.extra_headers)).length ? { extra_headers: parseJsonField(form.extra_headers) as Record<string, string> } : {}),
   ...(Object.keys(parseJsonField(form.body_overrides)).length ? { body_overrides: parseJsonField(form.body_overrides) } : {}),
 });
@@ -80,6 +83,7 @@ export const providerUpdateBody = (p: ProviderRow, models: string[]): ProviderBo
   dispatch_burst: p.dispatch_burst ?? 0,
   adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
   zcode_signing: p.zcode_signing ?? false,
+  start_plan: p.start_plan ?? false,
   ...(p.extra_headers ? { extra_headers: p.extra_headers } : {}),
   ...(p.body_overrides ? { body_overrides: p.body_overrides } : {}),
 });
@@ -98,6 +102,7 @@ export const rowToForm = (p: ProviderRow): ProviderForm => ({
   dispatch_burst: p.dispatch_burst ?? 0,
   adaptive_thinking: p.adaptive_thinking, inject_cache_control: p.inject_cache_control,
   zcode_signing: p.zcode_signing ?? false,
+  start_plan: p.start_plan ?? false,
   extra_headers: p.extra_headers ? JSON.stringify(p.extra_headers, null, 2) : "",
   body_overrides: p.body_overrides ? JSON.stringify(p.body_overrides, null, 2) : "",
 });
@@ -441,6 +446,7 @@ function CustomProviders({ provs, reload, cooling }: { provs: ProviderRow[]; rel
               {form.wire === "anthropic" && (
                 <label className="checkbox"><input type="checkbox" checked={form.zcode_signing} onChange={set("zcode_signing")} /> zcode signing (z.ai)</label>
               )}
+              <label className="checkbox"><input type="checkbox" checked={form.start_plan} onChange={set("start_plan")} /> start-plan (z.ai trial, Bearer-JWT)</label>
             </div>
             {form.wire === "anthropic" && (
               <>
@@ -533,6 +539,43 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
   const [key, setKey] = useState("");
   const [subPlan, setSubPlan] = useState<"" | CmdPlan>("");
   const [addBusy, setAddBusy] = useState(false);
+  const [zaiLogin, setZaiLogin] = useState<null | { busy: boolean; err: string; flowId: string }>(null);
+  const zaiPoll = useRef(0);
+  // Z.ai start-plan OAuth CLI login: init → open authorize URL → poll until
+  // ready → put the plan JWT straight into the key field (the provider's
+  // credential IS the JWT). One row inside the add-connection form.
+  const zaiLoginStart = async () => {
+    setZaiLogin({ busy: true, err: "", flowId: "" });
+    try {
+      const res = (await post("zai/login", {})) as { flow_id: string; authorize_url: string };
+      window.open(res.authorize_url, "_blank", "noopener");
+      setZaiLogin({ busy: false, err: "", flowId: res.flow_id });
+      const seq = ++zaiPoll.current;
+      const poll = async () => {
+        if (seq !== zaiPoll.current) return;
+        try {
+          const p = (await get(`zai/login/poll?flow_id=${encodeURIComponent(res.flow_id)}`)) as { status: string; jwt?: string; access_token?: string; error?: string };
+          if (p.status === "ready" && p.jwt) {
+            setKey(p.jwt);
+            setZaiLogin(null);
+            toast("logged in — start-plan JWT captured");
+            return;
+          }
+          if (p.status === "failed") {
+            setZaiLogin({ busy: false, err: p.error || "authorization failed", flowId: "" });
+            return;
+          }
+        } catch {
+          setZaiLogin({ busy: false, err: "login flow expired — retry", flowId: "" });
+          return;
+        }
+        setTimeout(poll, 2000);
+      };
+      setTimeout(poll, 2000);
+    } catch (e) {
+      setZaiLogin({ busy: false, err: String(e), flowId: "" });
+    }
+  };
   // per-model playground: the ▶ button pre-selects model + wire entry
   const [test, setTest] = useState<null | { model: string; entry?: string; busy: boolean; err: string; res: ProbeResult | null }>(null);
   const [catalog, setCatalog] = useState<null | { loading: boolean; err: string; models: CatalogModel[] }>(null);
@@ -946,6 +989,17 @@ function ProviderDetail({ r, provs, error, loading, reload, onBack }: {
             <div className="field full">
               <label htmlFor="conn-key">API key</label>
               <input id="conn-key" type="password" value={key} required onChange={(e) => setKey(e.target.value)} placeholder="sk-…" />
+              {r.id === "zai-start" && (
+                <div style={{ marginTop: 6 }}>
+                  <button type="button" className="btn sm" onClick={zaiLoginStart} disabled={zaiLogin?.busy}>
+                    {zaiLogin?.busy ? "starting…" : "log in with Z.ai (start-plan)"}
+                  </button>
+                  {zaiLogin && !zaiLogin.busy && zaiLogin.flowId && !zaiLogin.err && (
+                    <span className="field-hint" style={{ marginLeft: 8 }}>waiting for authorization in the opened tab…</span>
+                  )}
+                  {zaiLogin?.err && <div className="field-hint" style={{ color: "var(--danger)" }}>{zaiLogin.err}</div>}
+                </div>
+              )}
             </div>
             {r.plans && (
               <div className="field">

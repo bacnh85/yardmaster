@@ -66,6 +66,25 @@ providers:
   # Signing needs a two-part key ({id}.{secret}); single-part keys silently
   # send unsigned (matching the real client's fail-open).
 
+  # --- Z.AI Start-Plan (free trial tokens, spent FIRST) ---
+  # Key = the OAuth plan JWT (dashboard preset "Z.AI Start-Plan" has a
+  # "log in with Z.ai" button that captures it; no client signing on this
+  # gateway). Injects the ZCode system blocks the gateway requires (biz 3012
+  # without them). Pair with the coding plan in a combo so an exhausted/
+  # expired bucket (401/402/403) falls back automatically:
+  #   combos:
+  #     - name: glm-free-first
+  #       model: glm-5.3-flash
+  #       members: [{provider: zai-start}, {provider: zai}]
+  - name: zai-start
+    base_url: https://zcode.z.ai/api/v1/zcode-plan/anthropic
+    wire: anthropic
+    prefix: zai-start
+    auth: { type: static, keys: ["<plan-jwt>"] }
+    start_plan: true
+    inject_cache_control: true
+    models: [glm-5.3-flash, glm-5.3, glm-5.2, glm-5.1, glm-5, glm-5-turbo, glm-5v-turbo, glm-4.7, glm-4.6, glm-4.6v, glm-4.5-air]
+
   # --- OpenRouter (OpenAI wire, model ids like "deepseek/deepseek-chat") ---
   # Dashboard preset: one-click create. /models is public (catalog + live
   # pricing); GET /api/v1/credits feeds the Quota tab's credit balance.

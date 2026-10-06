@@ -1,4 +1,4 @@
-import { get, fmtResetIn, fmtUSD, type QuotaAccount, type QuotaGroup, type QuotaWindow } from "../api";
+import { get, fmtResetIn, fmtTok, fmtUSD, type QuotaAccount, type QuotaGroup, type QuotaWindow } from "../api";
 import { useApi, usePoll } from "../hooks";
 import { Empty, ErrorBanner, PageHead } from "../components";
 
@@ -37,15 +37,19 @@ function Bar({ p }: { p: number }) {
   );
 }
 
-/** One usage window cell: bar + $used/$cap (or % for credit windows) + reset countdown. */
+/** One usage window cell: bar + $used/$cap (or % for credit windows, or raw
+ *  grant units for start-plan credits) + reset countdown. */
 const WindowCell = ({ w }: { w?: QuotaWindow }) => {
   if (!w) return <span className="faint">—</span>;
+  const value = w.unit === "pct" ? `${Math.round(w.used)}%`
+    : w.unit === "units" ? <>{fmtTok(w.used)} / {fmtTok(w.cap)}</>
+    : <>{fmtUSD(w.used)} / {fmtUSD(w.cap)}</>;
   return (
     <div className="quota-cell">
       <Bar p={pct(w)} />
       <span className="quota-meta">
-        <span className="num">{w.unit === "pct" ? `${Math.round(w.used)}%` : <>{fmtUSD(w.used)} / {fmtUSD(w.cap)}</>}</span>
-        {w.reset_at ? <span className="faint">resets in {fmtResetIn(w.reset_at)}</span> : null}
+        <span className="num">{value}</span>
+        {w.reset_at ? <span className="faint">{w.unit === "units" ? "expires" : "resets"} in {fmtResetIn(w.reset_at)}</span> : null}
       </span>
     </div>
   );

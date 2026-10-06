@@ -61,6 +61,23 @@ export const REGISTRY: RegistryProvider[] = [
     ],
   },
   {
+    id: "zai-start", title: "Z.AI Start-Plan (free trial tokens)", code: "ZAIS", prefix: "zai-start",
+    desc: "Start-plan trial gateway (zcode.z.ai) — a free ~100M-token daily bucket (resets daily, local time), spent FIRST; flash models have been steady in testing, frontier models hit intermittent concurrency caps. No cache discount (flat 1:1 tokens). Pair in a combo with the coding plan for auto-failover, or use standalone",
+    entries: [
+      {
+        name: "zai-start", wire: "anthropic", base_url: "https://zcode.z.ai/api/v1/zcode-plan/anthropic", family: "anthropic", familyLabel: "GLM (start-plan)",
+        defaults: {
+          start_plan: true,                     // Bearer-JWT auth (OAuth login button), no client signing
+          inject_cache_control: true,           // system blocks carry ephemeral markers; cached input stays cheap
+          // Pinned coding-plan catalog (ZCode desktop 3.11.2 ground truth — no upstream
+          // discovery endpoint exists). Trials serve glm-5.3-flash; the rest ride the
+          // same gateway for coding-plan traffic pointed at this entry.
+          models: ["glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5", "glm-5-turbo", "glm-5v-turbo", "glm-4.7", "glm-4.6", "glm-4.6v", "glm-4.5-air"],
+        },
+      },
+    ],
+  },
+  {
     id: "cmdcode", title: "Command Code (CC)", code: "CC", prefix: "cmd", plans: true, planOf: cmdPlan,
     desc: "Command Code Provider API — 50+ open models on GOAT, Claude/GPT/Gemini on Pro/Max",
     entries: [

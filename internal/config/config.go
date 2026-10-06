@@ -94,6 +94,7 @@ type Provider struct {
 	AdaptiveThinking   bool              `yaml:"adaptive_thinking"`    // zai-style thinking:{type:adaptive}+output_config.effort
 	InjectCacheControl bool              `yaml:"inject_cache_control"` // add ephemeral markers when translating to anthropic wire
 	ZcodeSigning       bool              `yaml:"zcode_signing"`        // zai: ZCode desktop parity (identity headers + Client-Signing V4)
+	StartPlan          bool              `yaml:"start_plan"`           // zai: start-plan gateway (zcode.z.ai) — Bearer-JWT auth, no client signing
 	Subscription       string            `yaml:"subscription"`         // curation guardrail: ""|goat|pro|max — dashboard filters/expose-alls cap to this plan tier
 	HeadersTimeoutS    int               `yaml:"headers_timeout_s"`    // max wait for upstream response headers (default 60)
 	Rotation           string            `yaml:"rotation"`             // first (default) | round_robin — starting key/account per request

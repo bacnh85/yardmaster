@@ -68,6 +68,7 @@ export interface ProviderRow {
   dispatch_burst?: number; // absent from older servers → 0 (= strict spacing)
   adaptive_thinking: boolean; inject_cache_control: boolean;
   zcode_signing?: boolean; // absent from older servers → prefill degrades to false
+  start_plan?: boolean; // absent from older servers → prefill degrades to false
   extra_headers?: Record<string, string> | null;
   body_overrides?: Record<string, unknown> | null;
   connections: { label: string; suffix: string; disabled?: boolean }[];

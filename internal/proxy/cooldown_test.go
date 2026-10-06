@@ -143,3 +143,49 @@ func TestAllCooledReturns429WithRetryAfter(t *testing.T) {
 		t.Fatalf("cooled retry hit upstream %d times, want 1", calls.Load())
 	}
 }
+
+// 401/402/403 are credential-class failures (dead key / exhausted start-plan
+// jwt): they count toward the same breaker so a dead credential stops being
+// taxed after 3 strikes, and the failover chain keeps serving.
+func TestCooldownCredential401Breaker(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(401)
+	}))
+	defer up.Close()
+	up2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"choices\":[],\"object\":\"chat.completion.chunk\"}\n\ndata: [DONE]\n\n"))
+		w.(http.Flusher).Flush()
+	}))
+	defer up2.Close()
+
+	cfg := &config.Config{Providers: []*config.Provider{
+		{Name: "a", BaseURL: up.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k1"}}},
+		{Name: "b", BaseURL: up2.URL, Wire: "openai", Models: []string{"m"}, Auth: config.AuthConf{Keys: []string{"k2"}}},
+	}}
+	p := NewProxy(provider.New(cfg), nil, nil)
+	ts := httptest.NewServer(http.HandlerFunc(p.ServeChat))
+	defer ts.Close()
+
+	for i := 0; i < 3; i++ { // three 401s trip the breaker on provider a
+		resp, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m","stream":true}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("request %d status: %d, want 200 (failover)", i, resp.StatusCode)
+		}
+	}
+	n := calls.Load() // 3 strikes on a (+0 on b; b never fails)
+	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(`{"model":"m","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 || calls.Load() != n {
+		t.Fatalf("breaker did not cool 401 target: calls %d→%d status %d", n, calls.Load(), resp.StatusCode)
+	}
+}

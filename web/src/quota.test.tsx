@@ -87,6 +87,15 @@ describe("QuotaTable key display", () => {
     expect(unique).not.toContain("mono faint"); // unique label stays label-only
   });
 
+  it("renders start-plan grant-unit credits as token amounts with an expiry", () => {
+    const a: QuotaAccount = {
+      label: "trial", suffix: "st01", monthly: { used: 30_000_000, cap: 100_000_000, unit: "units", reset_at: mins(240) },
+    };
+    const html = renderToString(<QuotaTable accounts={[a]} />);
+    expect(html).toContain("30M");
+    expect(html).toContain("expires");
+  });
+
   it("prefers an explicit monthly percent window (OpenCode Go) over the derived allowance", () => {
     const a: QuotaAccount = {
       label: "go", suffix: "xy99", monthly: { used: 80, cap: 100, unit: "pct", reset_at: mins(240) },
@@ -94,7 +103,7 @@ describe("QuotaTable key display", () => {
     };
     const html = renderToString(<QuotaTable accounts={[a]} />);
     expect(html).toContain("80%");
-    expect(html).toContain("resets in");
+    expect(html).toContain("resets");
     expect(html).toContain("4h");
     expect(html).not.toContain("$67");
   });

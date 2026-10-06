@@ -471,6 +471,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, clientWire string)
 			if p.Cd != nil {
 				if resp.StatusCode == 429 {
 					p.Cd.Mark429(tgt.Provider.Name, limKey, resp.Header.Get("Retry-After"))
+				} else if resp.StatusCode == 401 || resp.StatusCode == 402 || resp.StatusCode == 403 {
+					// credential-class failure (dead key / exhausted bucket /
+					// revoked jwt): cool the target so the failover chain stops
+					// taxing every request with the same dead credential
+					p.Cd.MarkFail(tgt.Provider.Name, limKey)
 				} else if resp.StatusCode == 500 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504 || resp.StatusCode == 529 {
 					p.Cd.MarkFail(tgt.Provider.Name, limKey)
 				}
@@ -721,8 +726,12 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 					translate.InjectDeepseekReasoningPassback(req)
 				}
 				// same-wire anthropic passthrough (e.g. Claude Code → zai): the
-				// cross-wire translate never runs, so inject cache markers here
-				if pv.Wire == WireAnthropic && opts.InjectCacheControl {
+				// cross-wire translate never runs, so inject cache markers here.
+				// start-plan rewrites the whole system field instead (3012 gate)
+				// and owns its own marker budget.
+				if pv.Wire == WireAnthropic && pv.StartPlan {
+					translate.InjectStartPlanSystem(req, upModel)
+				} else if pv.Wire == WireAnthropic && opts.InjectCacheControl {
 					translate.InjectCacheControlAnthropic(req)
 				}
 				bodyOut, _ = json.Marshal(req)
@@ -802,6 +811,9 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 		req["model"] = upModel
 		a := translate.OpenAIReqToAnthropic(req, opts)
 		applyBodyOverrides(pv, a)
+		if pv.StartPlan {
+			translate.InjectStartPlanSystem(a, upModel)
+		}
 		bodyOut, _ = json.Marshal(a)
 		url = anthropicEndpoint(url)
 	default: // anthropic client -> openai upstream
@@ -841,6 +853,12 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 	} else {
 		SetAuth(httpReq, pv.Wire, tgt.APIKey)
 	}
+	if pv.StartPlan {
+		// start-plan gateway takes the OAuth plan JWT as Bearer only — the
+		// coding-plan x-api-key is ignored upstream (zcode-api upstream.ts buildAuthHeaders).
+		httpReq.Header.Del("x-api-key")
+		httpReq.Header.Set("Authorization", "Bearer "+tgt.APIKey)
+	}
 	for k, v := range pv.ExtraHeaders {
 		httpReq.Header.Set(k, v)
 	}
@@ -861,7 +879,7 @@ func (p *Proxy) buildUpstream(ctx context.Context, tgt *provider.Target, clientW
 			copilotIdentity(httpReq)
 		}
 	}
-	if pv.ZcodeSigning {
+	if pv.ZcodeSigning && !pv.StartPlan { // start-plan is on the gateway's permanent unsigned-path list
 		zc := p.zcodeManager()
 		for k, v := range zc.Identity.Headers() {
 			httpReq.Header.Set(k, v) // ZCode identity (incl. its User-Agent) wins
@@ -1658,7 +1676,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 		if usage.Estimate {
 			usage.In = usage.estBytes / 4
 		}
-		return usage, 0
+		return usage, sinceT(r, *firstTouch)
 	}
 
 	if clientWire == WireAnthropic {
@@ -1799,7 +1817,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 		if usage.Estimate {
 			usage.In = usage.estBytes / 4
 		}
-		return usage, 0
+		return usage, sinceT(r, *firstTouch)
 	} else if tgt.Provider.Wire == WireResponses || tgt.Provider.Wire == WireGemini {
 		// upstream responses/gemini (normalized to openai chat chunks by
 		// respToChatBody / geminiToChatBody)
@@ -1885,7 +1903,7 @@ func (p *Proxy) forwardTranslateStream(w http.ResponseWriter, r *http.Request, c
 	if usage.Estimate {
 		usage.In = usage.estBytes / 4
 	}
-	return usage, 0
+	return usage, sinceT(r, *firstTouch)
 }
 
 func writeDone(w http.ResponseWriter) {
@@ -1951,7 +1969,7 @@ func (p *Proxy) forwardTranslateFull(w http.ResponseWriter, r *http.Request, cli
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(b)
-	return usage, 0
+	return usage, sinceT(r, *firstTouch)
 }
 
 // forwardError relays an upstream >=400 response in the client's wire shape.

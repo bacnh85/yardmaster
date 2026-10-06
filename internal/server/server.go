@@ -684,12 +684,17 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				"auth_type":         p.Auth.Type,
 				"adaptive_thinking": p.AdaptiveThinking, "inject_cache_control": p.InjectCacheControl,
 				"zcode_signing": p.ZcodeSigning,
+				"start_plan":    p.StartPlan,
 				"extra_headers": p.ExtraHeaders, "body_overrides": p.BodyOverrides,
 				"connections": conns,
 				"accounts":    oauthAccountStates(p, s.Proxy.Pool),
 			})
 		}
 		writeJSON(map[string]any{"providers": out})
+	case path == "zai/login" && r.Method == "POST":
+		s.handleZaiLoginStart(w, r)
+	case path == "zai/login/poll" && r.Method == "GET":
+		s.handleZaiLoginPoll(w, r)
 	case path == "quota" && r.Method == "GET":
 		s.handleQuota(w, r)
 	case path == "live" && r.Method == "GET":
@@ -1151,6 +1156,11 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 					} else {
 						p.ZcodeSigning = x.ZcodeSigning
 					}
+					if f.StartPlan != nil {
+						p.StartPlan = *f.StartPlan
+					} else {
+						p.StartPlan = x.StartPlan
+					}
 					p.Auth.Type = x.Auth.Type // form is static-only; never downgrade oauth
 					p.Auth.OAuth = x.Auth.OAuth
 					p.ModelMap = x.ModelMap
@@ -1240,6 +1250,7 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 				"adaptive_thinking":    p.AdaptiveThinking,
 				"inject_cache_control": p.InjectCacheControl,
 				"zcode_signing":        p.ZcodeSigning,
+				"start_plan":           p.StartPlan,
 			})
 		}
 		writeJSON(map[string]any{
@@ -1427,6 +1438,7 @@ type providerForm struct {
 	AdaptiveThinking   *bool             `json:"adaptive_thinking"`    // nil = omitted (keep stored)
 	InjectCacheControl *bool             `json:"inject_cache_control"` // nil = omitted (keep stored)
 	ZcodeSigning       *bool             `json:"zcode_signing"`        // nil = omitted (keep stored)
+	StartPlan          *bool             `json:"start_plan"`           // nil = omitted (keep stored)
 	ExtraHeaders       map[string]string `json:"extra_headers"`        // nil = omitted (keep stored on update)
 	BodyOverrides      map[string]any    `json:"body_overrides"`       // nil = omitted (keep stored on update)
 }
@@ -1496,6 +1508,7 @@ func (f providerForm) provider() (*config.Provider, error) {
 		AdaptiveThinking:   derefBool(f.AdaptiveThinking),
 		InjectCacheControl: derefBool(f.InjectCacheControl),
 		ZcodeSigning:       derefBool(f.ZcodeSigning),
+		StartPlan:          derefBool(f.StartPlan),
 		ExtraHeaders:       f.ExtraHeaders,
 		BodyOverrides:      f.BodyOverrides,
 	}, nil

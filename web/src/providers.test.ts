@@ -106,7 +106,7 @@ describe("zai preset defaults", () => {
     expect(d.body_overrides).toEqual({ speed: "fast" });
   });
   it("only zai, qwen and classifier entries carry defaults — others create bare providers", () => {
-    for (const r of REGISTRY.filter((r) => r.id !== "zai" && r.id !== "qwen")) {
+    for (const r of REGISTRY.filter((r) => r.id !== "zai" && r.id !== "zai-start" && r.id !== "qwen")) {
       for (const e of r.entries) {
         if (e.wire === "classifier") continue; // curated jev ids ship as defaults
         expect(e.defaults).toBeUndefined();
@@ -124,10 +124,10 @@ const baseRow: ProviderRow = {
 describe("prefix registry", () => {
   it("every registry provider carries a short routing prefix", () => {
     expect(REGISTRY.map((r) => [r.id, r.prefix])).toEqual([
-      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["cmdcode", "cmd"], ["openrouter", "or"], ["typesafe", "jev"], ["ollama", "ol"], ["nvidia", "nv"], ["qwen", "qw"], ["copilot", "cp"],
+      ["opencode-go", "ocg"], ["deepseek", "ds"], ["zai", "zai"], ["zai-start", "zai-start"], ["cmdcode", "cmd"], ["openrouter", "or"], ["typesafe", "jev"], ["ollama", "ol"], ["nvidia", "nv"], ["qwen", "qw"], ["copilot", "cp"],
     ]);
     expect(REGISTRY.map((r) => [r.id, r.code])).toEqual([
-      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["cmdcode", "CC"], ["openrouter", "OR"], ["typesafe", "TS"], ["ollama", "OL"], ["nvidia", "NV"], ["qwen", "QW"], ["copilot", "CP"],
+      ["opencode-go", "OCG"], ["deepseek", "DS"], ["zai", "ZAI"], ["zai-start", "ZAIS"], ["cmdcode", "CC"], ["openrouter", "OR"], ["typesafe", "TS"], ["ollama", "OL"], ["nvidia", "NV"], ["qwen", "QW"], ["copilot", "CP"],
     ]);
   });
 });
@@ -153,7 +153,7 @@ describe("registry", () => {
   });
 
   it("has the providers the product must support", () => {
-    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "copilot", "deepseek", "nvidia", "ollama", "opencode-go", "openrouter", "qwen", "typesafe", "zai"]);
+    expect(REGISTRY.map((r) => r.id).sort()).toEqual(["cmdcode", "copilot", "deepseek", "nvidia", "ollama", "opencode-go", "openrouter", "qwen", "typesafe", "zai", "zai-start"]);
     const zen = REGISTRY.find((r) => r.id === "opencode-go")!;
     expect(zen.entries).toHaveLength(3); // one config provider per wire family
     for (const e of zen.entries) {
