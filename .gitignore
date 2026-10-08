@@ -23,3 +23,6 @@ docs/*
 .pi/
 .private/
 *.log
+
+.DS_Store
+.serena/
