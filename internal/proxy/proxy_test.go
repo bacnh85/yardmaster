@@ -702,9 +702,13 @@ func TestActiveStartIsEpochMillis(t *testing.T) {
 	release := make(chan struct{})
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK) // headers first: Active entry appears once do() returns
-		w.(http.Flusher).Flush()     // ...and actually pushed out, not buffered
-		<-release                    // hold the request in flight so Active keeps the entry
+		w.WriteHeader(http.StatusOK)
+		// do() returns after the first body byte (dead-on-arrival peek), so
+		// emit one event before holding: the Active entry appears once do()
+		// returns and is actually pushed out, not buffered.
+		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		<-release // hold the request in flight so Active keeps the entry
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer up.Close()

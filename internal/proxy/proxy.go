@@ -1188,7 +1188,11 @@ var hopHeaders = []string{
 	"Content-Length",
 }
 
-// do sends the request with a headers timeout; streaming bodies are not bounded.
+// do sends the request with a first-byte timeout: headers_timeout_s covers the
+// response headers AND the first body byte, so a gateway that sends headers
+// then stalls (or hides an error behind HTTP 200) fails the hop and fails over
+// instead of feeding the client a silent empty stream. The remainder of a
+// streaming body is not bounded.
 func (p *Proxy) zcodeManager() *zcode.Manager {
 	p.zcOnce.Do(func() {
 		m := zcode.NewManager(zcode.DefaultIdentity(), nil)
@@ -1223,17 +1227,33 @@ func (p *Proxy) do(tgt *provider.Target, req *http.Request) (*http.Response, err
 	}
 	t := time.AfterFunc(time.Duration(ht)*time.Second, cancel)
 	resp, err := p.clientFor(tgt.Provider).Do(req)
-	t.Stop()
 	if err != nil {
+		t.Stop()
 		cancel()
 		return nil, err
 	}
 	if tgt.Provider.ZcodeSigning {
 		p.zcodeManager().NoteStatus(tgt.APIKey, resp.StatusCode) // 401 ladder, scoped to this credential
 	}
-	// keep cancel alive for the body pump: store in resp via Unwrap? Simplest:
-	// attach to resp.Body via a wrapper that cancels on Close.
-	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
+	// keep cancel alive for the body pump: attach to resp.Body via a wrapper
+	// that cancels on Close.
+	cb := &cancelBody{ReadCloser: resp.Body, cancel: cancel}
+	resp.Body = cb
+	// Dead-on-arrival sniff: gateways that hide failures behind HTTP 200 — a
+	// JSON error envelope (zai-start quota death: {"code":1005,"msg":"exceed
+	// quota limit"}) or an empty body — used to reach the client as a silent
+	// empty stream with no failover. The peek runs under the same timeout
+	// timer, so a body stalled before its first byte dies like a headers
+	// timeout. Servable bodies get their peeked bytes replayed.
+	peeked, perr := peekBodyError(resp)
+	t.Stop()
+	if perr != nil {
+		cb.Close() // closes the raw body and cancels the context
+		return nil, fmt.Errorf("%s: %w", tgt.Provider.Name, perr)
+	}
+	if len(peeked) > 0 {
+		resp.Body = &replayBody{Reader: io.MultiReader(bytes.NewReader(peeked), cb), orig: cb}
+	}
 	return resp, nil
 }
 
@@ -1248,6 +1268,60 @@ func (b *cancelBody) Close() error {
 	b.once.Do(b.cancel)
 	return err
 }
+
+// peekBodyError classifies dead-on-arrival 200 responses: gateways that hide
+// failures behind HTTP 200 — a JSON error envelope (zai-start start-plan
+// quota: {"code":1005,"msg":"exceed quota limit"}) or an empty body — must
+// fail the hop like any transport error so the failover chain runs and the
+// breaker learns, instead of feeding the client a silent empty stream.
+// Returns the peeked prefix to replay (nil when nothing was consumed).
+func peekBodyError(resp *http.Response) ([]byte, error) {
+	if resp.StatusCode >= 400 {
+		return nil, nil // caller-side error path reads the body itself
+	}
+	var buf [512]byte
+	n, err := io.ReadAtLeast(resp.Body, buf[:], 1)
+	if n == 0 {
+		if err == nil {
+			return nil, nil // unreachable per ReadAtLeast contract; be safe
+		}
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("empty 200 body")
+		}
+		return nil, fmt.Errorf("body read: %w", err)
+	}
+	peeked := buf[:n]
+	if peeked[0] != '{' {
+		return peeked, nil // SSE / binary / anything non-JSON: servable
+	}
+	var env struct {
+		Code       json.RawMessage `json:"code"`
+		Msg        string          `json:"msg"`
+		Choices    json.RawMessage `json:"choices"`    // openai success
+		Content    json.RawMessage `json:"content"`    // anthropic success
+		Candidates json.RawMessage `json:"candidates"` // gemini success
+		Data       json.RawMessage `json:"data"`       // wrapped-payload success
+	}
+	if json.Unmarshal(peeked, &env) != nil {
+		return peeked, nil // partial/undecidable prefix — pass through
+	}
+	if len(env.Code) == 0 {
+		return peeked, nil
+	}
+	if len(env.Choices) > 0 || len(env.Content) > 0 || len(env.Candidates) > 0 || len(env.Data) > 0 {
+		return peeked, nil // success-shaped envelope wrapping a payload
+	}
+	return nil, fmt.Errorf("error envelope: code=%s msg=%s", env.Code, env.Msg)
+}
+
+// replayBody prepends bytes already consumed from orig (the do() peek) so
+// consumers see the unbroken stream; Close passes through to orig.
+type replayBody struct {
+	io.Reader
+	orig io.ReadCloser
+}
+
+func (b *replayBody) Close() error { return b.orig.Close() }
 
 // forward writes the upstream response to the client. Returns usage + ttft.
 // reqModel is the natural model id cost accounting prices (combo dispatch
